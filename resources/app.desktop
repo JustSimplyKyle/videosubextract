@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=Videosubextract
+Comment=An application that extracts hard-subs into srt files
+Type=Application
+Icon=com.github.justsimplykyle.videosubextract
+Exec=videosubextract %F
+Terminal=false
+StartupNotify=true
+Categories=COSMIC
+Keywords=COSMIC
+MimeType=
