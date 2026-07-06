@@ -55,10 +55,7 @@ pub enum Message {
     ResetSelection,
     LoadVideo(std::path::PathBuf),
     VideoFrame(RgbaImage),
-    VideoFrameAllocated(
-        widget::image::Handle,
-        Option<iced::advanced::image::Allocation>,
-    ),
+    VideoFrameAllocated(Option<iced::advanced::image::Allocation>),
     VideoSeekForward(Duration),
     VideoSeekBackward(Duration),
     VideoError(String),
@@ -442,11 +439,11 @@ impl cosmic::Application for AppModel {
 
                 // Spawn the allocation Task
                 return iced::runtime::image::allocate(&handle)
-                    .map(move |result| Message::VideoFrameAllocated(handle.clone(), result.ok()))
+                    .map(move |result| Message::VideoFrameAllocated(result.ok()))
                     .map(Into::into);
             }
 
-            Message::VideoFrameAllocated(handle, allocation_opt) => {
+            Message::VideoFrameAllocated(allocation_opt) => {
                 self.is_allocating_frame = false;
                 if let Some(allocation) = allocation_opt {
                     // Only update the UI state AFTER the texture has been uploaded to the GPU!
