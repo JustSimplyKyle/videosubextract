@@ -40,7 +40,6 @@ features = [
     "wgpu",
     # xdg portal dialogs on Linux
     "xdg-portal",
-    "debug",
     "winit",
     "surface-message",
     "multi-window",

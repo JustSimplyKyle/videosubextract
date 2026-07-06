@@ -545,8 +545,8 @@ fn video_frame_stream(
     inner: Arc<InnerPlayer>,
     frame_rate: f64,
 ) -> impl futures::Stream<Item = Message> + Send {
-    // let frame_dur = Duration::from_secs_f64(1.0 / frame_rate.max(1.0));
-    let frame_dur = Duration::from_secs_f64(0.25);
+    let frame_dur = Duration::from_secs_f64(1.0 / frame_rate.max(1.0));
+    // let frame_dur = Duration::from_secs_f64(0.1);
 
     iced::stream::channel(
         2,
@@ -563,7 +563,6 @@ fn video_frame_stream(
                     match iter.next() {
                         Some(Ok(mat)) => match mat_to_image_handle(&mat) {
                             Ok(handle) => {
-                                println!("hihih");
                                 if btx.blocking_send(Message::VideoFrame(handle)).is_err() {
                                     break; // receiver dropped (app closed / video changed)
                                 }

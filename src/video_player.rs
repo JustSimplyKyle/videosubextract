@@ -191,7 +191,6 @@ impl<const STOP_ON_SEEK: bool> Iterator for VideoPlayerIterator<STOP_ON_SEEK> {
         while let Some(Ok((stream, packet))) = state.input.packets().next() {
             // Ignore audio/subtitle packets
             if stream.index() != self.inner.stream_index {
-                println!("packet pts={:?} dts={:?}", packet.pts(), packet.dts());
                 continue;
             }
 
