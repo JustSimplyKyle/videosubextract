@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: MPL-2.0
 
+mod selection_canvas;
+
 use crate::config::Config;
 use crate::video_player::{self, InnerPlayer};
 use crate::{fl, video_player::VideoPlayerController, video_player::VideoPlayerIterator};
 use cosmic::app::context_drawer;
 use cosmic::cosmic_config::{self, CosmicConfigEntry};
 use cosmic::iced::alignment::{Horizontal, Vertical};
-use cosmic::iced::widget::{Stack, canvas};
-use cosmic::iced::{self, Alignment, Color, Length, Point, Subscription, event, futures, mouse};
+use cosmic::iced::widget::Stack;
+use cosmic::iced::{self, Alignment, Length, Subscription, event, futures};
 use cosmic::prelude::*;
 use cosmic::widget::Widget;
 
@@ -36,8 +38,9 @@ pub struct AppModel {
     canvas_dimensions: iced::Rectangle,
     canvas_generation: u32,
     video_controller: Option<VideoPlayerController>,
-    current_video_frame: Option<RgbaImage>,
-    video_texture: Option<widget::image::Handle>,
+    video_allocation: Option<iced::advanced::image::Allocation>,
+    // Track if the GPU is currently busy
+    is_allocating_frame: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -52,494 +55,13 @@ pub enum Message {
     ResetSelection,
     LoadVideo(std::path::PathBuf),
     VideoFrame(RgbaImage),
-    VideoSeek(Duration),
+    VideoFrameAllocated(
+        widget::image::Handle,
+        Option<iced::advanced::image::Allocation>,
+    ),
+    VideoSeekForward(Duration),
+    VideoSeekBackward(Duration),
     VideoError(String),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
-enum ClickState {
-    #[default]
-    WaitingFirst,
-    WaitingSecond(iced::Point),
-    Done,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-enum HandleDrag {
-    #[default]
-    None,
-    Picture,
-    TopLeft,
-    BottomRight,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-enum KeyboardEdge {
-    #[default]
-    Top,
-    Bottom,
-    Left,
-    Right,
-}
-
-impl KeyboardEdge {
-    pub fn get_edge_rectangle(self, bounds: iced::Rectangle, padding: f32) -> iced::Rectangle {
-        let horizontal = iced::Size::new(bounds.width, 1.);
-        let vertical = iced::Size::new(1., bounds.height);
-        match self {
-            Self::Top => {
-                iced::Rectangle::new(iced::Point::new(bounds.x, bounds.y), horizontal)
-                    .expand(iced::Padding::default().vertical(padding)) // was horizontal
-            }
-            Self::Bottom => {
-                iced::Rectangle::new(
-                    iced::Point::new(bounds.x, bounds.y + bounds.height),
-                    horizontal,
-                )
-                .expand(iced::Padding::default().vertical(padding)) // was horizontal
-            }
-            Self::Left => {
-                iced::Rectangle::new(iced::Point::new(bounds.x, bounds.y), vertical)
-                    .expand(iced::Padding::default().horizontal(padding)) // was vertical
-            }
-            Self::Right => {
-                iced::Rectangle::new(
-                    iced::Point::new(bounds.x + bounds.width, bounds.y),
-                    vertical,
-                )
-                .expand(iced::Padding::default().horizontal(padding)) // was vertical
-            }
-        }
-    }
-}
-
-#[derive(Default)]
-struct SelectionCanvas {
-    last_reset_generation: u32,
-    last_bounds: iced::Rectangle,
-    click_state: ClickState,
-    keyboard_edge: Option<KeyboardEdge>,
-    selection: Option<iced::Rectangle>,
-    handle_drag: HandleDrag,
-    drag_anchor: iced::Point,
-    cache: canvas::Cache,
-    drag_start: iced::Point,
-    previous_selection: iced::Rectangle,
-}
-
-#[derive(Default)]
-struct SelectionProgram {
-    reset_generation: u32,
-}
-
-const HANDLE_RADIUS: f32 = 7.0;
-const EDGE_HANDLE: f32 = 5.0;
-
-fn hit_handle(point: iced::Point, handle: iced::Point) -> bool {
-    (point.x - handle.x).abs() <= HANDLE_RADIUS && (point.y - handle.y).abs() <= HANDLE_RADIUS
-}
-fn hit_edge(point: iced::Point, bounds: iced::Rectangle, edge: KeyboardEdge) -> bool {
-    edge.get_edge_rectangle(bounds, EDGE_HANDLE).contains(point)
-}
-
-impl canvas::Program<Message, cosmic::Theme, cosmic::Renderer> for SelectionProgram {
-    type State = SelectionCanvas;
-
-    fn update(
-        &self,
-        state: &mut Self::State,
-        event: &canvas::Event,
-        bounds: iced::Rectangle,
-        cursor: mouse::Cursor,
-    ) -> Option<canvas::Action<Message>> {
-        if self.reset_generation != state.last_reset_generation {
-            *state = SelectionCanvas {
-                last_reset_generation: self.reset_generation,
-                ..SelectionCanvas::default()
-            };
-            state.cache.clear();
-            return Some(canvas::Action::request_redraw());
-        }
-
-        if bounds != state.last_bounds {
-            state.last_bounds = bounds;
-            return Some(canvas::Action::publish(Message::CanvasSize(bounds)));
-        }
-
-        match event {
-            canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
-                let pos = cursor.position_in(bounds)?;
-
-                match state.click_state {
-                    ClickState::Done => {
-                        if let Some(sel) = state.selection {
-                            let tl = iced::Point::new(sel.x, sel.y);
-                            let br = iced::Point::new(sel.x + sel.width, sel.y + sel.height);
-
-                            let edges = [
-                                KeyboardEdge::Top,
-                                KeyboardEdge::Bottom,
-                                KeyboardEdge::Left,
-                                KeyboardEdge::Right,
-                            ];
-
-                            if hit_handle(pos, tl) {
-                                state.handle_drag = HandleDrag::TopLeft;
-                                state.drag_anchor = br;
-                            } else if hit_handle(pos, br) {
-                                state.handle_drag = HandleDrag::BottomRight;
-                                state.drag_anchor = tl;
-                            } else if let Some(x) = edges
-                                .iter()
-                                .find(|&&x| hit_edge(pos, state.selection.unwrap_or_default(), x))
-                            {
-                                state.keyboard_edge = Some(*x);
-                            } else if sel.contains(pos) {
-                                state.handle_drag = HandleDrag::Picture;
-                                state.drag_start = pos;
-                                state.previous_selection = sel;
-                            } else if !sel.contains(pos) {
-                                state.keyboard_edge = None;
-                            } else {
-                                return None;
-                            }
-                            state.cache.clear();
-                            return Some(canvas::Action::request_redraw());
-                        }
-                        None
-                    }
-
-                    ClickState::WaitingFirst => {
-                        state.click_state = ClickState::WaitingSecond(pos);
-                        state.selection =
-                            Some(iced::Rectangle::new(pos, iced::Size::new(1.0, 1.0)));
-                        state.cache.clear();
-                        Some(canvas::Action::request_redraw())
-                    }
-
-                    ClickState::WaitingSecond(first) => {
-                        let x = first.x.min(pos.x);
-                        let y = first.y.min(pos.y);
-                        let w = (first.x - pos.x).abs().max(1.0);
-                        let h = (first.y - pos.y).abs().max(1.0);
-                        let rect =
-                            iced::Rectangle::new(iced::Point::new(x, y), iced::Size::new(w, h));
-                        state.selection = Some(rect);
-                        state.click_state = ClickState::Done;
-                        state.cache.clear();
-                        Some(canvas::Action::publish(Message::ScreenshotRegion(Some(
-                            rect,
-                        ))))
-                    }
-                }
-            }
-
-            canvas::Event::Mouse(mouse::Event::CursorMoved { position }) => {
-                if let ClickState::WaitingSecond(first) = state.click_state {
-                    let pos = cursor.position_in(bounds).unwrap_or(*position);
-                    let x = first.x.min(pos.x);
-                    let y = first.y.min(pos.y);
-                    let w = (first.x - pos.x).abs().max(1.0);
-                    let h = (first.y - pos.y).abs().max(1.0);
-                    state.selection = Some(iced::Rectangle::new(
-                        iced::Point::new(x, y),
-                        iced::Size::new(w, h),
-                    ));
-                    state.cache.clear();
-                    return Some(canvas::Action::request_redraw());
-                }
-
-                if state.handle_drag != HandleDrag::None {
-                    let pos = cursor.position_in(bounds)?;
-                    let anchor = state.drag_anchor;
-
-                    let (point, size) = match state.handle_drag {
-                        HandleDrag::TopLeft => {
-                            let x = pos.x.min(anchor.x);
-                            let y = pos.y.min(anchor.y);
-                            let width = (anchor.x - pos.x).abs().max(1.0);
-                            let height = (anchor.y - pos.y).abs().max(1.0);
-                            (iced::Point { x, y }, iced::Size { width, height })
-                        }
-                        HandleDrag::BottomRight => {
-                            let x = pos.x.min(anchor.x);
-                            let y = pos.y.min(anchor.y);
-                            let width = (pos.x - anchor.x).abs().max(1.0);
-                            let height = (anchor.y - pos.y).abs().max(1.0);
-                            (iced::Point { x, y }, iced::Size { width, height })
-                        }
-                        HandleDrag::Picture => {
-                            let dx = pos.x - state.drag_start.x;
-                            let dy = pos.y - state.drag_start.y;
-                            let init = state.previous_selection;
-                            let x = (init.x + dx).clamp(0.0, bounds.width - init.width);
-                            let y = (init.y + dy).clamp(0.0, bounds.height - init.height);
-                            (iced::Point::new(x, y), init.size())
-                        }
-                        HandleDrag::None => unreachable!(),
-                    };
-
-                    state.selection = Some(iced::Rectangle::new(point, size));
-                    state.cache.clear();
-                    return Some(canvas::Action::publish(Message::ScreenshotRegion(
-                        state.selection,
-                    )));
-                }
-
-                None
-            }
-
-            canvas::Event::Keyboard(iced::keyboard::Event::KeyPressed {
-                key,
-                repeat,
-                modifiers,
-                ..
-            }) => {
-                use iced::{
-                    Padding,
-                    keyboard::{Key, Modifiers, key::Named},
-                };
-
-                let base_amount = match *modifiers {
-                    Modifiers::CTRL => 5.,
-                    Modifiers::SHIFT => 10.,
-                    _ => 1.,
-                };
-
-                let amount = if *repeat {
-                    base_amount * 2.5
-                } else {
-                    base_amount
-                };
-
-                let Some(keyboard_edge) = state.keyboard_edge else {
-                    let horizontal = iced::Vector::new(1., 0.);
-                    let vertical = iced::Vector::new(0., 1.);
-
-                    let selection = state.selection?;
-
-                    let point = Point {
-                        x: selection.x,
-                        y: selection.y,
-                    };
-                    let mut point = match key {
-                        Key::Named(Named::ArrowUp) => point + vertical * amount * -1.,
-                        Key::Named(Named::ArrowDown) => point + vertical * amount,
-                        Key::Named(Named::ArrowLeft) => point + horizontal * amount * -1.,
-                        Key::Named(Named::ArrowRight) => point + horizontal * amount,
-                        _ => {
-                            return None;
-                        }
-                    };
-                    point.x = point.x.clamp(0., bounds.width - selection.width);
-                    point.y = point.y.clamp(0., bounds.height - selection.height);
-
-                    state.selection = Some(iced::Rectangle::new(point, selection.size()));
-                    state.cache.clear();
-                    return Some(canvas::Action::publish(Message::ScreenshotRegion(
-                        state.selection,
-                    )));
-                };
-                let (delta, padding) = match (key, keyboard_edge) {
-                    (Key::Named(Named::ArrowUp), KeyboardEdge::Top) => {
-                        (1, Padding::default().top(amount))
-                    }
-                    (Key::Named(Named::ArrowDown), KeyboardEdge::Top) => {
-                        (-1, Padding::default().top(amount))
-                    }
-                    (Key::Named(Named::ArrowUp), KeyboardEdge::Bottom) => {
-                        (-1, Padding::default().bottom(amount))
-                    }
-                    (Key::Named(Named::ArrowDown), KeyboardEdge::Bottom) => {
-                        (1, Padding::default().bottom(amount))
-                    }
-                    (Key::Named(Named::ArrowLeft), KeyboardEdge::Left) => {
-                        (1, Padding::default().left(amount))
-                    }
-                    (Key::Named(Named::ArrowRight), KeyboardEdge::Left) => {
-                        (-1, Padding::default().left(amount))
-                    }
-                    (Key::Named(Named::ArrowLeft), KeyboardEdge::Right) => {
-                        (-1, Padding::default().right(amount))
-                    }
-                    (Key::Named(Named::ArrowRight), KeyboardEdge::Right) => {
-                        (1, Padding::default().right(amount))
-                    }
-                    _ => return None,
-                };
-
-                let s = state.selection.as_mut()?;
-
-                *s = if delta > 0 {
-                    s.expand(padding)
-                } else {
-                    s.shrink(padding)
-                };
-
-                state.cache.clear();
-
-                Some(canvas::Action::publish(Message::ScreenshotRegion(
-                    state.selection,
-                )))
-            }
-
-            canvas::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
-                if state.handle_drag != HandleDrag::None {
-                    state.handle_drag = HandleDrag::None;
-                    return Some(canvas::Action::publish(Message::ScreenshotRegion(
-                        state.selection,
-                    )));
-                }
-                None
-            }
-
-            canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Right)) => {
-                state.selection = None;
-                state.click_state = ClickState::WaitingFirst;
-                state.handle_drag = HandleDrag::None;
-                state.cache.clear();
-                Some(canvas::Action::publish(Message::ScreenshotRegion(None)))
-            }
-
-            _ => None,
-        }
-    }
-
-    fn draw(
-        &self,
-        state: &Self::State,
-        renderer: &cosmic::Renderer,
-        _theme: &cosmic::Theme,
-        bounds: iced::Rectangle,
-        _cursor: mouse::Cursor,
-    ) -> Vec<canvas::Geometry> {
-        let geometry = state.cache.draw(renderer, bounds.size(), |frame| {
-            if let Some(selection) = state.selection {
-                let dim = iced::Color::from_rgba(0.0, 0.0, 0.0, 0.35);
-                let rects = [
-                    (selection.y > 0.0).then_some((
-                        iced::Point::ORIGIN,
-                        iced::Size::new(bounds.width, selection.y),
-                    )),
-                    (selection.y + selection.height < bounds.height).then_some((
-                        iced::Point::new(0.0, selection.y + selection.height),
-                        iced::Size::new(
-                            bounds.width,
-                            bounds.height - selection.y - selection.height,
-                        ),
-                    )),
-                    (selection.x > 0.0).then_some((
-                        iced::Point::new(0.0, selection.y),
-                        iced::Size::new(selection.x, selection.height),
-                    )),
-                    (selection.x + selection.width < bounds.width).then_some((
-                        iced::Point::new(selection.x + selection.width, selection.y),
-                        iced::Size::new(
-                            bounds.width - selection.x - selection.width,
-                            selection.height,
-                        ),
-                    )),
-                ];
-                for rect in rects.into_iter().flatten() {
-                    frame.fill_rectangle(rect.0, rect.1, dim);
-                }
-
-                let border_color = Color::from_rgb(1.0, 0.0, 0.0);
-                frame.stroke_rectangle(
-                    selection.position(),
-                    selection.size(),
-                    canvas::Stroke::default()
-                        .with_width(2.0)
-                        .with_color(border_color),
-                );
-
-                if let Some(edge) = state
-                    .keyboard_edge
-                    .map(|x| x.get_edge_rectangle(selection, 0.))
-                {
-                    frame.stroke_rectangle(
-                        Point {
-                            x: edge.x,
-                            y: edge.y,
-                        },
-                        edge.size(),
-                        canvas::Stroke::default()
-                            .with_width(2.0)
-                            .with_color(Color::from_rgb(0.0, 1.0, 0.0)),
-                    );
-                }
-
-                if matches!(state.click_state, ClickState::Done) {
-                    let handle_size = HANDLE_RADIUS * 2.0;
-                    let half = HANDLE_RADIUS;
-                    let handle_color = iced::Color::WHITE;
-
-                    let tl = iced::Point::new(selection.x - half, selection.y - half);
-                    let br = iced::Point::new(
-                        selection.x + selection.width - half,
-                        selection.y + selection.height - half,
-                    );
-
-                    for corner in [tl, br] {
-                        let size = iced::Size::new(handle_size, handle_size);
-                        frame.fill_rectangle(corner, size, handle_color);
-                        frame.stroke_rectangle(
-                            corner,
-                            size,
-                            canvas::Stroke::default()
-                                .with_width(1.5)
-                                .with_color(border_color),
-                        );
-                    }
-                }
-            } else {
-                frame.fill_rectangle(
-                    iced::Point::ORIGIN,
-                    bounds.size(),
-                    iced::Color::from_rgba(0.0, 0.0, 0.0, 0.15),
-                );
-            }
-        });
-
-        vec![geometry]
-    }
-
-    fn mouse_interaction(
-        &self,
-        state: &Self::State,
-        bounds: iced::Rectangle,
-        cursor: mouse::Cursor,
-    ) -> mouse::Interaction {
-        if !cursor.is_over(bounds) {
-            return mouse::Interaction::default();
-        }
-
-        match state.click_state {
-            ClickState::WaitingFirst | ClickState::WaitingSecond(_) => {
-                mouse::Interaction::Crosshair
-            }
-            ClickState::Done => {
-                let Some(sel) = state.selection else {
-                    return mouse::Interaction::default();
-                };
-                let Some(pos) = cursor.position_in(bounds) else {
-                    return mouse::Interaction::default();
-                };
-                let tl = iced::Point::new(sel.x, sel.y);
-                let br = iced::Point::new(sel.x + sel.width, sel.y + sel.height);
-                if hit_handle(pos, tl) || hit_handle(pos, br) {
-                    return mouse::Interaction::Grab;
-                } else if sel.contains(pos) {
-                    return if state.handle_drag == HandleDrag::Picture {
-                        mouse::Interaction::Grabbing
-                    } else {
-                        mouse::Interaction::Move
-                    };
-                }
-                mouse::Interaction::default()
-            }
-        }
-    }
 }
 
 impl cosmic::Application for AppModel {
@@ -609,8 +131,9 @@ impl cosmic::Application for AppModel {
                 height: 1.,
             },
             video_controller: None,
-            current_video_frame: None,
-            video_texture: None,
+            // current_video_frame: None,
+            video_allocation: None,
+            is_allocating_frame: false,
         };
 
         let command = app.update_title();
@@ -684,9 +207,13 @@ impl cosmic::Application for AppModel {
                     .align_y(Alignment::End)
                     .spacing(space_s);
 
-                let full_img_handle = self.video_texture.as_ref().map_or_else(
-                    || widget::image::Handle::from_path("test-2.png"),
-                    |texture| texture.clone(),
+                let full_img_handle = self.video_allocation.as_ref().map_or_else(
+                    || {
+                        Box::leak(Box::new(iced::widget::image::Handle::from_path(
+                            "test-2.png",
+                        )))
+                    },
+                    iced::advanced::image::Allocation::handle,
                 );
 
                 let (img_width, img_height) = match &full_img_handle {
@@ -703,7 +230,7 @@ impl cosmic::Application for AppModel {
 
                 let full_img = widget::image(full_img_handle.clone());
 
-                let canvas_widget = widget::canvas(SelectionProgram {
+                let canvas_widget = widget::canvas(selection_canvas::SelectionProgram {
                     reset_generation: self.canvas_generation,
                 })
                 .width(Length::Fill)
@@ -726,22 +253,33 @@ impl cosmic::Application for AppModel {
                     let w = (ele.width / scale).clamp(1.0, img_w - x);
                     let h = (ele.height / scale).clamp(1.0, img_h - y);
 
-                    full_img.crop(iced::Rectangle {
-                        x: x as u32,
-                        y: y as u32,
-                        width: w as u32,
-                        height: h as u32,
-                    })
+                    full_img
+                        .crop(iced::Rectangle {
+                            x: x as u32,
+                            y: y as u32,
+                            width: w as u32,
+                            height: h as u32,
+                        })
+                        .width(Length::Shrink)
+                        .height(Length::Shrink)
                 });
 
-                let full_img = widget::image(full_img_handle);
+                let full_img = widget::image(full_img_handle)
+                    .width(Length::Fill)
+                    .height(Length::Shrink);
                 let full_img = Stack::new().push(full_img).push(canvas_widget);
 
                 let reset_btn =
                     widget::button::text("Reset Selection").on_press(Message::ResetSelection);
 
                 let load_video = widget::button::text("Load Video")
-                    .on_press(Message::LoadVideo("subtitle2.mkv".into()));
+                    .on_press(Message::LoadVideo("with_subtitle.mkv".into()));
+
+                let skip_backward = widget::button::text("Backwards 5")
+                    .on_press(Message::VideoSeekBackward(Duration::from_secs(5)));
+
+                let skip_forward = widget::button::text("Forward 5")
+                    .on_press(Message::VideoSeekForward(Duration::from_secs(5)));
 
                 let selection_label = match self.screenshot_selection {
                     Some(r) => format!(
@@ -758,7 +296,9 @@ impl cosmic::Application for AppModel {
                     widget::row! {
                         load_video,
                         reset_btn,
-                        widget::text(selection_label)
+                        widget::text(selection_label),
+                        skip_backward,
+                        skip_forward
                     }
                     .spacing(space_s)
                     .align_y(Alignment::Center)
@@ -873,10 +413,10 @@ impl cosmic::Application for AppModel {
                 match ffmpeg::format::input(&path) {
                     Ok(input) => match video_player::create_video_player::<false>(input, None) {
                         Ok((controller, _iter)) => {
+                            controller.seek_forward(Duration::from_mins(6)).unwrap();
                             // _iter is intentionally dropped; the subscription creates its own
                             // from the shared Arc<InnerPlayer> inside the controller.
                             self.video_controller = Some(controller);
-                            self.current_video_frame = None;
                         }
                         Err(e) => eprintln!("video_player init error: {e}"),
                     },
@@ -885,19 +425,47 @@ impl cosmic::Application for AppModel {
             }
 
             Message::VideoFrame(frame) => {
-                println!("hi");
+                // If the GPU is still busy allocating the last frame,
+                // drop this frame to let the UI breathe and keep playback synced.
+                if self.is_allocating_frame {
+                    println!("ui overdrive");
+                    return Task::none();
+                }
 
-                self.video_texture = Some(widget::image::Handle::from_rgba(
+                self.is_allocating_frame = true;
+
+                let handle = widget::image::Handle::from_rgba(
                     frame.width(),
                     frame.height(),
-                    frame.to_vec(),
-                ));
-                self.current_video_frame = Some(frame);
+                    frame.into_raw(),
+                );
+
+                // Spawn the allocation Task
+                return iced::runtime::image::allocate(&handle)
+                    .map(move |result| Message::VideoFrameAllocated(handle.clone(), result.ok()))
+                    .map(Into::into);
             }
 
-            Message::VideoSeek(duration) => {
+            Message::VideoFrameAllocated(handle, allocation_opt) => {
+                self.is_allocating_frame = false;
+                if let Some(allocation) = allocation_opt {
+                    // Only update the UI state AFTER the texture has been uploaded to the GPU!
+                    // This eliminates the 1-frame flickering gap.
+                    self.video_allocation = Some(allocation);
+                } else {
+                    eprintln!("Failed to allocate video frame on GPU");
+                }
+            }
+            Message::VideoSeekForward(duration) => {
                 if let Some(ref controller) = self.video_controller {
-                    if let Err(e) = controller.seek(duration) {
+                    if let Err(e) = controller.seek_forward(duration) {
+                        eprintln!("seek error: {e}");
+                    }
+                }
+            }
+            Message::VideoSeekBackward(duration) => {
+                if let Some(ref controller) = self.video_controller {
+                    if let Err(e) = controller.seek_backward(duration) {
                         eprintln!("seek error: {e}");
                     }
                 }
@@ -906,7 +474,6 @@ impl cosmic::Application for AppModel {
             Message::VideoError(msg) => {
                 eprintln!("video error: {msg}");
                 self.video_controller = None;
-                self.current_video_frame = None;
             }
         }
         Task::none()

@@ -1,8 +1,8 @@
 use cosmic::iced;
 use eyre::{Context, ContextCompat};
 use ffmpeg_the_third::{
-    self as ffmpeg, codec,
-    ffi::AV_TIME_BASE,
+    self as ffmpeg, Packet, Rescale, codec,
+    ffi::{AV_TIME_BASE, av_rescale_q},
     filter::Graph,
     format::Pixel,
     frame::Video,
@@ -118,9 +118,29 @@ pub fn create_video_player<const STOP_ON_SEEK: bool>(
     ))
 }
 
+#[derive(Copy, Clone, Debug)]
+enum Direction {
+    Forward,
+    Backward,
+}
+
 impl VideoPlayerController {
-    pub fn seek(&self, duration: Duration) -> eyre::Result<()> {
-        let target_us = (duration.as_secs_f64() * AV_TIME_BASE as f64) as i64;
+    fn seek(&self, delta: Duration, direction: Direction) -> eyre::Result<()> {
+        println!("attempt seeking {:2}s", delta.as_secs_f64());
+        let current_secs = self
+            .inner
+            .current_frame
+            .load(std::sync::atomic::Ordering::Relaxed) as f64
+            / self.inner.info.frame_rate;
+
+        let target_secs = match direction {
+            Direction::Forward => current_secs + delta.as_secs_f64(),
+            Direction::Backward => (current_secs - delta.as_secs_f64()).max(0.),
+        };
+
+        let target_us = (target_secs * f64::from(AV_TIME_BASE)) as i64;
+
+        println!("target: {target_us}");
 
         let mut state = self
             .inner
@@ -128,18 +148,25 @@ impl VideoPlayerController {
             .lock()
             .map_err(|_| eyre::eyre!("lock poisoned"))?;
 
+        println!("got locked");
+
         state.input.seek(target_us, i64::MIN..=target_us)?;
         state.decoder.flush();
 
         self.inner.current_frame.store(
-            (duration.as_secs_f64() * self.inner.info.frame_rate) as usize,
+            (target_secs * self.inner.info.frame_rate) as usize,
             std::sync::atomic::Ordering::Relaxed,
         );
         state.seek_generation += 1;
 
         drop(state);
-
         Ok(())
+    }
+    pub fn seek_forward(&self, delta: Duration) -> eyre::Result<()> {
+        self.seek(delta, Direction::Forward)
+    }
+    pub fn seek_backward(&self, delta: Duration) -> eyre::Result<()> {
+        self.seek(delta, Direction::Backward)
     }
 }
 
@@ -164,6 +191,7 @@ impl<const STOP_ON_SEEK: bool> Iterator for VideoPlayerIterator<STOP_ON_SEEK> {
         while let Some(Ok((stream, packet))) = state.input.packets().next() {
             // Ignore audio/subtitle packets
             if stream.index() != self.inner.stream_index {
+                println!("packet pts={:?} dts={:?}", packet.pts(), packet.dts());
                 continue;
             }
 
