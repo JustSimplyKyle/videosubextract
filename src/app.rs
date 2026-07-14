@@ -5,7 +5,7 @@ mod selection_canvas;
 use crate::OCR;
 use crate::config::Config;
 use crate::subfinder::{Params, SubtitleSearch};
-use crate::video_player::{self, InnerPlayer, create_video_player};
+use crate::video_player::{self, InnerPlayer, VideoFrame, create_video_player};
 use crate::{fl, video_player::VideoPlayerController, video_player::VideoPlayerIterator};
 use cosmic::app::context_drawer;
 use cosmic::cosmic_config::{self, CosmicConfigEntry};
@@ -23,6 +23,8 @@ use opencv::core::{MatTraitConst, MatTraitConstManual};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
+
+use rfd::AsyncFileDialog;
 
 const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
 const APP_ICON: &[u8] = include_bytes!("../resources/icons/hicolor/scalable/apps/icon.svg");
@@ -64,8 +66,8 @@ pub struct SubtitleStatus {
 
 impl SubtitleStatus {
     /// Converts frame numbers to an SRT timestamp: `HH:MM:SS,mmm`
-    fn frame_to_srt_timestamp(frame: usize, fps: f64) -> String {
-        let total_ms = (frame as f64 / fps * 1000.0).round() as u64;
+    fn frame_to_srt_timestamp(frame: Duration) -> String {
+        let total_ms = frame.as_millis();
         let ms = total_ms % 1000;
         let s = (total_ms / 1000) % 60;
         let m = (total_ms / 60_000) % 60;
@@ -73,21 +75,24 @@ impl SubtitleStatus {
         format!("{h:02}:{m:02}:{s:02},{ms:03}")
     }
 
-    pub fn to_srt(&self, fps: f64) -> String {
+    pub fn to_srt(&self) -> String {
+        use std::fmt::Write;
+
         self.results
             .iter()
             .enumerate()
             .fold(String::new(), |mut out, (i, r)| {
-                let start = Self::frame_to_srt_timestamp(r.start_frame, fps);
-                let end = Self::frame_to_srt_timestamp(r.end_frame, fps);
+                let start = Self::frame_to_srt_timestamp(r.start_timestamp);
+                let end = Self::frame_to_srt_timestamp(r.end_timestamp);
                 // SRT indices are 1-based
-                out.push_str(&format!(
+                let _ = write!(
+                    out,
                     "{}\n{} --> {}\n{}\n\n",
                     i + 1,
                     start,
                     end,
                     r.text.trim()
-                ));
+                );
                 out
             })
     }
@@ -97,12 +102,13 @@ impl SubtitleStatus {
 pub enum Message {
     LaunchUrl(String),
     ToggleContextPage(ContextPage),
-    ToggleWatch,
     ScreenshotRegion(Option<iced::Rectangle>),
     CanvasSize(iced::Rectangle),
     UpdateConfig(Config),
     WatchTick(u32),
     ResetSelection,
+    PickVideo,
+    VideoFilePicked(Option<std::path::PathBuf>),
     LoadVideo(std::path::PathBuf),
     VideoFrame(RgbaImage),
     VideoFrameAllocated(Option<(iced::advanced::image::Allocation, iced::Size)>),
@@ -110,14 +116,15 @@ pub enum Message {
     VideoSeekBackward(Duration),
     VideoError(String),
     ConvertToSrt,
+    SrtSaved(Option<std::path::PathBuf>),
     StartSubtitleDisplay(std::path::PathBuf),
     SubtitleProgress {
         frame: usize,
         preview: RgbaImage,
     },
     SubtitleEventFound {
-        start_frame: usize,
-        end_frame: usize,
+        start_timestamp: Duration,
+        end_timestamp: Duration,
         text: String,
         preview: RgbaImage,
     },
@@ -309,17 +316,28 @@ impl cosmic::Application for AppModel {
                     .on_press(Message::ResetSelection)
                     .class(cosmic::theme::Button::Destructive);
 
-                let load_video = widget::button::text("Load Video")
-                    .on_press(Message::LoadVideo("with_subtitle.mkv".into()))
-                    .class(cosmic::theme::Button::Standard);
+                let load_video = widget::button::text(if self.video_path.is_none() {
+                    "Load Video"
+                } else {
+                    "Change Video"
+                })
+                .on_press(Message::PickVideo);
 
-                let skip_backward = widget::button::text("Backwards 5")
-                    .on_press(Message::VideoSeekBackward(Duration::from_secs(5)))
-                    .class(cosmic::theme::Button::NavToggle);
+                let load_video = if self.video_path.is_none() {
+                    load_video.class(cosmic::theme::Button::Suggested)
+                } else {
+                    load_video.class(cosmic::theme::Button::Standard)
+                };
 
-                let skip_forward = widget::button::text("Forward 5")
-                    .on_press(Message::VideoSeekForward(Duration::from_secs(5)))
-                    .class(cosmic::theme::Button::NavToggle);
+                let skip_backward =
+                    widget::button::icon(icon::from_name("media-seek-backward-symbolic"))
+                        .on_press(Message::VideoSeekBackward(Duration::from_secs(5)))
+                        .class(cosmic::theme::Button::NavToggle);
+
+                let skip_forward =
+                    widget::button::icon(icon::from_name("media-seek-forward-symbolic"))
+                        .on_press(Message::VideoSeekForward(Duration::from_secs(5)))
+                        .class(cosmic::theme::Button::NavToggle);
 
                 let selection_label = self
                     .screenshot_selection_scaled
@@ -335,17 +353,14 @@ impl cosmic::Application for AppModel {
                     .apply(widget::text)
                     .class(cosmic::theme::Text::Accent);
 
-                let find_subs = self
-                    .video_path
-                    .as_ref()
-                    .map_or_else(
-                        || widget::button::text("Find Subtitles"),
-                        |p| {
-                            widget::button::text("Find Subtitles")
-                                .on_press(Message::StartSubtitleDisplay(p.clone()))
-                        },
-                    )
-                    .class(cosmic::theme::Button::Suggested);
+                let find_subs = widget::button::text("Find Subtitles");
+                let find_subs = if let Some(p) = &self.video_path {
+                    find_subs
+                        .on_press(Message::StartSubtitleDisplay(p.clone()))
+                        .class(cosmic::theme::Button::Suggested)
+                } else {
+                    find_subs
+                };
 
                 widget::column! {
                     header,
@@ -376,18 +391,53 @@ impl cosmic::Application for AppModel {
                     .align_y(Alignment::End)
                     .spacing(space_s);
 
-                let status_text = if self.subtitle.done {
-                    format!(
+                let fps = self.video_frame_rate.max(1.0);
+
+                let status: Element<_> = if self.subtitle.done {
+                    widget::text(format!(
                         "Complete — {} subtitle(s) found",
                         self.subtitle.results.len()
-                    )
+                    ))
+                    .class(cosmic::theme::Text::Accent)
+                    .into()
                 } else if self.subtitle.search_active {
-                    format!("Scanning… frame {}", self.subtitle.current_frame)
-                } else {
-                    "No active search. Load a video and select a subtitle region on Page Prepare."
+                    let current_sec = self.subtitle.current_frame as f64 / fps;
+                    let elapsed_string = format!(
+                        "{:02.0}:{:02.0}:{:02.0}",
+                        (current_sec / 3600.0),
+                        ((current_sec % 3600.0) / 60.0),
+                        (current_sec % 60.0)
+                    );
+
+                    let status_text = widget::text(format!(
+                        "Scanning... Elapsed: {} (frame {})",
+                        elapsed_string, self.subtitle.current_frame
+                    ))
+                    .class(cosmic::theme::Text::Accent);
+
+                    let progress_bar = widget::progress_bar::determinate_linear(
+                        self.subtitle.current_frame as f32
+                            / self
+                                .video_controller
+                                .as_ref()
+                                .map(|x| x.inner.info.total_frames)
+                                .unwrap_or_default() as f32,
+                    )
+                    .width(Length::Fill);
+
+                    widget::row!(status_text, progress_bar)
+                        .spacing(space_s)
+                        .align_y(Alignment::Center)
+                        .width(Length::Fill)
                         .into()
+                } else {
+                    widget::text(
+                        "No active search. Load a video and select a subtitle region on Page Prepare.",
+                    )
+                    .class(cosmic::theme::Text::Accent)
+                    .into()
                 };
-                let status = widget::text(status_text).class(cosmic::theme::Text::Accent);
+
                 let to_srt = widget::button::text("Convert to srt")
                     .class(cosmic::theme::Button::Suggested)
                     .on_press_maybe(
@@ -401,18 +451,15 @@ impl cosmic::Application for AppModel {
                     .results
                     .iter()
                     .fold(widget::grid(), |grid, r| {
-                        let t_start = r.start_frame as f64 / fps;
-                        let t_end = r.end_frame as f64 / fps;
+                        let t_start = r.start_timestamp.as_secs_f64();
+                        let t_end = r.end_timestamp.as_secs_f64();
 
                         let img = widget::image(r.preview.clone())
                             .content_fit(iced::ContentFit::Contain)
                             .width(Length::Shrink) // grid column 0 determines the width; all cells inherit it
                             .height(Length::Shrink);
 
-                        let timeline = widget::text(format!(
-                            "{:.1}s – {:.1}s  (frames {} – {})",
-                            t_start, t_end, r.start_frame, r.end_frame,
-                        ));
+                        let timeline = widget::text(format!("{:.1}s – {:.1}s", t_start, t_end,));
 
                         let ocr = widget::text(r.text.trim()).class(cosmic::theme::Text::Accent);
 
@@ -455,7 +502,7 @@ impl cosmic::Application for AppModel {
             .height(Length::Fill)
             .apply(widget::container)
             .width(Length::Fill)
-            .padding([0, 20])
+            .padding([0, 50])
             .align_x(Horizontal::Center)
             .align_y(Vertical::Center)
             .into()
@@ -516,10 +563,6 @@ impl cosmic::Application for AppModel {
                 self.time = time;
             }
 
-            Message::ToggleWatch => {
-                self.watch_is_active = !self.watch_is_active;
-            }
-
             Message::ToggleContextPage(context_page) => {
                 if self.context_page == context_page {
                     self.core.window.show_context = !self.core.window.show_context;
@@ -550,6 +593,29 @@ impl cosmic::Application for AppModel {
             Message::CanvasSize(rectangle) => {
                 self.canvas_dimensions = rectangle;
             }
+
+            Message::PickVideo => {
+                return Task::perform(
+                    async {
+                        let file = AsyncFileDialog::new()
+                            .add_filter(
+                                "Video",
+                                &["mkv", "mp4", "avi", "mov", "webm", "flv", "wmv"],
+                            )
+                            .pick_file()
+                            .await;
+                        file.map(|f| f.path().to_path_buf())
+                    },
+                    Message::VideoFilePicked,
+                )
+                .map(Into::into);
+            }
+
+            Message::VideoFilePicked(Some(path)) => {
+                return self.update(Message::LoadVideo(path));
+            }
+            Message::VideoFilePicked(None) => {}
+
             Message::LoadVideo(path) => {
                 match ffmpeg::format::input(&path) {
                     Ok(input) => match video_player::create_video_player::<false>(input, None) {
@@ -647,14 +713,14 @@ impl cosmic::Application for AppModel {
             }
 
             Message::SubtitleEventFound {
-                start_frame,
-                end_frame,
+                start_timestamp: start_frame,
+                end_timestamp: end_frame,
                 text,
                 preview,
             } => {
                 self.subtitle.results.push(SubtitleResult {
-                    start_frame,
-                    end_frame,
+                    start_timestamp: start_frame,
+                    end_timestamp: end_frame,
                     text,
                     preview: widget::image::Handle::from_rgba(
                         preview.width(),
@@ -675,11 +741,28 @@ impl cosmic::Application for AppModel {
                 self.subtitle.search_active = false;
             }
             Message::ConvertToSrt => {
-                let srt = self.subtitle.to_srt(self.video_frame_rate);
-                if let Err(e) = std::fs::write("output.srt", srt) {
-                    eprintln!("error writing to srt file {e}");
-                }
+                let srt = self.subtitle.to_srt();
+                return Task::perform(
+                    async move {
+                        let file = AsyncFileDialog::new()
+                            .add_filter("Subtitle", &["srt"])
+                            .set_file_name("output.srt")
+                            .set_directory("./")
+                            .save_file()
+                            .await;
+
+                        file.map(|f| {
+                            if let Err(e) = std::fs::write(f.path(), srt) {
+                                eprintln!("error writing to srt file {e}");
+                            }
+                            f.path().to_path_buf()
+                        })
+                    },
+                    Message::SrtSaved,
+                )
+                .map(Into::into);
             }
+            Message::SrtSaved(_) => {}
         }
         if needs_recompute {
             self.recompute_scaled_selection();
@@ -777,8 +860,8 @@ impl menu::action::MenuAction for MenuAction {
 
 #[derive(Clone, Debug)]
 pub struct SubtitleResult {
-    pub start_frame: usize,
-    pub end_frame: usize,
+    pub start_timestamp: Duration,
+    pub end_timestamp: Duration,
     pub text: String,
     pub preview: widget::image::Handle,
 }
@@ -791,14 +874,14 @@ struct ProgressIter<I> {
     interval: usize,
 }
 
-impl<I: Iterator<Item = opencv::core::Mat>> Iterator for ProgressIter<I> {
-    type Item = opencv::core::Mat;
+impl<I: Iterator<Item = VideoFrame>> Iterator for ProgressIter<I> {
+    type Item = VideoFrame;
 
     fn next(&mut self) -> Option<Self::Item> {
         let mat = self.inner.next()?;
         self.count += 1;
         if self.count.is_multiple_of(self.interval) {
-            if let Ok(rgba) = mat_to_image_handle(&mat) {
+            if let Ok(rgba) = mat_to_image_handle(&mat.mat) {
                 // try_send: progress frames are display-only, drop them if the
                 // channel is full rather than stalling the search thread.
                 let _ = self.tx.try_send(Message::SubtitleProgress {
@@ -873,8 +956,8 @@ fn subtitle_search_stream(
                         });
 
                     let msg = Message::SubtitleEventFound {
-                        start_frame: event.start_frame,
-                        end_frame: event.end_frame,
+                        start_timestamp: event.start_timestamp,
+                        end_timestamp: event.end_timestamp,
                         text,
                         preview,
                     };
@@ -937,7 +1020,7 @@ fn video_frame_stream(
                 loop {
                     let t = std::time::Instant::now();
                     match iter.next() {
-                        Some(Ok(mat)) => match mat_to_image_handle(&mat) {
+                        Some(Ok(mat)) => match mat_to_image_handle(&mat.mat) {
                             Ok(handle) => {
                                 if btx.blocking_send(Message::VideoFrame(handle)).is_err() {
                                     break; // receiver dropped (app closed / video changed)

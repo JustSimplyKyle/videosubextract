@@ -46,7 +46,9 @@
 //! and any actual OCR. Those are separate stages layered on top of this one.
 
 use opencv::{Result, core, imgcodecs, imgproc, prelude::*};
-use std::path::PathBuf;
+use std::{path::PathBuf, time::Duration};
+
+use crate::video_player::VideoFrame;
 
 /// An inclusive HSV box (OpenCV's 8-bit HSV: H in [0,180], S/V in [0,255]).
 /// Used to isolate pixels matching a subtitle's expected fill color before
@@ -186,8 +188,8 @@ impl Default for Params {
 
 #[derive(Debug)]
 pub struct SubtitleEvent {
-    pub start_frame: usize,
-    pub end_frame: usize,
+    pub start_timestamp: Duration,
+    pub end_timestamp: Duration,
     pub sample_bgr: Mat, // temporal-median frame, cleaner input for OCR
     pub mask: Mat,       // stability-filtered edge mask, reused by clean_for_ocr
 }
@@ -214,7 +216,7 @@ impl SmallRng {
 /// Internal state for a subtitle run in progress.
 struct Run {
     run_id: usize,
-    start_frame: usize,
+    start_timestamp: Duration,
     len: usize,
     gap: usize,
     mask_accum: Mat, // CV_32F running count of "edge on" per pixel, for the final mask
@@ -225,20 +227,20 @@ struct Run {
 }
 
 impl Run {
-    fn new(run_id: usize, start_frame: usize, mask: Mat, bgr: Mat) -> Result<Self> {
+    fn new(run_id: usize, start_timestamp: Duration, mask: Mat, bgr: Mat) -> Result<Self> {
         let mut mask_f = Mat::default();
         mask.convert_to(&mut mask_f, core::CV_32F, 1.0 / 255.0, 0.0)?;
         let anchor_mask = mask.try_clone()?;
         Ok(Self {
             run_id,
-            start_frame,
+            start_timestamp,
             len: 1,
             gap: 0,
             mask_accum: mask_f,
             anchor_mask,
             anchor_age: 0,
             bgr_buffer: vec![bgr],
-            rng: SmallRng::new(start_frame as u64),
+            rng: SmallRng::new(start_timestamp.as_millis() as u64),
         })
     }
 
@@ -347,7 +349,7 @@ fn temporal_median_bgr(frames: &[Mat]) -> Result<Mat> {
     Ok(out)
 }
 
-pub struct SubtitleSearch<I: Iterator<Item = Mat>> {
+pub struct SubtitleSearch<I: Iterator<Item = VideoFrame>> {
     frames: I,
     params: Params,
     current_run: Option<Run>,
@@ -356,7 +358,7 @@ pub struct SubtitleSearch<I: Iterator<Item = Mat>> {
     done: bool,
 }
 
-impl<I: Iterator<Item = Mat>> SubtitleSearch<I> {
+impl<I: Iterator<Item = VideoFrame>> SubtitleSearch<I> {
     pub const fn new(frames: I, params: Params) -> Self {
         Self {
             frames,
@@ -630,15 +632,15 @@ impl<I: Iterator<Item = Mat>> SubtitleSearch<I> {
     /// Writes SUMMARY.txt plus the finalized mask/sample for a run that just
     /// closed, whether it was kept or discarded — a discarded run's folder is
     /// exactly as inspectable as a kept one, since that's the whole point.
-    fn dump_summary(&self, run: &Run, end_frame: usize, kept: bool) {
+    fn dump_summary(&self, run: &Run, end_timestamp: Duration, kept: bool) {
         let Some(dir) = self.run_dir(run.run_id) else {
             return;
         };
 
         let summary = format!(
-            "status: {}\nstart_frame: {}\nend_frame: {end_frame}\nlen: {}\nmin_run_len (threshold): {}\n",
+            "status: {}\nstart_frame: {:?}\nend_frame: {end_timestamp:?}\nlen: {}\nmin_run_len (threshold): {}\n",
             if kept { "KEPT" } else { "DISCARDED" },
-            run.start_frame,
+            run.start_timestamp,
             run.len,
             self.params.min_run_len,
         );
@@ -662,7 +664,7 @@ impl<I: Iterator<Item = Mat>> SubtitleSearch<I> {
     }
 }
 
-impl<I: Iterator<Item = Mat>> Iterator for SubtitleSearch<I> {
+impl<I: Iterator<Item = VideoFrame>> Iterator for SubtitleSearch<I> {
     type Item = SubtitleEvent;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -673,20 +675,21 @@ impl<I: Iterator<Item = Mat>> Iterator for SubtitleSearch<I> {
         let debugging = self.params.debug_dir.is_some();
 
         loop {
+            // TODO: fix last run
             let Some(frame) = self.frames.next() else {
                 self.done = true;
                 if let Some(run) = self.current_run.take() {
                     let end_frame = self.frame_idx.saturating_sub(1);
                     let kept = run.len >= self.params.min_run_len;
                     if debugging {
-                        self.dump_summary(&run, end_frame, kept);
+                        self.dump_summary(&run, run.start_timestamp, kept);
                     }
                     if kept {
                         let (mask, sample) =
                             run.finalize(self.params.mask_stability_thresh).ok()?;
                         return Some(SubtitleEvent {
-                            start_frame: run.start_frame,
-                            end_frame,
+                            start_timestamp: run.start_timestamp,
+                            end_timestamp: run.start_timestamp,
                             sample_bgr: sample,
                             mask,
                         });
@@ -698,7 +701,7 @@ impl<I: Iterator<Item = Mat>> Iterator for SubtitleSearch<I> {
             let idx = self.frame_idx;
             self.frame_idx += 1;
 
-            let Ok((mask, bgr, pixels)) = self.edge_mask(&frame) else {
+            let Ok((mask, bgr, pixels)) = self.edge_mask(&frame.mat) else {
                 continue;
             };
 
@@ -711,7 +714,7 @@ impl<I: Iterator<Item = Mat>> Iterator for SubtitleSearch<I> {
                     if debugging {
                         self.dump_frame(run_id, idx, &bgr, &mask, "start");
                     }
-                    self.current_run = Run::new(run_id, idx, mask, bgr).ok();
+                    self.current_run = Run::new(run_id, frame.timestamp, mask, bgr).ok();
                 }
 
                 (Some(mut run), true) => {
@@ -735,14 +738,14 @@ impl<I: Iterator<Item = Mat>> Iterator for SubtitleSearch<I> {
 
                         if hit_cap {
                             if debugging {
-                                self.dump_summary(&run, idx, true);
+                                self.dump_summary(&run, frame.timestamp, true);
                             }
                             if let Ok((mask, sample)) =
                                 run.finalize(self.params.mask_stability_thresh)
                             {
                                 return Some(SubtitleEvent {
-                                    start_frame: run.start_frame,
-                                    end_frame: idx,
+                                    start_timestamp: run.start_timestamp,
+                                    end_timestamp: frame.timestamp,
                                     sample_bgr: sample,
                                     mask,
                                 });
@@ -755,7 +758,7 @@ impl<I: Iterator<Item = Mat>> Iterator for SubtitleSearch<I> {
                         let closed_len = run.len;
                         let kept = closed_len >= self.params.min_run_len;
                         if debugging {
-                            self.dump_summary(&run, idx - 1, kept);
+                            self.dump_summary(&run, frame.timestamp, kept);
                         }
 
                         let new_run_id = self.next_run_id;
@@ -763,15 +766,15 @@ impl<I: Iterator<Item = Mat>> Iterator for SubtitleSearch<I> {
                         if debugging {
                             self.dump_frame(new_run_id, idx, &bgr, &mask, "start");
                         }
-                        self.current_run = Run::new(new_run_id, idx, mask, bgr).ok();
+                        self.current_run = Run::new(new_run_id, frame.timestamp, mask, bgr).ok();
 
                         if kept
                             && let Ok((mask, sample)) =
                                 run.finalize(self.params.mask_stability_thresh)
                         {
                             return Some(SubtitleEvent {
-                                start_frame: run.start_frame,
-                                end_frame: idx - 1,
+                                start_timestamp: run.start_timestamp,
+                                end_timestamp: frame.timestamp,
                                 sample_bgr: sample,
                                 mask,
                             });
@@ -794,14 +797,14 @@ impl<I: Iterator<Item = Mat>> Iterator for SubtitleSearch<I> {
 
                     let kept = run.len >= self.params.min_run_len;
                     if debugging {
-                        self.dump_summary(&run, idx - 1, kept);
+                        self.dump_summary(&run, frame.timestamp, kept);
                     }
                     if kept
                         && let Ok((mask, sample)) = run.finalize(self.params.mask_stability_thresh)
                     {
                         return Some(SubtitleEvent {
-                            start_frame: run.start_frame,
-                            end_frame: idx - 1,
+                            start_timestamp: run.start_timestamp,
+                            end_timestamp: frame.timestamp,
                             sample_bgr: sample,
                             mask,
                         });

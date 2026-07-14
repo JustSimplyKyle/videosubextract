@@ -1,7 +1,7 @@
 use cosmic::iced;
 use eyre::{Context, ContextCompat};
 use ffmpeg_the_third::{
-    self as ffmpeg, Packet, Rescale, codec,
+    self as ffmpeg, Packet, Rational, Rescale, codec,
     ffi::{AV_TIME_BASE, av_rescale_q},
     filter::Graph,
     format::Pixel,
@@ -24,7 +24,7 @@ pub(crate) struct PlayerState {
     pub(crate) input: ffmpeg::format::context::Input,
     pub(crate) decoder: codec::decoder::Video,
     pub(crate) filter_graph: Option<GraphWithInfo>,
-    pub(crate) frame_buffer: VecDeque<eyre::Result<Mat>>,
+    pub(crate) frame_buffer: VecDeque<eyre::Result<VideoFrame>>,
     pub(crate) seek_generation: usize,
 }
 
@@ -32,8 +32,6 @@ pub(crate) struct InnerPlayer {
     pub(crate) state: Mutex<PlayerState>,
     pub(crate) stream_index: usize,
     pub info: DecoderInfo,
-    // We leave this outside the Mutex so a UI thread can poll
-    // the progress bar without blocking the decoder.
     pub(crate) current_frame: AtomicUsize,
 }
 
@@ -64,8 +62,26 @@ pub fn create_video_player<const STOP_ON_SEEK: bool>(
         .best(media::Type::Video)
         .context("Video stream not found")?;
 
+    dbg!(vstream.time_base());
+
     let stream_index = vstream.index();
     let avg_frame_rate = f64::from(vstream.avg_frame_rate());
+
+    let exact_frames = dbg!(vstream.frames().max(0) as usize);
+
+    // If it's 0 (common for MKV/WebM), estimate it using duration and framerate.
+    let total_frames = if exact_frames > 0 {
+        exact_frames
+    } else {
+        let duration = input.duration();
+
+        if duration > 0 {
+            let duration_sec = duration as f64 / AV_TIME_BASE as f64;
+            (duration_sec * avg_frame_rate).round() as usize
+        } else {
+            0 // Fallback if duration is also unknown
+        }
+    };
 
     let mut vcodec = codec::context::Context::from_parameters(vstream.parameters())?;
     if let Ok(parallelism) = std::thread::available_parallelism() {
@@ -77,11 +93,15 @@ pub fn create_video_player<const STOP_ON_SEEK: bool>(
 
     let decoder = vcodec.decoder().video()?;
 
+    let time_base = vstream.time_base();
+
     let info = DecoderInfo {
         format: decoder.format(),
         width: decoder.width(),
         height: decoder.height(),
         frame_rate: avg_frame_rate,
+        total_frames,
+        time_base,
     };
 
     let filter_graph = if let Some(rect) = crop_rectangle {
@@ -172,8 +192,13 @@ impl VideoPlayerController {
     }
 }
 
+pub struct VideoFrame {
+    pub mat: Mat,
+    pub timestamp: Duration,
+}
+
 impl<const STOP_ON_SEEK: bool> Iterator for VideoPlayerIterator<STOP_ON_SEEK> {
-    type Item = eyre::Result<Mat>;
+    type Item = eyre::Result<VideoFrame>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let mut state = self.inner.state.lock().expect("state lock poisoned");
@@ -188,6 +213,8 @@ impl<const STOP_ON_SEEK: bool> Iterator for VideoPlayerIterator<STOP_ON_SEEK> {
         if let Some(mat) = state.frame_buffer.pop_front() {
             return Some(mat);
         }
+
+        let info = self.inner.info;
 
         // 2. Pull packets until we generate at least one frame
         while let Some(Ok((stream, packet))) = state.input.packets().next() {
@@ -204,7 +231,7 @@ impl<const STOP_ON_SEEK: bool> Iterator for VideoPlayerIterator<STOP_ON_SEEK> {
             // Receive all available frames for this packet
             let mut decoded_video = Video::empty();
             while state.decoder.receive_frame(&mut decoded_video).is_ok() {
-                frame_to_mats(&mut state, &decoded_video);
+                frame_to_mats(&mut state, &info, &decoded_video);
             }
 
             // If this packet generated frames, yield the first one,
@@ -218,7 +245,7 @@ impl<const STOP_ON_SEEK: bool> Iterator for VideoPlayerIterator<STOP_ON_SEEK> {
         let _ = state.decoder.send_eof();
         let mut decoded_video = Video::empty();
         while state.decoder.receive_frame(&mut decoded_video).is_ok() {
-            frame_to_mats(&mut state, &decoded_video);
+            frame_to_mats(&mut state, &info, &decoded_video);
         }
 
         state.frame_buffer.pop_front()
@@ -227,6 +254,7 @@ impl<const STOP_ON_SEEK: bool> Iterator for VideoPlayerIterator<STOP_ON_SEEK> {
 
 pub(crate) fn frame_to_mats(
     state: &mut std::sync::MutexGuard<'_, PlayerState>,
+    info: &DecoderInfo,
     decoded_video: &Video,
 ) {
     let frame = state.filter_graph.as_mut().unwrap().apply(decoded_video);
@@ -239,7 +267,14 @@ pub(crate) fn frame_to_mats(
         }
     };
 
+    let timestamp = frame.timestamp().expect("frame has no timestamp");
+
+    let us = timestamp.rescale(info.time_base, ffmpeg::ffi::AV_TIME_BASE_Q);
+
+    let timestamp = Duration::from_micros(us as u64);
+
     let mat = video_frame_to_mat(&frame, frame.width() as i32, frame.height() as i32);
+    let mat = mat.map(|mat| VideoFrame { mat, timestamp });
     state.frame_buffer.push_back(mat);
 }
 
@@ -249,6 +284,8 @@ pub(crate) struct DecoderInfo {
     pub(crate) width: u32,
     pub(crate) height: u32,
     pub(crate) frame_rate: f64,
+    pub total_frames: usize,
+    pub time_base: Rational,
 }
 
 pub(crate) fn build_crop_graph(
@@ -265,10 +302,12 @@ pub(crate) fn build_crop_graph(
         .name();
 
     let desc = format!(
-        "buffer=video_size={w}x{h}:pix_fmt={pix_fmt_name}:time_base=1/1:sar=1/1,\
+        "buffer=video_size={w}x{h}:pix_fmt={pix_fmt_name}:time_base={}/{}:sar=1/1,\
          crop=x={crop_x}:y={crop_y}:w={crop_w}:h={crop_h},\
          format=pix_fmts=bgr24,\
          buffersink",
+        info.time_base.numerator(),
+        info.time_base.denominator(),
         w = info.width,
         h = info.height,
     );
@@ -292,9 +331,11 @@ pub(crate) fn build_filter_graph(info: DecoderInfo) -> eyre::Result<GraphWithInf
         .name();
 
     let desc = format!(
-        "buffer=video_size={w}x{h}:pix_fmt={pix_fmt_name}:time_base=1/1:sar=1/1,\
+        "buffer=video_size={w}x{h}:pix_fmt={pix_fmt_name}:time_base={}/{}:sar=1/1,\
          format=pix_fmts=bgr24,\
          buffersink",
+        info.time_base.numerator(),
+        info.time_base.denominator(),
         w = info.width,
         h = info.height,
     );
