@@ -2,8 +2,10 @@
 
 mod selection_canvas;
 
+use crate::OCR;
 use crate::config::Config;
-use crate::video_player::{self, InnerPlayer};
+use crate::subfinder::{Params, SubtitleSearch};
+use crate::video_player::{self, InnerPlayer, create_video_player};
 use crate::{fl, video_player::VideoPlayerController, video_player::VideoPlayerIterator};
 use cosmic::app::context_drawer;
 use cosmic::cosmic_config::{self, CosmicConfigEntry};
@@ -33,14 +35,62 @@ pub struct AppModel {
     key_binds: HashMap<menu::KeyBind, MenuAction>,
     config: Config,
     time: u32,
+    video_path: Option<std::path::PathBuf>,
     watch_is_active: bool,
     screenshot_selection: Option<iced::Rectangle>,
+    screenshot_selection_scaled: Option<iced::Rectangle>,
     canvas_dimensions: iced::Rectangle,
     canvas_generation: u32,
     video_controller: Option<VideoPlayerController>,
-    video_allocation: Option<iced::advanced::image::Allocation>,
+    video_allocation: Option<(iced::advanced::image::Allocation, iced::Size)>,
     // Track if the GPU is currently busy
     is_allocating_frame: bool,
+    subtitle_page_id: nav_bar::Id,
+    video_frame_rate: f64,
+    subtitle: SubtitleStatus,
+}
+
+#[derive(Default)]
+pub struct SubtitleStatus {
+    search_active: bool,
+    search_gen: usize,
+    search_path: Option<std::path::PathBuf>,
+    search_selection: Option<iced::Rectangle>,
+    results: Vec<SubtitleResult>,
+    preview: Option<widget::image::Handle>,
+    current_frame: usize,
+    done: bool,
+}
+
+impl SubtitleStatus {
+    /// Converts frame numbers to an SRT timestamp: `HH:MM:SS,mmm`
+    fn frame_to_srt_timestamp(frame: usize, fps: f64) -> String {
+        let total_ms = (frame as f64 / fps * 1000.0).round() as u64;
+        let ms = total_ms % 1000;
+        let s = (total_ms / 1000) % 60;
+        let m = (total_ms / 60_000) % 60;
+        let h = total_ms / 3_600_000;
+        format!("{h:02}:{m:02}:{s:02},{ms:03}")
+    }
+
+    pub fn to_srt(&self, fps: f64) -> String {
+        self.results
+            .iter()
+            .enumerate()
+            .fold(String::new(), |mut out, (i, r)| {
+                let start = Self::frame_to_srt_timestamp(r.start_frame, fps);
+                let end = Self::frame_to_srt_timestamp(r.end_frame, fps);
+                // SRT indices are 1-based
+                out.push_str(&format!(
+                    "{}\n{} --> {}\n{}\n\n",
+                    i + 1,
+                    start,
+                    end,
+                    r.text.trim()
+                ));
+                out
+            })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -55,10 +105,24 @@ pub enum Message {
     ResetSelection,
     LoadVideo(std::path::PathBuf),
     VideoFrame(RgbaImage),
-    VideoFrameAllocated(Option<iced::advanced::image::Allocation>),
+    VideoFrameAllocated(Option<(iced::advanced::image::Allocation, iced::Size)>),
     VideoSeekForward(Duration),
     VideoSeekBackward(Duration),
     VideoError(String),
+    ConvertToSrt,
+    StartSubtitleDisplay(std::path::PathBuf),
+    SubtitleProgress {
+        frame: usize,
+        preview: RgbaImage,
+    },
+    SubtitleEventFound {
+        start_frame: usize,
+        end_frame: usize,
+        text: String,
+        preview: RgbaImage,
+    },
+    SubtitleSearchDone,
+    SubtitleSearchError(String),
 }
 
 impl cosmic::Application for AppModel {
@@ -82,21 +146,21 @@ impl cosmic::Application for AppModel {
     ) -> (Self, Task<cosmic::Action<Self::Message>>) {
         let mut nav = nav_bar::Model::default();
 
-        nav.insert()
-            .text(fl!("page-id", num = 1))
-            .data::<Page>(Page::Page1)
-            .icon(icon::from_name("applications-science-symbolic"))
-            .activate();
+        let prepare_id = nav
+            .insert()
+            .text(fl!("page-prepare"))
+            .data::<Page>(Page::Prepare)
+            .icon(icon::from_name("applications-system-symbolic"))
+            .id();
 
-        nav.insert()
-            .text(fl!("page-id", num = 2))
-            .data::<Page>(Page::Page2)
-            .icon(icon::from_name("applications-system-symbolic"));
+        nav.activate(prepare_id);
 
-        nav.insert()
-            .text(fl!("page-id", num = 3))
-            .data::<Page>(Page::Page3)
-            .icon(icon::from_name("applications-games-symbolic"));
+        let subtitle_page_id = nav
+            .insert()
+            .text(fl!("page-subtitle"))
+            .data::<Page>(Page::Subtitle)
+            .icon(icon::from_name("applications-games-symbolic"))
+            .id();
 
         let about = About::default()
             .name(fl!("app-title"))
@@ -131,6 +195,11 @@ impl cosmic::Application for AppModel {
             // current_video_frame: None,
             video_allocation: None,
             is_allocating_frame: false,
+            screenshot_selection_scaled: None,
+            video_path: None,
+            subtitle: Default::default(),
+            subtitle_page_id,
+            video_frame_rate: 24.0,
         };
 
         let command = app.update_title();
@@ -170,62 +239,33 @@ impl cosmic::Application for AppModel {
     fn view(&self) -> Element<'_, Self::Message> {
         let space_s = cosmic::theme::spacing().space_s;
         let content: Element<_> = match self.nav.active_data::<Page>().unwrap() {
-            Page::Page1 => {
+            Page::Prepare => {
                 let header = widget::row::with_capacity(2)
                     .push(widget::text::title1(fl!("welcome")))
-                    .push(widget::text::title3(fl!("page-id", num = 1)))
+                    .push(widget::text::title3(fl!("page-prepare")))
                     .align_y(Alignment::End)
                     .spacing(space_s);
 
-                let counter_label = ["Watch: ", self.time.to_string().as_str()].concat();
-                let section = cosmic::widget::settings::section().add(
-                    cosmic::widget::settings::item::builder(counter_label).control(
-                        widget::button::text(if self.watch_is_active {
-                            "Stop"
-                        } else {
-                            "Start"
-                        })
-                        .on_press(Message::ToggleWatch),
-                    ),
-                );
+                let (full_img_handle, img_width, img_height) =
+                    self.video_allocation.as_ref().map_or_else(
+                        || {
+                            (
+                                (widget::image::Handle::from_rgba(
+                                    1920,
+                                    1080,
+                                    RgbaImage::new(1920, 1080).to_vec(),
+                                )),
+                                1920.,
+                                1080.,
+                            )
+                        },
+                        |(img, size)| (img.handle().clone(), size.width, size.height),
+                    );
 
-                widget::column::with_capacity(2)
-                    .push(header)
-                    .push(section)
-                    .spacing(space_s)
-                    .height(Length::Fill)
-                    .into()
-            }
-
-            Page::Page2 => {
-                let header = widget::row::with_capacity(2)
-                    .push(widget::text::title1(fl!("welcome")))
-                    .push(widget::text::title3(fl!("page-id", num = 2)))
-                    .align_y(Alignment::End)
-                    .spacing(space_s);
-
-                let full_img_handle = self.video_allocation.as_ref().map_or_else(
-                    || {
-                        Box::leak(Box::new(iced::widget::image::Handle::from_path(
-                            "test-2.png",
-                        )))
-                    },
-                    iced::advanced::image::Allocation::handle,
-                );
-
-                let (img_width, img_height) = match &full_img_handle {
-                    // temp
-                    widget::image::Handle::Path(id, path_buf) => (2560, 1440),
-                    widget::image::Handle::Bytes(id, bytes) => todo!(),
-                    widget::image::Handle::Rgba {
-                        id,
-                        width,
-                        height,
-                        pixels,
-                    } => (*width, *height),
-                };
-
-                let full_img = widget::image(full_img_handle.clone());
+                let full_img = widget::image(&full_img_handle)
+                    .content_fit(iced::ContentFit::Contain)
+                    .width(Length::Fill)
+                    .height(Length::Shrink);
 
                 let canvas_widget = widget::canvas(selection_canvas::SelectionProgram {
                     reset_generation: self.canvas_generation,
@@ -234,8 +274,8 @@ impl cosmic::Application for AppModel {
                 .height(Length::Fill);
 
                 let cropped_img = self.screenshot_selection.unwrap_or_default().apply(|ele| {
-                    let img_w = img_width as f32;
-                    let img_h = img_height as f32;
+                    let img_w = img_width;
+                    let img_h = img_height;
                     let canvas_w = self.canvas_dimensions.width;
                     let canvas_h = self.canvas_dimensions.height;
 
@@ -250,41 +290,62 @@ impl cosmic::Application for AppModel {
                     let w = (ele.width / scale).clamp(1.0, img_w - x);
                     let h = (ele.height / scale).clamp(1.0, img_h - y);
 
-                    full_img
-                        .crop(iced::Rectangle {
-                            x: x as u32,
-                            y: y as u32,
-                            width: w as u32,
-                            height: h as u32,
-                        })
+                    let region = iced::Rectangle {
+                        x: x as u32,
+                        y: y as u32,
+                        width: w as u32,
+                        height: h as u32,
+                    };
+
+                    widget::image(full_img_handle)
+                        .crop(region)
                         .width(Length::Shrink)
                         .height(Length::Shrink)
                 });
 
-                let full_img = widget::image(full_img_handle)
-                    .width(Length::Fill)
-                    .height(Length::Shrink);
                 let full_img = Stack::new().push(full_img).push(canvas_widget);
 
-                let reset_btn =
-                    widget::button::text("Reset Selection").on_press(Message::ResetSelection);
+                let reset_btn = widget::button::text("Reset Selection")
+                    .on_press(Message::ResetSelection)
+                    .class(cosmic::theme::Button::Destructive);
 
                 let load_video = widget::button::text("Load Video")
-                    .on_press(Message::LoadVideo("with_subtitle.mkv".into()));
+                    .on_press(Message::LoadVideo("with_subtitle.mkv".into()))
+                    .class(cosmic::theme::Button::Standard);
 
                 let skip_backward = widget::button::text("Backwards 5")
-                    .on_press(Message::VideoSeekBackward(Duration::from_secs(5)));
+                    .on_press(Message::VideoSeekBackward(Duration::from_secs(5)))
+                    .class(cosmic::theme::Button::NavToggle);
 
                 let skip_forward = widget::button::text("Forward 5")
-                    .on_press(Message::VideoSeekForward(Duration::from_secs(5)));
+                    .on_press(Message::VideoSeekForward(Duration::from_secs(5)))
+                    .class(cosmic::theme::Button::NavToggle);
 
-                let selection_label = match self.screenshot_selection {
-                    Some(r) => format!(
-                        "Selection: ({:.0}, {:.0})  {}×{}",
-                        r.x, r.y, r.width as u32, r.height as u32
-                    ),
-                    None => "Click twice on the image to set two corners".into(),
-                };
+                let selection_label = self
+                    .screenshot_selection_scaled
+                    .map_or_else(
+                        || "Click twice on the image to set two corners".into(),
+                        |r| {
+                            format!(
+                                "Selection: ({:.0}, {:.0})  {:.0}×{:.0}",
+                                r.x, r.y, r.width, r.height
+                            )
+                        },
+                    )
+                    .apply(widget::text)
+                    .class(cosmic::theme::Text::Accent);
+
+                let find_subs = self
+                    .video_path
+                    .as_ref()
+                    .map_or_else(
+                        || widget::button::text("Find Subtitles"),
+                        |p| {
+                            widget::button::text("Find Subtitles")
+                                .on_press(Message::StartSubtitleDisplay(p.clone()))
+                        },
+                    )
+                    .class(cosmic::theme::Button::Suggested);
 
                 widget::column! {
                     header,
@@ -293,9 +354,10 @@ impl cosmic::Application for AppModel {
                     widget::row! {
                         load_video,
                         reset_btn,
-                        widget::text(selection_label),
+                        selection_label,
                         skip_backward,
-                        skip_forward
+                        skip_forward,
+                        find_subs,
                     }
                     .spacing(space_s)
                     .align_y(Alignment::Center)
@@ -307,17 +369,83 @@ impl cosmic::Application for AppModel {
                 .into()
             }
 
-            Page::Page3 => {
+            Page::Subtitle => {
                 let header = widget::row::with_capacity(2)
                     .push(widget::text::title1(fl!("welcome")))
-                    .push(widget::text::title3(fl!("page-id", num = 3)))
+                    .push(widget::text::title3(fl!("page-subtitle")))
                     .align_y(Alignment::End)
                     .spacing(space_s);
 
-                widget::column::with_capacity(1)
-                    .push(header)
-                    .spacing(space_s)
+                let status_text = if self.subtitle.done {
+                    format!(
+                        "Complete — {} subtitle(s) found",
+                        self.subtitle.results.len()
+                    )
+                } else if self.subtitle.search_active {
+                    format!("Scanning… frame {}", self.subtitle.current_frame)
+                } else {
+                    "No active search. Load a video and select a subtitle region on Page Prepare."
+                        .into()
+                };
+                let status = widget::text(status_text).class(cosmic::theme::Text::Accent);
+                let to_srt = widget::button::text("Convert to srt")
+                    .class(cosmic::theme::Button::Suggested)
+                    .on_press_maybe(
+                        (!self.subtitle.search_active).then_some(Message::ConvertToSrt),
+                    );
+
+                let fps = self.video_frame_rate.max(1.0);
+
+                let grid = self
+                    .subtitle
+                    .results
+                    .iter()
+                    .fold(widget::grid(), |grid, r| {
+                        let t_start = r.start_frame as f64 / fps;
+                        let t_end = r.end_frame as f64 / fps;
+
+                        let img = widget::image(r.preview.clone())
+                            .content_fit(iced::ContentFit::Contain)
+                            .width(Length::Shrink) // grid column 0 determines the width; all cells inherit it
+                            .height(Length::Shrink);
+
+                        let timeline = widget::text(format!(
+                            "{:.1}s – {:.1}s  (frames {} – {})",
+                            t_start, t_end, r.start_frame, r.end_frame,
+                        ));
+
+                        let ocr = widget::text(r.text.trim()).class(cosmic::theme::Text::Accent);
+
+                        grid.push(img)
+                            .push(
+                                widget::column![timeline, ocr]
+                                    .spacing(space_s / 2)
+                                    .width(Length::Shrink)
+                                    .align_x(Alignment::Start),
+                            )
+                            .insert_row()
+                    })
+                    .row_spacing(space_s)
+                    .row_alignment(Alignment::Center)
+                    .column_spacing(space_s)
+                    .padding([0, 40].into());
+
+                let mut col =
+                    widget::column![header, widget::row!(status, to_srt).spacing(space_s)]
+                        .spacing(space_s);
+
+                if let Some(handle) = &self.subtitle.preview {
+                    col = col.push(
+                        widget::image(handle)
+                            .width(Length::Fill)
+                            .height(Length::Fixed(120.))
+                            .content_fit(iced::ContentFit::Contain),
+                    );
+                }
+
+                col.push(grid)
                     .height(Length::Fill)
+                    .apply(widget::scrollable)
                     .into()
             }
         };
@@ -362,10 +490,27 @@ impl cosmic::Application for AppModel {
             }));
         }
 
+        if self.subtitle.search_active {
+            if let Some(path) = &self.subtitle.search_path {
+                let key = SubtitleSearchKey {
+                    generation: self.subtitle.search_gen,
+                    path: path.clone(),
+                };
+                let sel = self.subtitle.search_selection;
+                let fps = self.video_frame_rate;
+                subscriptions.push(Subscription::run_with(
+                    (key, FakeHashable(sel), FakeHashable(fps)),
+                    move |(k, sel, fps)| subtitle_search_stream(k.path.clone(), sel.0, fps.0),
+                ));
+            }
+        }
+
         Subscription::batch(subscriptions)
     }
 
     fn update(&mut self, message: Self::Message) -> Task<cosmic::Action<Self::Message>> {
+        let needs_recompute = Self::scaled_selection_needs_recomputation(&message);
+
         match message {
             Message::WatchTick(time) => {
                 self.time = time;
@@ -395,13 +540,12 @@ impl cosmic::Application for AppModel {
                 }
             },
 
-            Message::ScreenshotRegion(msg) => {
-                self.screenshot_selection = msg;
-            }
-
             Message::ResetSelection => {
                 self.screenshot_selection = None;
                 self.canvas_generation = self.canvas_generation.wrapping_add(1);
+            }
+            Message::ScreenshotRegion(msg) => {
+                self.screenshot_selection = msg;
             }
             Message::CanvasSize(rectangle) => {
                 self.canvas_dimensions = rectangle;
@@ -411,6 +555,7 @@ impl cosmic::Application for AppModel {
                     Ok(input) => match video_player::create_video_player::<false>(input, None) {
                         Ok((controller, _iter)) => {
                             controller.seek_forward(Duration::from_mins(6)).unwrap();
+                            self.video_path = Some(path);
                             // _iter is intentionally dropped; the subscription creates its own
                             // from the shared Arc<InnerPlayer> inside the controller.
                             self.video_controller = Some(controller);
@@ -431,6 +576,8 @@ impl cosmic::Application for AppModel {
 
                 self.is_allocating_frame = true;
 
+                let (width, height) = (frame.width(), frame.height());
+
                 let handle = widget::image::Handle::from_rgba(
                     frame.width(),
                     frame.height(),
@@ -439,7 +586,13 @@ impl cosmic::Application for AppModel {
 
                 // Spawn the allocation Task
                 return iced::runtime::image::allocate(&handle)
-                    .map(move |result| Message::VideoFrameAllocated(result.ok()))
+                    .map(move |result| {
+                        Message::VideoFrameAllocated(
+                            result
+                                .ok()
+                                .map(|x| (x, iced::Size::new(width as f32, height as f32))),
+                        )
+                    })
                     .map(Into::into);
             }
 
@@ -472,6 +625,64 @@ impl cosmic::Application for AppModel {
                 eprintln!("video error: {msg}");
                 self.video_controller = None;
             }
+            Message::StartSubtitleDisplay(path) => {
+                self.subtitle.search_active = true;
+                self.subtitle.search_gen += 1;
+                self.subtitle.search_path = Some(path);
+                self.subtitle.search_selection = self.screenshot_selection_scaled; // snapshot current selection
+                self.subtitle.results.clear();
+                self.subtitle.preview = None;
+                self.subtitle.current_frame = 0;
+                self.subtitle.done = false;
+                self.nav.activate(self.subtitle_page_id);
+                return self.update_title();
+            }
+            Message::SubtitleProgress { frame, preview } => {
+                self.subtitle.current_frame = frame;
+                self.subtitle.preview = Some(widget::image::Handle::from_rgba(
+                    preview.width(),
+                    preview.height(),
+                    preview.into_raw(),
+                ));
+            }
+
+            Message::SubtitleEventFound {
+                start_frame,
+                end_frame,
+                text,
+                preview,
+            } => {
+                self.subtitle.results.push(SubtitleResult {
+                    start_frame,
+                    end_frame,
+                    text,
+                    preview: widget::image::Handle::from_rgba(
+                        preview.width(),
+                        preview.height(),
+                        preview.into_raw(),
+                    ),
+                });
+            }
+
+            Message::SubtitleSearchDone => {
+                self.subtitle.search_active = false;
+                self.subtitle.done = true;
+                self.subtitle.preview = None; // clear the scan preview when finished
+            }
+
+            Message::SubtitleSearchError(e) => {
+                eprintln!("subtitle search error: {e}");
+                self.subtitle.search_active = false;
+            }
+            Message::ConvertToSrt => {
+                let srt = self.subtitle.to_srt(self.video_frame_rate);
+                if let Err(e) = std::fs::write("output.srt", srt) {
+                    eprintln!("error writing to srt file {e}");
+                }
+            }
+        }
+        if needs_recompute {
+            self.recompute_scaled_selection();
         }
         Task::none()
     }
@@ -480,6 +691,12 @@ impl cosmic::Application for AppModel {
         self.nav.activate(id);
         self.update_title()
     }
+}
+
+struct FakeHashable<T>(T);
+
+impl<T> std::hash::Hash for FakeHashable<T> {
+    fn hash<H: std::hash::Hasher>(&self, _state: &mut H) {}
 }
 
 impl AppModel {
@@ -495,12 +712,46 @@ impl AppModel {
             .main_window_id()
             .map_or_else(Task::none, |id| self.set_window_title(window_title, id))
     }
+    // tracks [Message::VideoFrameAllocated, Message::CanvasSize, Message::ScreenshotRegion]
+    fn recompute_scaled_selection(&mut self) {
+        let Some((_, size)) = self.video_allocation.as_ref() else {
+            self.screenshot_selection_scaled = None;
+            return;
+        };
+        let Some(ele) = self.screenshot_selection else {
+            self.screenshot_selection_scaled = None;
+            return;
+        };
+
+        let (img_w, img_h) = (size.width, size.height);
+        let canvas_w = self.canvas_dimensions.width;
+        let canvas_h = self.canvas_dimensions.height;
+
+        let scale = (canvas_w / img_w).min(canvas_h / img_h);
+        let offset_x = (canvas_w - img_w * scale) / 2.0;
+        let offset_y = (canvas_h - img_h * scale) / 2.0;
+
+        self.screenshot_selection_scaled = Some(iced::Rectangle {
+            x: ((ele.x - offset_x) / scale).clamp(0.0, img_w - 1.0),
+            y: ((ele.y - offset_y) / scale).clamp(0.0, img_h - 1.0),
+            width: (ele.width / scale).clamp(1.0, img_w),
+            height: (ele.height / scale).clamp(1.0, img_h),
+        });
+    }
+    const fn scaled_selection_needs_recomputation(message: &Message) -> bool {
+        matches!(
+            message,
+            Message::VideoFrameAllocated(_)
+                | Message::CanvasSize(_)
+                | Message::ScreenshotRegion(_)
+                | Message::ResetSelection
+        )
+    }
 }
 
 pub enum Page {
-    Page1,
-    Page2,
-    Page3,
+    Prepare,
+    Subtitle,
 }
 
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
@@ -522,6 +773,134 @@ impl menu::action::MenuAction for MenuAction {
             MenuAction::About => Message::ToggleContextPage(ContextPage::About),
         }
     }
+}
+
+#[derive(Clone, Debug)]
+pub struct SubtitleResult {
+    pub start_frame: usize,
+    pub end_frame: usize,
+    pub text: String,
+    pub preview: widget::image::Handle,
+}
+
+// Wraps the frame iterator to tee progress frames into a channel at ~5fps.
+struct ProgressIter<I> {
+    inner: I,
+    tx: tokio::sync::mpsc::Sender<Message>,
+    count: usize,
+    interval: usize,
+}
+
+impl<I: Iterator<Item = opencv::core::Mat>> Iterator for ProgressIter<I> {
+    type Item = opencv::core::Mat;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let mat = self.inner.next()?;
+        self.count += 1;
+        if self.count.is_multiple_of(self.interval) {
+            if let Ok(rgba) = mat_to_image_handle(&mat) {
+                // try_send: progress frames are display-only, drop them if the
+                // channel is full rather than stalling the search thread.
+                let _ = self.tx.try_send(Message::SubtitleProgress {
+                    frame: self.count,
+                    preview: rgba,
+                });
+            }
+        }
+        Some(mat)
+    }
+}
+
+// Subscription key — gen changes each time a new search starts,
+// which causes iced to tear down the old subscription.
+#[derive(Clone, Hash, PartialEq, Eq)]
+struct SubtitleSearchKey {
+    generation: usize,
+    path: std::path::PathBuf,
+}
+
+fn subtitle_search_stream(
+    path: std::path::PathBuf,
+    selection: Option<iced::Rectangle>,
+    frame_rate: f64,
+) -> impl futures::Stream<Item = Message> + Send {
+    // One progress frame every 1/5 s of source footage.
+    let preview_interval = (frame_rate / 5.0).ceil().max(1.0) as usize;
+
+    iced::stream::channel(
+        8,
+        async move |mut tx: futures::channel::mpsc::Sender<Message>| {
+            let (btx, mut brx) = tokio::sync::mpsc::channel::<Message>(8);
+
+            tokio::task::spawn_blocking(move || {
+                let input = match ffmpeg::format::input(&path) {
+                    Ok(x) => x,
+                    Err(e) => {
+                        let _ = btx.blocking_send(Message::SubtitleSearchError(e.to_string()));
+                        return;
+                    }
+                };
+                let (_, iter) = match create_video_player::<false>(input, selection) {
+                    Ok(x) => x,
+                    Err(e) => {
+                        let _ = btx.blocking_send(Message::SubtitleSearchError(e.to_string()));
+                        return;
+                    }
+                };
+                let frame_iter = ProgressIter {
+                    inner: iter.filter_map(Result::ok),
+                    tx: btx.clone(),
+                    count: 0,
+                    interval: preview_interval,
+                };
+
+                let s = SubtitleSearch::new(frame_iter, Params::default());
+
+                for event in s {
+                    let Ok(preview) = mat_to_image_handle(&event.sample_bgr) else {
+                        continue;
+                    };
+
+                    let text = mat_to_dynamic_image(&event.sample_bgr)
+                        .and_then(|img| OCR.recognize(&img).map_err(Into::into))
+                        .unwrap_or_default()
+                        .iter()
+                        .map(|x| &x.text)
+                        .fold(String::new(), |mut acc, x| {
+                            acc.push_str(x);
+                            acc.push('\n');
+                            acc
+                        });
+
+                    let msg = Message::SubtitleEventFound {
+                        start_frame: event.start_frame,
+                        end_frame: event.end_frame,
+                        text,
+                        preview,
+                    };
+                    if btx.blocking_send(msg).is_err() {
+                        return; // app closed / new search started
+                    }
+                }
+
+                let _ = btx.blocking_send(Message::SubtitleSearchDone);
+            });
+
+            while let Some(msg) = brx.recv().await {
+                if tx.send(msg).await.is_err() {
+                    break;
+                }
+            }
+        },
+    )
+}
+
+fn mat_to_dynamic_image(mat: &opencv::core::Mat) -> eyre::Result<DynamicImage> {
+    mat_to_image_handle(mat).and_then(|x| {
+        RgbaImage::from_raw(x.width(), x.height(), x.into_raw())
+            .map(DynamicImage::ImageRgba8)
+            .ok_or_else(|| eyre::eyre!("invalid image dimensions"))
+    })
 }
 
 /// Converts an OpenCV BGR Mat into an iced RGBA image handle.

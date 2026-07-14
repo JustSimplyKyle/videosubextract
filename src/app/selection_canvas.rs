@@ -3,7 +3,10 @@ use cosmic::iced::Color;
 
 use cosmic::iced::Point;
 use cosmic::iced::core::mouse;
+use cosmic::widget;
 use cosmic::widget::canvas;
+use iced::core::image::Renderer;
+use iced::wgpu::naga::ImageClass;
 
 use crate::app::Message;
 
@@ -78,7 +81,6 @@ pub(crate) struct SelectionCanvas {
     pub(crate) previous_selection: iced::Rectangle,
 }
 
-#[derive(Default)]
 pub(crate) struct SelectionProgram {
     pub(crate) reset_generation: u32,
 }

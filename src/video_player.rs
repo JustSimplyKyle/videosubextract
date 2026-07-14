@@ -48,6 +48,7 @@ impl std::hash::Hash for VideoPlayerController {
     }
 }
 
+#[derive(Clone)]
 pub struct VideoPlayerIterator<const STOP_ON_SEEK: bool> {
     pub(crate) inner: Arc<InnerPlayer>,
     pub(crate) current_generation: usize,
@@ -55,8 +56,9 @@ pub struct VideoPlayerIterator<const STOP_ON_SEEK: bool> {
 
 pub fn create_video_player<const STOP_ON_SEEK: bool>(
     input: ffmpeg::format::context::Input,
-    crop_rectangle: Option<iced::Rectangle>,
+    crop_rectangle: impl Into<Option<iced::Rectangle>>,
 ) -> eyre::Result<(VideoPlayerController, VideoPlayerIterator<STOP_ON_SEEK>)> {
+    let crop_rectangle = crop_rectangle.into();
     let vstream = input
         .streams()
         .best(media::Type::Video)

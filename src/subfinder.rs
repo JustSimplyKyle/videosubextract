@@ -93,8 +93,6 @@ impl ColorRange {
 
 #[derive(Debug, Clone)]
 pub struct Params {
-    /// Subtitle search region within each frame (e.g. bottom ~20% of the image).
-    pub roi: core::Rect,
     /// Color ranges (in HSV) that count as "subtitle-colored". Defaults to
     /// near-white only; add more (e.g. `ColorRange::near_yellow()`) if your
     /// subtitles use other fill colors. A pixel counts if it falls in *any*
@@ -166,7 +164,6 @@ pub struct Params {
 impl Default for Params {
     fn default() -> Self {
         Self {
-            roi: core::Rect::new(0, 0, 0, 0), // caller must size this to the actual frame
             color_ranges: vec![ColorRange::near_white()],
             color_dilate_px: 2,
             sobel_thresh: 60.0,
@@ -360,7 +357,7 @@ pub struct SubtitleSearch<I: Iterator<Item = Mat>> {
 }
 
 impl<I: Iterator<Item = Mat>> SubtitleSearch<I> {
-    pub fn new(frames: I, params: Params) -> Self {
+    pub const fn new(frames: I, params: Params) -> Self {
         Self {
             frames,
             params,
@@ -428,7 +425,7 @@ impl<I: Iterator<Item = Mat>> SubtitleSearch<I> {
     /// Crop to the ROI and produce a binary edge mask (see module docs for the steps).
     /// Returns (mask, cropped_bgr, on_pixel_count).
     fn edge_mask(&self, frame: &Mat) -> Result<(Mat, Mat, i32)> {
-        let cropped = Mat::roi(frame, self.params.roi)?.try_clone()?;
+        let cropped = frame.clone();
 
         let mut gray = Mat::default();
         imgproc::cvt_color(
