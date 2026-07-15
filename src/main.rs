@@ -1,5 +1,9 @@
 // SPDX-License-Identifier: MPL-2.0
 
+use std::sync::LazyLock;
+
+use ocr_rs::OcrEngine;
+
 mod app;
 mod config;
 mod i18n;
@@ -21,81 +25,9 @@ fn main() -> cosmic::iced::Result {
             .min_height(180.0),
     );
 
-    // create_video_player(input, crop_rectangle)
-
     // Starts the application's event loop with `()` as the application's flags.
     cosmic::app::run::<app::AppModel>(settings, ())
 }
-
-use std::{
-    collections::VecDeque,
-    fs::File,
-    sync::{LazyLock, atomic::AtomicUsize},
-    time::Duration,
-};
-
-use cosmic::iced;
-use eyre::{Context, ContextCompat};
-use ffmpeg_the_third::{
-    self as ffmpeg, Packet, Stream,
-    ffi::AV_TIME_BASE,
-    filter::Graph,
-    format::context::Input,
-    frame::Video,
-    media::{self},
-    software::scaling::Flags,
-};
-use image::DynamicImage;
-use ocr_rs::OcrEngine;
-use opencv::imgcodecs;
-use opencv::prelude::*;
-
-use subfinder::{Params, SubtitleEvent};
-
-use crate::subfinder::SubtitleSearch;
-
-// --- example usage --------------------
-// //
-// fn main() -> eyre::Result<()> {
-//     ffmpeg::init()?;
-//     let mut input = ffmpeg::format::input("with_subtitle.mkv")?;
-
-//     use cosmic::Apply;
-//     let fps = input
-//         .streams()
-//         .best(Type::Video)
-//         .ok_or(ffmpeg::Error::StreamNotFound)?
-//         .apply(|x| x.avg_frame_rate())
-//         .apply(f64::from);
-
-//     skip(0, fps, &mut input, Duration::from_mins(6)).unwrap();
-
-//     let (events, fps) = find_subtitles_in(
-//         &mut input,
-//         iced::Rectangle {
-//             x: 0.,
-//             y: 1080. - 128.,
-//             width: 1920.,
-//             height: 128.,
-//         },
-//     )?;
-
-//     for (n, ev) in events.enumerate() {
-//         println!(
-//             "subtitle #{n}: {:.2}s -> {:.2}s",
-//             ev.start_frame as f64 / fps,
-//             ev.end_frame as f64 / fps,
-//         );
-//         let cleaned = ev.sample_bgr;
-//         let image = &mat_to_dynamic_image(&cleaned)?;
-//         let img = OCR.recognize(image)?;
-//         println!(
-//             "  text: {}",
-//             img.first().map(|x| x.text.clone()).unwrap_or_default()
-//         );
-//     }
-//     Ok(())
-// }
 
 static OCR: LazyLock<OcrEngine> = LazyLock::new(|| {
     OcrEngine::from_bytes(

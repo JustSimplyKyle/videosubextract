@@ -15,12 +15,16 @@ use cosmic::iced::{self, Alignment, Length, Subscription, event, futures};
 use cosmic::prelude::*;
 use cosmic::widget::Widget;
 
-use cosmic::widget::{self, about::About, icon, menu, nav_bar};
+use cosmic::widget::segmented_button::SingleSelectModel;
+use cosmic::widget::{self, about::About, icon, menu, nav_bar, tab_bar};
+use ffmpeg_sidecar::child::FfmpegChild;
+use ffmpeg_sidecar::command::FfmpegCommand;
 use ffmpeg_the_third::{self as ffmpeg, codec};
 use futures::SinkExt;
 use image::{DynamicImage, RgbaImage, imageops};
 use opencv::core::{MatTraitConst, MatTraitConstManual};
 use std::collections::HashMap;
+use std::io::Read;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -50,6 +54,9 @@ pub struct AppModel {
     subtitle_page_id: nav_bar::Id,
     video_frame_rate: f64,
     subtitle: SubtitleStatus,
+    post_production_page_id: nav_bar::Id,
+    post_prod_tabs: SingleSelectModel,
+    post_prod_feedback: Option<String>,
 }
 
 #[derive(Default)]
@@ -130,6 +137,11 @@ pub enum Message {
     },
     SubtitleSearchDone,
     SubtitleSearchError(String),
+    GoToPostProduction,
+    SelectPostProdTab(widget::segmented_button::Entity),
+    MergeWithVideo,
+    OpenCcS2T,
+    OpenCcT2S,
 }
 
 impl cosmic::Application for AppModel {
@@ -137,7 +149,7 @@ impl cosmic::Application for AppModel {
     type Flags = ();
     type Message = Message;
 
-    const APP_ID: &'static str = "dev.mmurphy.Test";
+    const APP_ID: &'static str = "dev.justsimplykyle.videosubextract";
 
     fn core(&self) -> &cosmic::Core {
         &self.core
@@ -169,6 +181,29 @@ impl cosmic::Application for AppModel {
             .icon(icon::from_name("applications-games-symbolic"))
             .id();
 
+        let post_production_page_id = nav
+            .insert()
+            .text(fl!("page-post"))
+            .data::<Page>(Page::PostProduction)
+            .icon(icon::from_name("applications-games-symbolic"))
+            .id();
+
+        let mut post_prod_tabs = SingleSelectModel::default();
+        let srt_tab = post_prod_tabs
+            .insert()
+            .text("Convert to SRT")
+            .data::<PostProdTab>(PostProdTab::Srt)
+            .id();
+        post_prod_tabs
+            .insert()
+            .text("Merge Video")
+            .data::<PostProdTab>(PostProdTab::Merge);
+        post_prod_tabs
+            .insert()
+            .text("OpenCC Translate")
+            .data::<PostProdTab>(PostProdTab::OpenCc);
+        post_prod_tabs.activate(srt_tab);
+
         let about = About::default()
             .name(fl!("app-title"))
             .icon(widget::icon::from_svg_bytes(APP_ICON))
@@ -176,7 +211,7 @@ impl cosmic::Application for AppModel {
             .links([(fl!("repository"), REPOSITORY)])
             .license(env!("CARGO_PKG_LICENSE"));
 
-        let mut app = AppModel {
+        let mut app = Self {
             core,
             context_page: ContextPage::default(),
             about,
@@ -199,13 +234,15 @@ impl cosmic::Application for AppModel {
                 height: 1.,
             },
             video_controller: None,
-            // current_video_frame: None,
             video_allocation: None,
             is_allocating_frame: false,
             screenshot_selection_scaled: None,
             video_path: None,
             subtitle: Default::default(),
             subtitle_page_id,
+            post_production_page_id,
+            post_prod_tabs,
+            post_prod_feedback: None,
             video_frame_rate: 24.0,
         };
 
@@ -438,47 +475,51 @@ impl cosmic::Application for AppModel {
                     .into()
                 };
 
-                let to_srt = widget::button::text("Convert to srt")
+                let to_post_prod = widget::button::text("Post Production")
                     .class(cosmic::theme::Button::Suggested)
                     .on_press_maybe(
-                        (!self.subtitle.search_active).then_some(Message::ConvertToSrt),
+                        (!self.subtitle.search_active).then_some(Message::GoToPostProduction),
                     );
 
-                let fps = self.video_frame_rate.max(1.0);
+                let grid = widget::responsive(move |size| {
+                    self.subtitle
+                        .results
+                        .iter()
+                        .fold(widget::grid(), |grid, r| {
+                            let t_start = r.start_timestamp.as_secs_f64();
+                            let t_end = r.end_timestamp.as_secs_f64();
 
-                let grid = self
-                    .subtitle
-                    .results
-                    .iter()
-                    .fold(widget::grid(), |grid, r| {
-                        let t_start = r.start_timestamp.as_secs_f64();
-                        let t_end = r.end_timestamp.as_secs_f64();
+                            let text_width = dbg!((size.width * 0.35).max(160.0)); // 35% of available, floored at 160
+                            let img_width = dbg!(size.width - text_width);
 
-                        let img = widget::image(r.preview.clone())
-                            .content_fit(iced::ContentFit::Contain)
-                            .width(Length::Shrink) // grid column 0 determines the width; all cells inherit it
-                            .height(Length::Shrink);
+                            let img = widget::image(r.preview.clone())
+                                .content_fit(iced::ContentFit::Contain)
+                                .width(img_width) // grid column 0 determines the width; all cells inherit it
+                                .height(Length::Shrink);
 
-                        let timeline = widget::text(format!("{:.1}s – {:.1}s", t_start, t_end,));
+                            let timeline = widget::text(format!("{t_start:.1}s – {t_end:.1}s"));
 
-                        let ocr = widget::text(r.text.trim()).class(cosmic::theme::Text::Accent);
+                            let ocr =
+                                widget::text(r.text.trim()).class(cosmic::theme::Text::Accent);
 
-                        grid.push(img)
-                            .push(
-                                widget::column![timeline, ocr]
-                                    .spacing(space_s / 2)
-                                    .width(Length::Shrink)
-                                    .align_x(Alignment::Start),
-                            )
-                            .insert_row()
-                    })
-                    .row_spacing(space_s)
-                    .row_alignment(Alignment::Center)
-                    .column_spacing(space_s)
-                    .padding([0, 40].into());
+                            grid.push(img)
+                                .push(
+                                    widget::column![timeline, ocr]
+                                        .spacing(space_s / 2)
+                                        .width(text_width)
+                                        .align_x(Alignment::Start),
+                                )
+                                .insert_row()
+                        })
+                        .row_spacing(space_s)
+                        .row_alignment(Alignment::Center)
+                        .column_spacing(space_s)
+                        .padding([0, 40].into())
+                        .into()
+                });
 
                 let mut col =
-                    widget::column![header, widget::row!(status, to_srt).spacing(space_s)]
+                    widget::column![header, widget::row!(status, to_post_prod).spacing(space_s)]
                         .spacing(space_s);
 
                 if let Some(handle) = &self.subtitle.preview {
@@ -494,6 +535,58 @@ impl cosmic::Application for AppModel {
                     .height(Length::Fill)
                     .apply(widget::scrollable)
                     .into()
+            }
+            Page::PostProduction => {
+                let header = widget::row::with_capacity(2)
+                    .push(widget::text::title1(fl!("welcome")))
+                    .push(widget::text::title3(fl!("page-post")))
+                    .align_y(Alignment::End)
+                    .spacing(space_s);
+
+                let tabs = widget::tab_bar::horizontal(&self.post_prod_tabs)
+                    .on_activate(Message::SelectPostProdTab);
+
+                let tab_content: Element<_> = match self.post_prod_tabs.active_data::<PostProdTab>()
+                {
+                    Some(PostProdTab::Srt) => {
+                        let btn = widget::button::text("Save as SRT")
+                            .class(cosmic::theme::Button::Suggested)
+                            .on_press_maybe(
+                                (!self.subtitle.search_active).then_some(Message::ConvertToSrt),
+                            );
+                        widget::column![btn].into()
+                    }
+                    Some(PostProdTab::Merge) => {
+                        let btn = widget::button::text("Merge Subtitles with Video")
+                            .class(cosmic::theme::Button::Suggested)
+                            .on_press_maybe(
+                                (!self.subtitle.search_active).then_some(Message::MergeWithVideo),
+                            );
+                        widget::column![btn].into()
+                    }
+                    Some(PostProdTab::OpenCc) => {
+                        let btn_s2t = widget::button::text("Simplified to Traditional")
+                            .class(cosmic::theme::Button::Suggested)
+                            .on_press_maybe(
+                                (!self.subtitle.search_active).then_some(Message::OpenCcS2T),
+                            );
+                        let btn_t2s = widget::button::text("Traditional to Simplified")
+                            .class(cosmic::theme::Button::Suggested)
+                            .on_press_maybe(
+                                (!self.subtitle.search_active).then_some(Message::OpenCcT2S),
+                            );
+                        widget::row![btn_s2t, btn_t2s].spacing(space_s).into()
+                    }
+                    None => widget::text("Select a tab").into(),
+                };
+
+                let mut col = widget::column![header, tabs, tab_content].spacing(space_s);
+
+                if let Some(feedback) = &self.post_prod_feedback {
+                    col = col.push(widget::text(feedback).class(cosmic::theme::Text::Accent));
+                }
+
+                col.into()
             }
         };
 
@@ -740,7 +833,80 @@ impl cosmic::Application for AppModel {
                 eprintln!("subtitle search error: {e}");
                 self.subtitle.search_active = false;
             }
+            Message::GoToPostProduction => {
+                self.post_prod_feedback = None;
+                self.nav.activate(self.post_production_page_id);
+                return self.update_title();
+            }
+            Message::SelectPostProdTab(id) => {
+                self.post_prod_tabs.activate(id);
+                self.post_prod_feedback = None;
+            }
+            Message::MergeWithVideo => {
+                let srt = self.subtitle.to_srt();
+                let temp_srt = std::env::temp_dir().join("temp_subs.srt");
+
+                if std::fs::write(&temp_srt, srt).is_err() {
+                    self.post_prod_feedback =
+                        Some("Failed to create temporary subtitle file for merge.".into());
+                    std::fs::remove_file(temp_srt).ok();
+
+                    return Task::none();
+                }
+
+                let Some(video) = &self.video_path else {
+                    self.post_prod_feedback = Some("No video loaded to merge with.".into());
+                    std::fs::remove_file(temp_srt).ok();
+
+                    return Task::none();
+                };
+
+                let stem = video.file_stem().unwrap_or_default().to_string_lossy();
+                // MKV is broadly compatible and safe for merging soft-subtitles
+                let output = video.with_file_name(format!("{stem}_merged.mkv"));
+
+                let mut command = FfmpegCommand::new();
+
+                let ffmpeg = command
+                    .overwrite()
+                    .input(video.to_string_lossy())
+                    .format("srt")
+                    .input(temp_srt.to_string_lossy())
+                    .codec_audio("copy")
+                    .codec_video("copy")
+                    .codec_subtitle("srt")
+                    .output(output.to_string_lossy());
+                dbg!(ffmpeg.print_command());
+                if let Ok(mut x) = ffmpeg.spawn() {
+                    let mut s = String::new();
+                    x.take_stderr().unwrap().read_to_string(&mut s);
+                    dbg!(s);
+                }
+
+                self.post_prod_feedback =
+                    Some(format!("Merged video saved successfully to {:?}", output));
+            }
+            Message::OpenCcS2T => {
+                // Relies on the `opencc` rust wrapper to be available
+                let cc = opencc::OpenCC::new("s2t.json");
+                for res in &mut self.subtitle.results {
+                    dbg!(&res.text);
+                    res.text = cc.convert(&res.text);
+                    dbg!(&res.text);
+                }
+                self.post_prod_feedback =
+                    Some("Subtitles Converted to Traditional Chinese (S2T).".into());
+            }
+            Message::OpenCcT2S => {
+                let cc = opencc::OpenCC::new("t2s.json");
+                for res in &mut self.subtitle.results {
+                    res.text = cc.convert(&res.text);
+                }
+                self.post_prod_feedback =
+                    Some("Subtitles Converted to Simplified Chinese (T2S).".into());
+            }
             Message::ConvertToSrt => {
+                self.post_prod_feedback = None;
                 let srt = self.subtitle.to_srt();
                 return Task::perform(
                     async move {
@@ -762,7 +928,13 @@ impl cosmic::Application for AppModel {
                 )
                 .map(Into::into);
             }
-            Message::SrtSaved(_) => {}
+            Message::SrtSaved(path_opt) => {
+                if let Some(p) = path_opt {
+                    self.post_prod_feedback = Some(format!("Successfully saved SRT to {:?}", p));
+                } else {
+                    self.post_prod_feedback = Some("File save cancelled.".into());
+                }
+            }
         }
         if needs_recompute {
             self.recompute_scaled_selection();
@@ -835,6 +1007,14 @@ impl AppModel {
 pub enum Page {
     Prepare,
     Subtitle,
+    PostProduction,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PostProdTab {
+    Srt,
+    Merge,
+    OpenCc,
 }
 
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
