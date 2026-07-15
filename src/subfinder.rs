@@ -215,7 +215,7 @@ impl SmallRng {
 
 /// Internal state for a subtitle run in progress.
 struct Run {
-    run_id: usize,
+    id: usize,
     start_timestamp: Duration,
     len: usize,
     gap: usize,
@@ -232,7 +232,7 @@ impl Run {
         mask.convert_to(&mut mask_f, core::CV_32F, 1.0 / 255.0, 0.0)?;
         let anchor_mask = mask.try_clone()?;
         Ok(Self {
-            run_id,
+            id: run_id,
             start_timestamp,
             len: 1,
             gap: 0,
@@ -600,7 +600,7 @@ impl<I: Iterator<Item = VideoFrame>> SubtitleSearch<I> {
         let base = self.params.debug_dir.as_ref()?;
         let dir = base.join(format!("run_{run_id:04}"));
         if let Err(e) = std::fs::create_dir_all(&dir) {
-            eprintln!("debug_dir: failed to create {dir:?}: {e}");
+            eprintln!("debug_dir: failed to create {}: {e}", dir.display());
             return None;
         }
         Some(dir)
@@ -620,12 +620,12 @@ impl<I: Iterator<Item = VideoFrame>> SubtitleSearch<I> {
 
         let bgr_path = dir.join(format!("frame_{frame_idx:06}_{tag}_bgr.png"));
         if let Err(e) = imgcodecs::imwrite(&bgr_path.to_string_lossy(), cropped, &write_params) {
-            eprintln!("debug_dir: failed to write {bgr_path:?}: {e}");
+            eprintln!("debug_dir: failed to write {}: {e}", bgr_path.display());
         }
 
         let mask_path = dir.join(format!("frame_{frame_idx:06}_{tag}_mask.png"));
         if let Err(e) = imgcodecs::imwrite(&mask_path.to_string_lossy(), mask, &write_params) {
-            eprintln!("debug_dir: failed to write {mask_path:?}: {e}");
+            eprintln!("debug_dir: failed to write {}: {e}", mask_path.display());
         }
     }
 
@@ -633,7 +633,7 @@ impl<I: Iterator<Item = VideoFrame>> SubtitleSearch<I> {
     /// closed, whether it was kept or discarded — a discarded run's folder is
     /// exactly as inspectable as a kept one, since that's the whole point.
     fn dump_summary(&self, run: &Run, end_timestamp: Duration, kept: bool) {
-        let Some(dir) = self.run_dir(run.run_id) else {
+        let Some(dir) = self.run_dir(run.id) else {
             return;
         };
 
@@ -645,7 +645,10 @@ impl<I: Iterator<Item = VideoFrame>> SubtitleSearch<I> {
             self.params.min_run_len,
         );
         if let Err(e) = std::fs::write(dir.join("SUMMARY.txt"), summary) {
-            eprintln!("debug_dir: failed to write SUMMARY.txt in {dir:?}: {e}");
+            eprintln!(
+                "debug_dir: failed to write SUMMARY.txt in {}: {e}",
+                dir.display()
+            );
         }
 
         if let Ok((mask, sample)) = run.finalize(self.params.mask_stability_thresh) {
@@ -679,7 +682,6 @@ impl<I: Iterator<Item = VideoFrame>> Iterator for SubtitleSearch<I> {
             let Some(frame) = self.frames.next() else {
                 self.done = true;
                 if let Some(run) = self.current_run.take() {
-                    let end_frame = self.frame_idx.saturating_sub(1);
                     let kept = run.len >= self.params.min_run_len;
                     if debugging {
                         self.dump_summary(&run, run.start_timestamp, kept);
@@ -719,7 +721,7 @@ impl<I: Iterator<Item = VideoFrame>> Iterator for SubtitleSearch<I> {
 
                 (Some(mut run), true) => {
                     if debugging {
-                        self.dump_frame(run.run_id, idx, &bgr, &mask, "cont");
+                        self.dump_frame(run.id, idx, &bgr, &mask, "cont");
                     }
 
                     let sim = Self::similarity(&run.anchor_mask, &mask).unwrap_or(0.0);
@@ -785,7 +787,7 @@ impl<I: Iterator<Item = VideoFrame>> Iterator for SubtitleSearch<I> {
                 (Some(mut run), false) => {
                     run.gap += 1;
                     if debugging {
-                        self.dump_frame(run.run_id, idx, &bgr, &mask, "gap");
+                        self.dump_frame(run.id, idx, &bgr, &mask, "gap");
                     }
 
                     if run.gap <= self.params.max_gap {

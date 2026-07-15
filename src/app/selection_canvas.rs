@@ -3,15 +3,10 @@ use cosmic::iced::Color;
 
 use cosmic::iced::Point;
 use cosmic::iced::core::mouse;
-use cosmic::widget;
 use cosmic::widget::canvas;
-use iced::core::image::Renderer;
-use iced::wgpu::naga::ImageClass;
-
-use crate::app::Message;
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
-pub(crate) enum ClickState {
+pub enum ClickState {
     #[default]
     WaitingFirst,
     WaitingSecond(iced::Point),
@@ -19,7 +14,7 @@ pub(crate) enum ClickState {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) enum HandleDrag {
+pub enum HandleDrag {
     #[default]
     None,
     Picture,
@@ -28,7 +23,7 @@ pub(crate) enum HandleDrag {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) enum KeyboardEdge {
+pub enum KeyboardEdge {
     #[default]
     Top,
     Bottom,
@@ -68,33 +63,39 @@ impl KeyboardEdge {
 }
 
 #[derive(Default)]
-pub(crate) struct SelectionCanvas {
-    pub(crate) last_reset_generation: u32,
-    pub(crate) last_bounds: iced::Rectangle,
-    pub(crate) click_state: ClickState,
-    pub(crate) keyboard_edge: Option<KeyboardEdge>,
-    pub(crate) selection: Option<iced::Rectangle>,
-    pub(crate) handle_drag: HandleDrag,
-    pub(crate) drag_anchor: iced::Point,
-    pub(crate) cache: canvas::Cache,
-    pub(crate) drag_start: iced::Point,
-    pub(crate) previous_selection: iced::Rectangle,
+pub struct SelectionCanvas {
+    pub last_reset_generation: u32,
+    pub last_bounds: iced::Rectangle,
+    pub click_state: ClickState,
+    pub keyboard_edge: Option<KeyboardEdge>,
+    pub selection: Option<iced::Rectangle>,
+    pub handle_drag: HandleDrag,
+    pub drag_anchor: iced::Point,
+    pub cache: canvas::Cache,
+    pub drag_start: iced::Point,
+    pub previous_selection: iced::Rectangle,
 }
 
-pub(crate) struct SelectionProgram {
-    pub(crate) reset_generation: u32,
+pub struct SelectionProgram {
+    pub reset_generation: u32,
 }
 
-pub(crate) const HANDLE_RADIUS: f32 = 7.0;
+pub const HANDLE_RADIUS: f32 = 7.0;
 
-pub(crate) const EDGE_HANDLE: f32 = 5.0;
+pub const EDGE_HANDLE: f32 = 5.0;
 
-pub(crate) fn hit_handle(point: iced::Point, handle: iced::Point) -> bool {
+pub fn hit_handle(point: iced::Point, handle: iced::Point) -> bool {
     (point.x - handle.x).abs() <= HANDLE_RADIUS && (point.y - handle.y).abs() <= HANDLE_RADIUS
 }
 
-pub(crate) fn hit_edge(point: iced::Point, bounds: iced::Rectangle, edge: KeyboardEdge) -> bool {
+pub fn hit_edge(point: iced::Point, bounds: iced::Rectangle, edge: KeyboardEdge) -> bool {
     edge.get_edge_rectangle(bounds, EDGE_HANDLE).contains(point)
+}
+
+#[derive(Debug, Clone)]
+pub enum Message {
+    CanvasSize(iced::Rectangle),
+    ScreenshotRegion(Option<iced::Rectangle>),
 }
 
 impl canvas::Program<Message, cosmic::Theme, cosmic::Renderer> for SelectionProgram {

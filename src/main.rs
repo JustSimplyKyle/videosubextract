@@ -31,9 +31,9 @@ fn main() -> cosmic::iced::Result {
 
 static OCR: LazyLock<OcrEngine> = LazyLock::new(|| {
     OcrEngine::from_bytes(
-        include_bytes!("../models/PP-OCRv5_mobile_det.mnn"),
-        include_bytes!("../models/PP-OCRv5_mobile_rec.mnn"),
-        include_bytes!("../models/ppocr_keys_v5.txt"),
+        include_bytes!("../models/PP-OCRv6_medium_det.mnn"),
+        include_bytes!("../models/PP-OCRv6_medium_rec.mnn"),
+        include_bytes!("../models/ppocr_keys_v6_medium.txt"),
         Some(ocr_rs::OcrEngineConfig {
             det_options: ocr_rs::DetOptions {
                 ..Default::default()

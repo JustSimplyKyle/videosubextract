@@ -1,12 +1,13 @@
 use cosmic::iced;
 use eyre::{Context, ContextCompat};
 use ffmpeg_the_third::{
-    self as ffmpeg, Packet, Rational, Rescale, codec,
-    ffi::{AV_TIME_BASE, av_rescale_q},
+    self as ffmpeg, Rational, Rescale, codec,
+    ffi::AV_TIME_BASE,
     filter::Graph,
     format::Pixel,
     frame::Video,
     media::{self},
+    rescale::TIME_BASE,
     threading,
 };
 use opencv::{
@@ -269,7 +270,7 @@ pub(crate) fn frame_to_mats(
 
     let timestamp = frame.timestamp().expect("frame has no timestamp");
 
-    let us = timestamp.rescale(info.time_base, ffmpeg::ffi::AV_TIME_BASE_Q);
+    let us = timestamp.rescale(info.time_base, TIME_BASE);
 
     let timestamp = Duration::from_micros(us as u64);
 
