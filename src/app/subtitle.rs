@@ -1,14 +1,17 @@
 use crate::ocr::OcrProvider;
-use iced::futures::SinkExt;
+use crate::subfinder::SubtitleEvent;
+use iced::futures::{SinkExt, StreamExt};
 
 use super::*;
 use std::cell::Cell;
 use std::collections::{BTreeSet, HashSet};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const JUMP_TO_END_DELAY: Duration = Duration::from_secs(3);
+const OCR_PARALELLISM: usize = 4;
 
 #[derive(Debug, Clone)]
 pub struct SubtitleResult {
@@ -26,7 +29,6 @@ pub struct Model {
     pub search_selection: Option<iced::Rectangle>,
     search_ocr: Option<RuntimeOcrModel>,
     pub results: Vec<SubtitleResult>,
-    pub removed_results_id: BTreeSet<usize>,
     pub preview: Option<widget::image::Handle>,
     pub current_frame: usize,
     pub done: bool,
@@ -70,6 +72,7 @@ pub enum Message {
         preview: RgbaImage,
     },
     Delete(usize),
+    MergeWithPrevious(usize),
     Scrolled {
         at_end: bool,
     },
@@ -195,6 +198,11 @@ impl Model {
                 self.results.remove(x);
                 Event::None
             }
+            Message::MergeWithPrevious(x) => {
+                self.results[x - 1].end_timestamp = self.results[x].end_timestamp;
+                self.results.remove(x);
+                Event::None
+            }
         }
     }
 
@@ -275,9 +283,17 @@ impl Model {
                     let toolbar = widget::column![
                         widget::button::icon(widget::icon::from_name("edit-delete-symbolic"))
                             .on_press(Message::Delete(u))
-                            .class(cosmic::theme::Button::Destructive)
+                            .class(cosmic::theme::Button::Destructive),
                     ]
+                    .push_maybe(
+                        (u != 0).then_some(
+                            widget::button::icon(widget::icon::from_name("go-up-symbolic"))
+                                .on_press(Message::MergeWithPrevious(u))
+                                .class(cosmic::theme::Button::Icon),
+                        ),
+                    )
                     .width(TOOLBAR_SIZE)
+                    .spacing(space_s)
                     .align_x(Alignment::Center);
 
                     let image = widget::image(result.preview.clone())
@@ -505,31 +521,34 @@ fn subtitle_search_stream(
     let path = search.key.path.clone();
     let selection = search.selection;
     let ocr = search.ocr.clone();
-    let preview_interval = (search.frame_rate / 5.0).ceil().max(1.0) as usize;
+    let preview_interval = 100;
 
     iced::stream::channel(
-        8,
+        OCR_PARALELLISM,
         async move |mut tx: futures::channel::mpsc::Sender<Message>| {
-            let (btx, mut brx) = tokio::sync::mpsc::channel::<Message>(8);
+            let (btx1, mut brx) = tokio::sync::mpsc::channel::<Message>(OCR_PARALELLISM);
+            let btx2 = btx1.clone();
+            let (sender, receiver) = tokio::sync::mpsc::channel::<SubtitleEvent>(OCR_PARALELLISM);
+            let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
 
             tokio::task::spawn_blocking(move || {
                 let input = match ffmpeg_the_third::format::input(&path) {
                     Ok(x) => x,
                     Err(e) => {
-                        let _ = btx.blocking_send(Message::SearchError(e.to_string()));
+                        let _ = btx1.blocking_send(Message::SearchError(e.to_string()));
                         return;
                     }
                 };
                 let (_, iter) = match create_video_player::<false>(input, selection) {
                     Ok(x) => x,
                     Err(e) => {
-                        let _ = btx.blocking_send(Message::SearchError(e.to_string()));
+                        let _ = btx1.blocking_send(Message::SearchError(e.to_string()));
                         return;
                     }
                 };
                 let frame_iter = ProgressIter {
                     inner: iter.filter_map(Result::ok),
-                    tx: btx.clone(),
+                    tx: btx1.clone(),
                     count: 0,
                     interval: preview_interval,
                 };
@@ -537,28 +556,55 @@ fn subtitle_search_stream(
                 let search = SubtitleSearch::new(frame_iter, Params::default());
 
                 for event in search {
-                    let Ok(preview) = super::mat_to_image_handle(&event.sample_bgr) else {
-                        continue;
-                    };
+                    let result = sender.blocking_send(event);
+                }
 
-                    let text = preview
-                        .clone()
-                        .apply(DynamicImage::ImageRgba8)
-                        .apply(|img| ocr.read().recognize_text(&img))
-                        .unwrap_or_default();
+                let _ = completion_tx.send(());
+            });
 
-                    let msg = Message::EventFound {
-                        start_timestamp: event.start_timestamp,
-                        end_timestamp: event.end_timestamp,
-                        text,
-                        preview,
-                    };
-                    if btx.blocking_send(msg).is_err() {
-                        return;
+            tokio::task::spawn(async move {
+                let events = iced::futures::stream::unfold(receiver, |mut receiver| async move {
+                    receiver.recv().await.map(|event| (event, receiver))
+                });
+                let jobs = events.map(move |event| {
+                    let ocr = ocr.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let preview = super::mat_to_image_handle(&event.sample_bgr).ok()?;
+
+                        let text = preview
+                            .clone()
+                            .apply(DynamicImage::ImageRgba8)
+                            .apply(|img| ocr.read().recognize_text(&img))
+                            .unwrap_or_default();
+
+                        Some(Message::EventFound {
+                            start_timestamp: event.start_timestamp,
+                            end_timestamp: event.end_timestamp,
+                            text,
+                            preview,
+                        })
+                    })
+                });
+                let mut results = Box::pin(jobs.buffered(OCR_PARALELLISM));
+
+                while let Some(result) = results.next().await {
+                    match result {
+                        Ok(Some(message)) => {
+                            if btx2.send(message).await.is_err() {
+                                return;
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            let _ = btx2.send(Message::SearchError(error.to_string())).await;
+                            return;
+                        }
                     }
                 }
 
-                let _ = btx.blocking_send(Message::SearchDone);
+                if completion_rx.await.is_ok() {
+                    let _ = btx2.send(Message::SearchDone).await;
+                }
             });
 
             while let Some(msg) = brx.recv().await {
