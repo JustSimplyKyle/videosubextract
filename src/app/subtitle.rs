@@ -2,8 +2,13 @@ use crate::ocr::OcrProvider;
 use iced::futures::SinkExt;
 
 use super::*;
-use std::sync::Arc;
+use std::cell::Cell;
+use std::collections::{BTreeSet, HashSet};
+use std::rc::Rc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
+
+const JUMP_TO_END_DELAY: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Clone)]
 pub struct SubtitleResult {
@@ -19,12 +24,22 @@ pub struct Model {
     pub search_gen: usize,
     pub search_path: Option<std::path::PathBuf>,
     pub search_selection: Option<iced::Rectangle>,
-    search_ocr: Option<Arc<dyn OcrProvider>>,
+    search_ocr: Option<RuntimeOcrModel>,
     pub results: Vec<SubtitleResult>,
+    pub removed_results_id: BTreeSet<usize>,
     pub preview: Option<widget::image::Handle>,
     pub current_frame: usize,
     pub done: bool,
     pub progress_bar: ProgressBar,
+    scrollbar_jump_status: ScrollbarJumpStatus,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum ScrollbarJumpStatus {
+    #[default]
+    NoShow,
+    TimeoutRunning,
+    DisplayButton,
 }
 
 pub struct ProgressBar(indicatif::ProgressBar);
@@ -54,6 +69,14 @@ pub enum Message {
         text: String,
         preview: RgbaImage,
     },
+    Delete(usize),
+    Scrolled {
+        at_end: bool,
+    },
+    JumpToEnd {
+        id: iced::id::Id,
+    },
+    ShowJumpToEnd,
     SearchDone,
     SearchError(String),
     GoToPostProduction,
@@ -70,21 +93,23 @@ impl Model {
         &mut self,
         path: std::path::PathBuf,
         selection: Option<iced::Rectangle>,
-        ocr: Arc<dyn OcrProvider>,
+        ocr: OcrModel,
     ) {
         self.search_active = true;
         self.search_gen += 1;
         self.search_path = Some(path);
         self.search_selection = selection;
-        self.search_ocr = Some(ocr);
+        self.search_ocr = Some(RuntimeOcrModel::new(ocr));
         self.results.clear();
         self.preview = None;
         self.current_frame = 0;
         self.done = false;
         self.progress_bar.set_elapsed(Duration::ZERO);
+        self.scrollbar_jump_status = ScrollbarJumpStatus::NoShow;
     }
 
-    pub fn update(&mut self, message: Message) -> Event {
+    pub fn update(&mut self, message: Message, config: &Config) -> Event {
+        self.set_ocr_model(config.ocr_model);
         match message {
             Message::Progress { frame, preview } => {
                 self.progress_bar.set_position(self.current_frame as u64);
@@ -128,12 +153,6 @@ impl Model {
                     text,
                     preview,
                 });
-                // self.results.dedup_by(|y, x| {
-                //     let time_criteria = (dbg!(y.start_timestamp) - dbg!(x.end_timestamp))
-                //         < Duration::from_millis(600);
-                //     let text_similiary_criteria = y.text.trim() == x.text.trim();
-                //     time_criteria && text_similiary_criteria
-                // });
                 Event::None
             }
             Message::SearchDone => {
@@ -148,10 +167,44 @@ impl Model {
                 Event::None
             }
             Message::GoToPostProduction => Event::GoToPostProduction,
+            Message::Scrolled { at_end } => {
+                if at_end {
+                    self.scrollbar_jump_status = ScrollbarJumpStatus::NoShow;
+                    Event::None
+                } else if matches!(self.scrollbar_jump_status, ScrollbarJumpStatus::NoShow) {
+                    self.scrollbar_jump_status = ScrollbarJumpStatus::TimeoutRunning;
+
+                    Event::Run(Task::perform(tokio::time::sleep(JUMP_TO_END_DELAY), |()| {
+                        Message::ShowJumpToEnd
+                    }))
+                } else {
+                    Event::None
+                }
+            }
+            Message::JumpToEnd { id } => {
+                self.scrollbar_jump_status = ScrollbarJumpStatus::NoShow;
+                Event::Run(iced::widget::operation::snap_to_end(id))
+            }
+            Message::ShowJumpToEnd => {
+                if self.scrollbar_jump_status == ScrollbarJumpStatus::TimeoutRunning {
+                    self.scrollbar_jump_status = ScrollbarJumpStatus::DisplayButton;
+                }
+                Event::None
+            }
+            Message::Delete(x) => {
+                self.results.remove(x);
+                Event::None
+            }
         }
     }
 
-    pub fn view(&self, total_frames: Option<usize>, video_frame_rate: f64) -> Element<'_, Message> {
+    pub fn set_ocr_model(&self, ocr: OcrModel) {
+        if let Some(search_ocr) = &self.search_ocr {
+            search_ocr.set(ocr);
+        }
+    }
+
+    pub fn view(&self, total_frames: Option<usize>, fps: f64) -> Element<'_, Message> {
         let spacing = cosmic::theme::spacing();
         let space_s = cosmic::theme::spacing().space_s;
         if let Some(len) = total_frames {
@@ -167,9 +220,12 @@ impl Model {
             .apply(Element::from)
         } else if self.search_active {
             let status_text = widget::text(format!(
-                "## Elapsed {} · ETA {} · frame {}",
+                "## Elapsed {} · IGT {} · frame {}",
                 self.progress_bar.elapsed().apply(format_duration),
-                self.progress_bar.eta().apply(format_duration),
+                (self.current_frame as u64 / fps as u64)
+                    .apply(Duration::from_secs)
+                    .apply(format_duration),
+                // self.progress_bar.eta().apply(format_duration), the eta approximation sucks
                 self.current_frame
             ))
             .class(cosmic::theme::Text::Accent);
@@ -196,25 +252,45 @@ impl Model {
             .class(cosmic::theme::Button::Suggested)
             .on_press_maybe((!self.search_active).then_some(Message::GoToPostProduction));
 
+        const TOOLBAR_SIZE: f32 = 48.0;
+
         let grid = widget::responsive(move |size| {
+            let horizontal_padding = 80.0; // [0, 40] on both sides
+            let column_gaps = f32::from(spacing.space_s) * 2.0;
+
+            let available_width =
+                (size.width - horizontal_padding - column_gaps - TOOLBAR_SIZE).max(0.0);
+
+            let text_width = (available_width * 0.35).max(160.0).min(available_width);
+
+            let image_width = (available_width - text_width).max(0.0);
+
             self.results
                 .iter()
-                .fold(widget::grid(), |grid, r| {
-                    let t_start = r.start_timestamp.as_secs_f64();
-                    let t_end = r.end_timestamp.as_secs_f64();
+                .enumerate()
+                .fold(widget::grid(), |grid, (u, result)| {
+                    let t_start = result.start_timestamp.as_secs_f64();
+                    let t_end = result.end_timestamp.as_secs_f64();
 
-                    let text_width = (size.width * 0.35).max(160.0);
-                    let img_width = size.width - text_width;
+                    let toolbar = widget::column![
+                        widget::button::icon(widget::icon::from_name("edit-delete-symbolic"))
+                            .on_press(Message::Delete(u))
+                            .class(cosmic::theme::Button::Destructive)
+                    ]
+                    .width(TOOLBAR_SIZE)
+                    .align_x(Alignment::Center);
 
-                    let img = widget::image(r.preview.clone())
+                    let image = widget::image(result.preview.clone())
                         .content_fit(iced::ContentFit::Contain)
-                        .width(img_width)
+                        .width(image_width)
                         .height(Length::Shrink);
 
                     let timeline = widget::text(format!("{t_start:.1}s – {t_end:.1}s"));
-                    let ocr = widget::text(r.text.trim()).class(cosmic::theme::Text::Accent);
 
-                    grid.push(img)
+                    let ocr = widget::text(result.text.trim()).class(cosmic::theme::Text::Accent);
+
+                    grid.push(toolbar)
+                        .push(image)
                         .push(
                             widget::column![timeline, ocr]
                                 .spacing(space_s / 2)
@@ -260,12 +336,36 @@ impl Model {
             col = col.push(preview);
         }
 
-        col.push(grid)
+        let scrollable_id = iced::id::Id::new("scrollable");
+        let scrollable_id_clone = scrollable_id.clone();
+
+        let results = grid
+            .apply(widget::container)
             .padding(iced::Padding::ZERO.right(60))
             .height(Length::Fill)
             .apply(widget::scrollable)
-            .apply(widget::container)
-            .into()
+            .on_scroll(|viewport| {
+                let content_fits =
+                    viewport.content_bounds().height <= viewport.bounds().height + 1.0;
+                let at_end = content_fits || viewport.relative_offset().y >= 0.999;
+                Message::Scrolled { at_end }
+            })
+            .id(scrollable_id_clone)
+            .apply(Element::from);
+
+        let stack = iced::widget::Stack::new().push(results);
+
+        let stack = if self.scrollbar_jump_status == ScrollbarJumpStatus::DisplayButton {
+            let jump_to_end = widget::button::text("Jump to latest ↓")
+                .class(cosmic::theme::Button::Suggested)
+                .on_press(Message::JumpToEnd { id: scrollable_id });
+
+            stack.push(iced::widget::bottom_right(jump_to_end).padding(spacing.space_m))
+        } else {
+            stack
+        };
+
+        col.push(stack).into()
     }
 
     pub fn subscription(&self, video_frame_rate: f64) -> Subscription<Message> {
@@ -337,7 +437,24 @@ struct SubtitleSearchSubscription {
     key: SubtitleSearchKey,
     selection: Option<iced::Rectangle>,
     frame_rate: f64,
-    ocr: Arc<dyn OcrProvider>,
+    ocr: RuntimeOcrModel,
+}
+
+#[derive(Clone)]
+struct RuntimeOcrModel(Arc<RwLock<OcrModel>>);
+
+impl RuntimeOcrModel {
+    fn new(model: OcrModel) -> Self {
+        Self(Arc::new(RwLock::new(model)))
+    }
+
+    fn read(&self) -> OcrModel {
+        *self.0.read().unwrap_or_else(|error| error.into_inner())
+    }
+
+    fn set(&self, model: OcrModel) {
+        *self.0.write().unwrap_or_else(|error| error.into_inner()) = model;
+    }
 }
 
 impl std::hash::Hash for SubtitleSearchSubscription {
@@ -427,7 +544,7 @@ fn subtitle_search_stream(
                     let text = preview
                         .clone()
                         .apply(DynamicImage::ImageRgba8)
-                        .apply(|img| ocr.recognize_text(&img))
+                        .apply(|img| ocr.read().recognize_text(&img))
                         .unwrap_or_default();
 
                     let msg = Message::EventFound {

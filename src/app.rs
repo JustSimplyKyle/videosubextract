@@ -6,7 +6,7 @@ pub mod selection_canvas;
 pub mod subtitle;
 
 use crate::config::Config;
-use crate::ocr::{OcrModel, OcrProvider};
+use crate::ocr::OcrModel;
 use crate::subfinder::{Params, SubtitleSearch};
 use crate::video_player::{self, InnerPlayer, VideoFrame, create_video_player};
 use crate::{fl, video_player::VideoPlayerController};
@@ -17,9 +17,11 @@ use cosmic::iced::{self, Alignment, Length, Subscription, Task, futures};
 use cosmic::prelude::*;
 
 use cosmic::widget::{self, about::About, icon, menu, nav_bar};
+use eyre::Context;
 use iced::futures::SinkExt;
 use image::{DynamicImage, RgbaImage};
 use opencv::core::{MatTraitConst, MatTraitConstManual};
+use opencv::sys::std_vectorLcv_PtrLcv_dnn_BackendWrapperGG_set_size_t_const_PtrLBackendWrapperG;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -132,14 +134,14 @@ impl cosmic::Application for AppModel {
             .insert()
             .text(fl!("page-subtitle"))
             .data::<Page>(Page::Subtitle)
-            .icon(icon::from_name("applications-games-symbolic"))
+            .icon(icon::from_name("applications-graphics-symbolic"))
             .id();
 
         let post_production_page_id = nav
             .insert()
             .text(fl!("page-post"))
             .data::<Page>(Page::PostProduction)
-            .icon(icon::from_name("applications-games-symbolic"))
+            .icon(icon::from_name("applications-engineering-symbolic"))
             .id();
 
         let about = About::default()
@@ -203,22 +205,51 @@ impl cosmic::Application for AppModel {
         Some(&self.nav)
     }
 
-    fn context_drawer(&self) -> Option<context_drawer::ContextDrawer<'_, Self::Message>> {
+    fn dialog(&self) -> Option<Element<'_, Self::Message>> {
         if !self.core.window.show_context {
             return None;
         }
 
+        let spacing = cosmic::theme::spacing();
+
+        let build_dialog = |title, element, close_msg| {
+            widget::dialog()
+                .title(title)
+                .control(widget::scrollable(element).height(Length::Fill))
+                .width(Length::Fill)
+                .apply(widget::container)
+                .center(700)
+                .apply(|x| {
+                    let s = iced::widget::Stack::new();
+                    let btn = widget::button::icon(icon::from_name("navbar-closed-symbolic"))
+                        .class(cosmic::theme::Button::Destructive)
+                        .on_press(close_msg)
+                        .apply(widget::container)
+                        .align_right(Length::Fill)
+                        .padding(spacing.space_m);
+                    s.push(x).push(btn)
+                })
+                .apply(widget::container)
+                .center(Length::Fill)
+                .style(|_| widget::container::background(iced::Color::from_rgba(0., 0., 0., 0.45)))
+                .apply(Element::from)
+        };
+
         Some(match self.context_page {
-            ContextPage::About => context_drawer::about(
-                &self.about,
-                |url| Message::LaunchUrl(url.to_string()),
-                Message::ToggleContextPage(ContextPage::About),
-            ),
-            ContextPage::Settings => context_drawer::context_drawer(
+            ContextPage::About => {
+                let about = widget::about(&self.about, |url| Message::LaunchUrl(url.to_string()));
+                build_dialog(
+                    "About",
+                    about,
+                    Message::ToggleContextPage(ContextPage::About),
+                )
+            }
+
+            ContextPage::Settings => build_dialog(
+                "Settings",
                 self.settings_view(),
                 Message::ToggleContextPage(ContextPage::Settings),
-            )
-            .title("Settings"),
+            ),
         })
     }
 
@@ -312,7 +343,9 @@ impl cosmic::Application for AppModel {
             }
             Message::UpdateConfig(config) => {
                 self.config = config;
-                self.config.write_entry(&self.config_handler);
+                if let Err(e) = self.config.write_entry(&self.config_handler) {
+                    eprintln!("failed to save configuration: {e}");
+                }
                 Task::none()
             }
             Message::SetOcrModel(model) => {
@@ -338,11 +371,8 @@ impl cosmic::Application for AppModel {
 
                 match event {
                     prepare::Event::StartSubtitleSearch(path, selection) => {
-                        self.subtitle.start_search(
-                            path,
-                            selection,
-                            Arc::new(self.config.ocr_model),
-                        );
+                        self.subtitle
+                            .start_search(path, selection, self.config.ocr_model);
                         self.nav.activate(self.subtitle_page_id);
                         self.update_title()
                     }
@@ -351,7 +381,7 @@ impl cosmic::Application for AppModel {
                 }
             }
             Message::Subtitle(msg) => {
-                let event = self.subtitle.update(msg);
+                let event = self.subtitle.update(msg, &self.config);
 
                 match event {
                     subtitle::Event::GoToPostProduction => {
@@ -397,7 +427,7 @@ impl AppModel {
                     widget::dropdown(&OcrModel::LABELS, selected, |index| {
                         Message::SetOcrModel(OcrModel::ALL[index])
                     })
-                    .gap(dbg!(f32::from(spacing.space_m))),
+                    .gap(f32::from(spacing.space_m)),
                 ))
                 .into(),
         ])
@@ -417,12 +447,44 @@ impl AppModel {
 }
 
 pub fn mat_to_image_handle(mat: &opencv::core::Mat) -> eyre::Result<RgbaImage> {
-    let rows = mat.rows() as u32;
-    let cols = mat.cols() as u32;
-    let bgr = mat.data_bytes()?;
-    let rgba = bgr
-        .chunks_exact(3)
-        .flat_map(|p| [p[2], p[1], p[0], 255u8])
-        .collect::<Vec<_>>();
-    RgbaImage::from_raw(cols, rows, rgba).ok_or_else(|| eyre::eyre!("isn't a valid rgbaimage"))
+    let rows = u32::try_from(mat.rows()).context("image has a negative height")?;
+    let cols = u32::try_from(mat.cols()).context("image has a negative width")?;
+    let channels = mat.channels();
+
+    // A Mat ROI can have a stride wider than its visible rows. `copy_to` makes
+    // an independent, packed copy; `try_clone` would only clone the Mat header.
+    let mut packed = opencv::core::Mat::default();
+    mat.copy_to(&mut packed)
+        .context("failed to copy image into packed storage")?;
+    let pixels = packed
+        .data_bytes()
+        .context("failed to access packed image bytes")?;
+
+    let pixel_count = (cols as usize)
+        .checked_mul(rows as usize)
+        .ok_or_else(|| eyre::eyre!("image dimensions are too large"))?;
+    let expected_len = pixel_count
+        .checked_mul(channels as usize)
+        .ok_or_else(|| eyre::eyre!("image buffer is too large"))?;
+    if !matches!(channels, 1 | 3 | 4) || pixels.len() != expected_len {
+        return Err(eyre::eyre!(
+            "expected a packed 8-bit grayscale, BGR, or BGRA Mat; got {channels} channels and {} bytes for a {cols}x{rows} image",
+            pixels.len()
+        ));
+    }
+
+    let mut rgba = Vec::with_capacity(pixel_count * 4);
+    match channels {
+        1 => rgba.extend(pixels.iter().flat_map(|&v| [v, v, v, 255])),
+        3 => rgba.extend(pixels.chunks_exact(3).flat_map(|p| [p[2], p[1], p[0], 255])),
+        4 => rgba.extend(
+            pixels
+                .chunks_exact(4)
+                .flat_map(|p| [p[2], p[1], p[0], p[3]]),
+        ),
+        _ => unreachable!("channel count was checked above"),
+    }
+
+    RgbaImage::from_raw(cols, rows, rgba)
+        .ok_or_else(|| eyre::eyre!("failed to construct RGBA image"))
 }

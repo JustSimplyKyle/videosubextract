@@ -219,7 +219,7 @@ impl Model {
         let selection_label = self
             .screenshot_selection_scaled
             .map_or_else(
-                || "Click twice on the image to set two corners".into(),
+                || "Click twice on the image to two corners".into(),
                 |r| {
                     format!(
                         "Selection: ({:.0}, {:.0})  {:.0}×{:.0}",
