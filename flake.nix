@@ -48,8 +48,13 @@
               openssl
               libxkbcommon
               wayland
+              libGL
+              libxkbcommon
+              glib
+              dbus
               just
               ffmpeg.dev
+              opencc
             ]
             # opencv
             ++ [
@@ -57,7 +62,20 @@
               stdenv.cc.cc
               clang
               libclang
+            ]
+            # icons
+            ++ [
+              adwaita-icon-theme
+              hicolor-icon-theme
             ];
+
+          XDG_DATA_DIRS = pkgs.lib.concatStringsSep ":" [
+            "${pkgs.adwaita-icon-theme}/share"
+            "${pkgs.hicolor-icon-theme}/share"
+            "$XDG_DATA_DIRS" # preserve any existing paths
+          ];
+
+          # OPENCC_DATA_PATH = "${pkgs.opencc}/share/opencc";
 
           FONT_PATH = "${pkgs.noto-fonts-cjk-sans}/share/fonts/opentype/noto-cjk/NotoSansCJK-VF.otf.ttc";
           RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";

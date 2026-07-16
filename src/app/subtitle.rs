@@ -1,6 +1,8 @@
+use crate::ocr::OcrProvider;
 use iced::futures::SinkExt;
 
 use super::*;
+use std::sync::Arc;
 use std::time::Duration;
 
 #[derive(Debug, Clone)]
@@ -17,6 +19,7 @@ pub struct Model {
     pub search_gen: usize,
     pub search_path: Option<std::path::PathBuf>,
     pub search_selection: Option<iced::Rectangle>,
+    search_ocr: Option<Arc<dyn OcrProvider>>,
     pub results: Vec<SubtitleResult>,
     pub preview: Option<widget::image::Handle>,
     pub current_frame: usize,
@@ -63,11 +66,17 @@ pub enum Event {
 }
 
 impl Model {
-    pub fn start_search(&mut self, path: std::path::PathBuf, selection: Option<iced::Rectangle>) {
+    pub fn start_search(
+        &mut self,
+        path: std::path::PathBuf,
+        selection: Option<iced::Rectangle>,
+        ocr: Arc<dyn OcrProvider>,
+    ) {
         self.search_active = true;
         self.search_gen += 1;
         self.search_path = Some(path);
         self.search_selection = selection;
+        self.search_ocr = Some(ocr);
         self.results.clear();
         self.preview = None;
         self.current_frame = 0;
@@ -263,16 +272,18 @@ impl Model {
         let mut subscriptions = vec![];
         if self.search_active
             && let Some(path) = &self.search_path
+            && let Some(ocr) = &self.search_ocr
         {
-            let key = SubtitleSearchKey {
-                generation: self.search_gen,
-                path: path.clone(),
+            let search = SubtitleSearchSubscription {
+                key: SubtitleSearchKey {
+                    generation: self.search_gen,
+                    path: path.clone(),
+                },
+                selection: self.search_selection,
+                frame_rate: video_frame_rate,
+                ocr: ocr.clone(),
             };
-            let sel = self.search_selection;
-            subscriptions.push(Subscription::run_with(
-                (key, FakeHashable(sel), FakeHashable(video_frame_rate)),
-                move |(k, sel, fps)| subtitle_search_stream(k.path.clone(), sel.0, fps.0),
-            ));
+            subscriptions.push(Subscription::run_with(search, subtitle_search_stream));
         }
         Subscription::batch(subscriptions)
     }
@@ -316,15 +327,34 @@ fn frame_to_srt_timestamp(frame: Duration) -> String {
     format!("{h:02}:{m:02}:{s:02},{ms:03}")
 }
 
-struct FakeHashable<T>(T);
-impl<T> std::hash::Hash for FakeHashable<T> {
-    fn hash<H: std::hash::Hasher>(&self, _state: &mut H) {}
-}
-
 #[derive(Clone, Hash, PartialEq, Eq)]
 struct SubtitleSearchKey {
     generation: usize,
     path: std::path::PathBuf,
+}
+
+struct SubtitleSearchSubscription {
+    key: SubtitleSearchKey,
+    selection: Option<iced::Rectangle>,
+    frame_rate: f64,
+    ocr: Arc<dyn OcrProvider>,
+}
+
+impl std::hash::Hash for SubtitleSearchSubscription {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.key.hash(state);
+        self.selection
+            .map(|selection| {
+                (
+                    selection.x.to_bits(),
+                    selection.y.to_bits(),
+                    selection.width.to_bits(),
+                    selection.height.to_bits(),
+                )
+            })
+            .hash(state);
+        self.frame_rate.to_bits().hash(state);
+    }
 }
 
 struct ProgressIter<I> {
@@ -340,24 +370,25 @@ impl<I: Iterator<Item = VideoFrame>> Iterator for ProgressIter<I> {
     fn next(&mut self) -> Option<Self::Item> {
         let mat = self.inner.next()?;
         self.count += 1;
-        if self.count.is_multiple_of(self.interval) {
-            if let Ok(rgba) = super::mat_to_image_handle(&mat.mat) {
-                let _ = self.tx.try_send(Message::Progress {
-                    frame: self.count,
-                    preview: rgba,
-                });
-            }
+        if self.count.is_multiple_of(self.interval)
+            && let Ok(rgba) = super::mat_to_image_handle(&mat.mat)
+        {
+            let _ = self.tx.try_send(Message::Progress {
+                frame: self.count,
+                preview: rgba,
+            });
         }
         Some(mat)
     }
 }
 
 fn subtitle_search_stream(
-    path: std::path::PathBuf,
-    selection: Option<iced::Rectangle>,
-    frame_rate: f64,
-) -> impl futures::Stream<Item = Message> + Send {
-    let preview_interval = (frame_rate / 5.0).ceil().max(1.0) as usize;
+    search: &SubtitleSearchSubscription,
+) -> impl futures::Stream<Item = Message> + Send + use<> {
+    let path = search.key.path.clone();
+    let selection = search.selection;
+    let ocr = search.ocr.clone();
+    let preview_interval = (search.frame_rate / 5.0).ceil().max(1.0) as usize;
 
     iced::stream::channel(
         8,
@@ -393,16 +424,11 @@ fn subtitle_search_stream(
                         continue;
                     };
 
-                    let text = super::mat_to_dynamic_image(&event.sample_bgr)
-                        .and_then(|img| OCR.recognize(&img).map_err(Into::into))
-                        .unwrap_or_default()
-                        .iter()
-                        .map(|x| &x.text)
-                        .fold(String::new(), |mut acc, x| {
-                            acc.push_str(x);
-                            acc.push('\n');
-                            acc
-                        });
+                    let text = preview
+                        .clone()
+                        .apply(DynamicImage::ImageRgba8)
+                        .apply(|img| ocr.recognize_text(&img))
+                        .unwrap_or_default();
 
                     let msg = Message::EventFound {
                         start_timestamp: event.start_timestamp,

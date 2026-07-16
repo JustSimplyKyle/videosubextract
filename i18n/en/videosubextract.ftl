@@ -1,7 +1,7 @@
 app-title = Videosubextract
 about = About
 repository = Repository
-view = View
+advanced = Advanced
 welcome = Video Hardsub Extraction
 page-id = Page { $num }
 page-prepare = Prepare

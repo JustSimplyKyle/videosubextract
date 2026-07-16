@@ -2,8 +2,10 @@
 
 use cosmic::cosmic_config::{self, CosmicConfigEntry, cosmic_config_derive::CosmicConfigEntry};
 
+use crate::ocr::OcrModel;
+
 #[derive(Debug, Default, Clone, CosmicConfigEntry, Eq, PartialEq)]
-#[version = 1]
+#[version = 2]
 pub struct Config {
-    pub demo: String,
+    pub ocr_model: OcrModel,
 }

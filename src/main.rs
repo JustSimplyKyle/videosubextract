@@ -1,12 +1,9 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use std::sync::LazyLock;
-
-use ocr_rs::OcrEngine;
-
 mod app;
 mod config;
 mod i18n;
+mod ocr;
 pub mod subfinder;
 
 pub mod video_player;
@@ -28,23 +25,3 @@ fn main() -> cosmic::iced::Result {
     // Starts the application's event loop with `()` as the application's flags.
     cosmic::app::run::<app::AppModel>(settings, ())
 }
-
-static OCR: LazyLock<OcrEngine> = LazyLock::new(|| {
-    OcrEngine::from_bytes(
-        include_bytes!("../models/PP-OCRv6_medium_det.mnn"),
-        include_bytes!("../models/PP-OCRv6_medium_rec.mnn"),
-        include_bytes!("../models/ppocr_keys_v6_medium.txt"),
-        Some(ocr_rs::OcrEngineConfig {
-            det_options: ocr_rs::DetOptions {
-                ..Default::default()
-            },
-            rec_options: ocr_rs::RecOptions {
-                ..Default::default()
-            },
-            enable_parallel: true,
-            backend: ocr_rs::Backend::Vulkan,
-            ..Default::default()
-        }),
-    )
-    .unwrap()
-});

@@ -1,6 +1,10 @@
 .cargo/
 *.pdb
 *.mkv
+*.srt
+*.mkv
+*.txt
+*.mp4
 **/*.rs.bk
 debug/
 target/

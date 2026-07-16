@@ -6184,6 +6184,7 @@ dependencies = [
  "opencv",
  "rfd 0.17.2",
  "rust-embed",
+ "serde",
  "tokio",
 ]
 

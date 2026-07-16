@@ -5,8 +5,8 @@ pub mod prepare;
 pub mod selection_canvas;
 pub mod subtitle;
 
-use crate::OCR;
 use crate::config::Config;
+use crate::ocr::{OcrModel, OcrProvider};
 use crate::subfinder::{Params, SubtitleSearch};
 use crate::video_player::{self, InnerPlayer, VideoFrame, create_video_player};
 use crate::{fl, video_player::VideoPlayerController};
@@ -33,6 +33,7 @@ pub struct AppModel {
     about: About,
     nav: nav_bar::Model,
     key_binds: HashMap<menu::KeyBind, MenuAction>,
+    config_handler: cosmic_config::Config,
     config: Config,
     time: u32,
     watch_is_active: bool,
@@ -49,6 +50,7 @@ pub struct AppModel {
 pub enum Message {
     LaunchUrl(String),
     ToggleContextPage(ContextPage),
+    SetOcrModel(OcrModel),
     UpdateConfig(Config),
     WatchTick(u32),
     Prepare(prepare::Message),
@@ -77,11 +79,13 @@ impl std::fmt::Display for Page {
 pub enum ContextPage {
     #[default]
     About,
+    Settings,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MenuAction {
     About,
+    Settings,
 }
 
 impl menu::action::MenuAction for MenuAction {
@@ -89,6 +93,7 @@ impl menu::action::MenuAction for MenuAction {
     fn message(&self) -> Self::Message {
         match self {
             Self::About => Message::ToggleContextPage(ContextPage::About),
+            Self::Settings => Message::ToggleContextPage(ContextPage::Settings),
         }
     }
 }
@@ -144,18 +149,27 @@ impl cosmic::Application for AppModel {
             .links([(fl!("repository"), REPOSITORY)])
             .license(env!("CARGO_PKG_LICENSE"));
 
+        let (config_handler, config) =
+            match cosmic_config::Config::new(Self::APP_ID, Config::VERSION) {
+                Ok(context) => {
+                    let config = match Config::get_entry(&context) {
+                        Ok(config) => config,
+                        Err((_errors, config)) => config,
+                    };
+                    (context, config)
+                }
+                Err(error) => {
+                    panic!("failed to load configuration: {error}");
+                }
+            };
         let mut app = Self {
             core,
             context_page: ContextPage::default(),
             about,
             nav,
             key_binds: HashMap::new(),
-            config: cosmic_config::Config::new(Self::APP_ID, Config::VERSION)
-                .map(|context| match Config::get_entry(&context) {
-                    Ok(config) => config,
-                    Err((_errors, config)) => config,
-                })
-                .unwrap_or_default(),
+            config_handler,
+            config,
             time: 0,
             watch_is_active: false,
             subtitle_page_id,
@@ -173,10 +187,13 @@ impl cosmic::Application for AppModel {
 
     fn header_start(&self) -> Vec<Element<'_, Self::Message>> {
         let menu_bar = menu::bar(vec![menu::Tree::with_children(
-            menu::root(fl!("view")).apply(Element::from),
+            menu::root(fl!("advanced")).apply(Element::from),
             menu::items(
                 &self.key_binds,
-                vec![menu::Item::Button(fl!("about"), None, MenuAction::About)],
+                vec![
+                    menu::Item::Button("Settings", None, MenuAction::Settings),
+                    menu::Item::Button("About", None, MenuAction::About),
+                ],
             ),
         )]);
         vec![menu_bar.into()]
@@ -197,6 +214,11 @@ impl cosmic::Application for AppModel {
                 |url| Message::LaunchUrl(url.to_string()),
                 Message::ToggleContextPage(ContextPage::About),
             ),
+            ContextPage::Settings => context_drawer::context_drawer(
+                self.settings_view(),
+                Message::ToggleContextPage(ContextPage::Settings),
+            )
+            .title("Settings"),
         })
     }
 
@@ -290,6 +312,18 @@ impl cosmic::Application for AppModel {
             }
             Message::UpdateConfig(config) => {
                 self.config = config;
+                self.config.write_entry(&self.config_handler);
+                Task::none()
+            }
+            Message::SetOcrModel(model) => {
+                if model == self.config.ocr_model {
+                    return Task::none();
+                }
+
+                if let Err(error) = self.config.set_ocr_model(&self.config_handler, model) {
+                    eprintln!("failed to save configuration: {error}");
+                }
+
                 Task::none()
             }
             Message::LaunchUrl(url) => {
@@ -304,7 +338,11 @@ impl cosmic::Application for AppModel {
 
                 match event {
                     prepare::Event::StartSubtitleSearch(path, selection) => {
-                        self.subtitle.start_search(path, selection);
+                        self.subtitle.start_search(
+                            path,
+                            selection,
+                            Arc::new(self.config.ocr_model),
+                        );
                         self.nav.activate(self.subtitle_page_id);
                         self.update_title()
                     }
@@ -344,6 +382,28 @@ impl cosmic::Application for AppModel {
 }
 
 impl AppModel {
+    fn settings_view(&self) -> Element<'_, Message> {
+        let selected = OcrModel::ALL
+            .iter()
+            .position(|model| *model == self.config.ocr_model);
+
+        let spacing = cosmic::theme::spacing();
+
+        widget::settings::view_column(vec![
+            widget::settings::section()
+                .title("Text recognition")
+                .add(widget::settings::item(
+                    "OCR model",
+                    widget::dropdown(&OcrModel::LABELS, selected, |index| {
+                        Message::SetOcrModel(OcrModel::ALL[index])
+                    })
+                    .gap(dbg!(f32::from(spacing.space_m))),
+                ))
+                .into(),
+        ])
+        .into()
+    }
+
     pub fn update_title(&mut self) -> Task<cosmic::Action<Message>> {
         let mut window_title = fl!("app-title");
         if let Some(page) = self.nav.text(self.nav.active()) {
@@ -354,14 +414,6 @@ impl AppModel {
             .main_window_id()
             .map_or_else(Task::none, |id| self.set_window_title(window_title, id))
     }
-}
-
-pub fn mat_to_dynamic_image(mat: &opencv::core::Mat) -> eyre::Result<DynamicImage> {
-    mat_to_image_handle(mat).and_then(|x| {
-        RgbaImage::from_raw(x.width(), x.height(), x.into_raw())
-            .map(DynamicImage::ImageRgba8)
-            .ok_or_else(|| eyre::eyre!("invalid image dimensions"))
-    })
 }
 
 pub fn mat_to_image_handle(mat: &opencv::core::Mat) -> eyre::Result<RgbaImage> {
