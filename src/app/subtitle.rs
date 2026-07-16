@@ -34,6 +34,20 @@ pub struct Model {
     pub done: bool,
     pub progress_bar: ProgressBar,
     scrollbar_jump_status: ScrollbarJumpStatus,
+    edit_history: Vec<SubtitleEdit>,
+}
+
+#[derive(Debug, Clone)]
+enum SubtitleEdit {
+    Delete {
+        index: usize,
+        result: SubtitleResult,
+    },
+    MergeWithPrevious {
+        index: usize,
+        previous_end_timestamp: Duration,
+        result: SubtitleResult,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -73,6 +87,7 @@ pub enum Message {
     },
     Delete(usize),
     MergeWithPrevious(usize),
+    UndoEdit,
     Scrolled {
         at_end: bool,
     },
@@ -107,6 +122,7 @@ impl Model {
         self.preview = None;
         self.current_frame = 0;
         self.done = false;
+        self.edit_history.clear();
         self.progress_bar.set_elapsed(Duration::ZERO);
         self.scrollbar_jump_status = ScrollbarJumpStatus::NoShow;
     }
@@ -195,12 +211,49 @@ impl Model {
                 Event::None
             }
             Message::Delete(x) => {
-                self.results.remove(x);
+                if x < self.results.len() {
+                    let result = self.results.remove(x);
+                    self.edit_history
+                        .push(SubtitleEdit::Delete { index: x, result });
+                }
                 Event::None
             }
             Message::MergeWithPrevious(x) => {
-                self.results[x - 1].end_timestamp = self.results[x].end_timestamp;
-                self.results.remove(x);
+                if x > 0 && x < self.results.len() {
+                    let result = self.results.remove(x);
+                    let previous_end_timestamp = std::mem::replace(
+                        &mut self.results[x - 1].end_timestamp,
+                        result.end_timestamp,
+                    );
+                    self.edit_history.push(SubtitleEdit::MergeWithPrevious {
+                        index: x,
+                        previous_end_timestamp,
+                        result,
+                    });
+                }
+                Event::None
+            }
+            Message::UndoEdit => {
+                if let Some(edit) = self.edit_history.pop() {
+                    match edit {
+                        SubtitleEdit::Delete { index, result } => {
+                            self.results.insert(index.min(self.results.len()), result);
+                        }
+                        SubtitleEdit::MergeWithPrevious {
+                            index,
+                            previous_end_timestamp,
+                            result,
+                        } => {
+                            if let Some(previous) = index
+                                .checked_sub(1)
+                                .and_then(|index| self.results.get_mut(index))
+                            {
+                                previous.end_timestamp = previous_end_timestamp;
+                                self.results.insert(index.min(self.results.len()), result);
+                            }
+                        }
+                    }
+                }
                 Event::None
             }
         }
@@ -259,6 +312,9 @@ impl Model {
         let to_post_prod = widget::button::text("Post Production")
             .class(cosmic::theme::Button::Suggested)
             .on_press_maybe((!self.search_active).then_some(Message::GoToPostProduction));
+
+        let undo_edit = widget::button::icon(icon::from_name("edit-undo-symbolic"))
+            .on_press_maybe((!self.edit_history.is_empty()).then_some(Message::UndoEdit));
 
         const TOOLBAR_SIZE: f32 = 48.0;
 
@@ -322,8 +378,12 @@ impl Model {
                 .into()
         });
 
-        let mut col =
-            widget::column!(widget::row!(status, to_post_prod).spacing(space_s)).spacing(space_s);
+        let mut col = widget::column!(
+            widget::row!(status, undo_edit, to_post_prod)
+                .spacing(space_s)
+                .align_y(Alignment::Center)
+        )
+        .spacing(space_s);
 
         let view_card = |title, handle| {
             widget::column!(
@@ -614,4 +674,75 @@ fn subtitle_search_stream(
             }
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn result(start: u64, end: u64, text: &str) -> SubtitleResult {
+        SubtitleResult {
+            start_timestamp: Duration::from_secs(start),
+            end_timestamp: Duration::from_secs(end),
+            text: text.into(),
+            preview: widget::image::Handle::from_rgba(1, 1, vec![0, 0, 0, 0]),
+        }
+    }
+
+    #[test]
+    fn undo_delete_restores_the_result_without_discarding_new_results() {
+        let mut model = Model::default();
+        model.results = vec![result(0, 1, "one"), result(2, 3, "two")];
+
+        model.update(Message::Delete(1), &Config::default());
+        model.results.push(result(4, 5, "three"));
+        model.update(Message::UndoEdit, &Config::default());
+
+        assert_eq!(
+            model
+                .results
+                .iter()
+                .map(|result| result.text.as_str())
+                .collect::<Vec<_>>(),
+            ["one", "two", "three"]
+        );
+    }
+
+    #[test]
+    fn undo_merge_restores_the_boundary_and_removed_result() {
+        let mut model = Model::default();
+        model.results = vec![result(0, 1, "one"), result(2, 3, "two")];
+
+        model.update(Message::MergeWithPrevious(1), &Config::default());
+        assert_eq!(model.results[0].end_timestamp, Duration::from_secs(3));
+
+        model.results.push(result(4, 5, "three"));
+        model.update(Message::UndoEdit, &Config::default());
+
+        assert_eq!(model.results[0].end_timestamp, Duration::from_secs(1));
+        assert_eq!(
+            model
+                .results
+                .iter()
+                .map(|result| result.text.as_str())
+                .collect::<Vec<_>>(),
+            ["one", "two", "three"]
+        );
+    }
+
+    #[test]
+    fn starting_a_search_clears_edit_history() {
+        let mut model = Model::default();
+        model.results = vec![result(0, 1, "one")];
+        model.update(Message::Delete(0), &Config::default());
+
+        model.start_search(
+            std::path::PathBuf::from("video.mkv"),
+            None,
+            OcrModel::default(),
+        );
+        model.update(Message::UndoEdit, &Config::default());
+
+        assert!(model.results.is_empty());
+    }
 }
