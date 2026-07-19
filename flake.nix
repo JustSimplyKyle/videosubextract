@@ -56,6 +56,7 @@
               cargo
               rustc
               rust-analyzer
+              cmake
               pkg-config
               openssl
               libxkbcommon
@@ -70,6 +71,9 @@
               mold
               clangMold
               sccache
+              samply
+              wxwidgets_3_2
+              tbb
             ]
             # opencv
             ++ [
@@ -94,7 +98,7 @@
 
           COSMIC_ICONS = "${pkgs.cosmic-icons}/share";
 
-          RUSTC_WRAPPER = "${pkgs.sccache}/bin/sccache";
+          # RUSTC_WRAPPER = "${pkgs.sccache}/bin/sccache";
           FONT_PATH = "${pkgs.noto-fonts-cjk-sans}/share/fonts/opentype/noto-cjk/NotoSansCJK-VF.otf.ttc";
           RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
           LIBCLANG_PATH = "${pkgs.libclang.lib}/lib";

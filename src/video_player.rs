@@ -1,23 +1,23 @@
 use cosmic::iced;
 use eyre::{Context, ContextCompat};
 use ffmpeg_the_third::{
-    self as ffmpeg, Rational, Rescale, codec,
+    self as ffmpeg, codec,
     ffi::AV_TIME_BASE,
     filter::Graph,
     format::Pixel,
     frame::Video,
     media::{self},
     rescale::TIME_BASE,
-    threading,
+    threading, Rational, Rescale,
 };
 use opencv::{
-    core::{CV_8UC3, Scalar},
+    core::{Scalar, CV_8UC3},
     prelude::*,
 };
 
 use std::{
     collections::VecDeque,
-    sync::{Arc, Mutex, atomic::AtomicUsize},
+    sync::{atomic::AtomicUsize, Arc, Mutex},
     time::Duration,
 };
 
@@ -88,7 +88,7 @@ pub fn create_video_player<const STOP_ON_SEEK: bool>(
     if let Ok(parallelism) = std::thread::available_parallelism() {
         vcodec.set_threading(threading::Config {
             kind: threading::Type::Frame,
-            count: parallelism.get(),
+            count: parallelism.get() / 2,
         });
     }
 

@@ -1,8 +1,14 @@
+use crate::apply_traits::ApplyConditional;
+
 use super::*;
 use cosmic::iced::widget::Stack;
-use iced::futures::SinkExt;
+use iced::{futures::SinkExt, id::Id};
 use rfd::AsyncFileDialog;
-use std::time::Duration;
+use std::{
+    env::current_dir,
+    hash::{DefaultHasher, Hash, Hasher},
+    time::Duration,
+};
 
 #[derive(Default)]
 pub struct Model {
@@ -57,24 +63,32 @@ impl Model {
                     Event::None
                 }
             },
-            Message::PickVideo => Task::perform(
-                async {
-                    let file = AsyncFileDialog::new()
-                        .add_filter("Video", &["mkv", "mp4", "avi", "mov", "webm", "flv", "wmv"])
-                        .pick_file()
-                        .await;
-                    file.map(|f| f.path().to_path_buf())
-                },
-                Message::VideoFilePicked,
-            )
-            .apply(Event::Run),
+            Message::PickVideo => {
+                let pwd = current_dir();
+                Task::perform(
+                    async move {
+                        let dialog = AsyncFileDialog::new().add_filter(
+                            "Video",
+                            &["mkv", "mp4", "avi", "mov", "webm", "flv", "wmv"],
+                        );
+
+                        let file = dialog
+                            .apply_if_ok_ref(&pwd, AsyncFileDialog::set_directory)
+                            .pick_file()
+                            .await;
+
+                        file.map(|f| f.path().to_path_buf())
+                    },
+                    Message::VideoFilePicked,
+                )
+                .apply(Event::Run)
+            }
             Message::VideoFilePicked(Some(path)) => self.update(Message::LoadVideo(path)),
             Message::VideoFilePicked(None) => Event::None,
             Message::LoadVideo(path) => {
                 match ffmpeg_the_third::format::input(&path) {
                     Ok(input) => match create_video_player::<false>(input, None) {
                         Ok((controller, _iter)) => {
-                            controller.seek_forward(Duration::from_mins(6)).unwrap();
                             self.video_path = Some(path);
                             self.video_controller = Some(controller);
                         }
@@ -89,6 +103,11 @@ impl Model {
                     println!("ui overdrive");
                     return Event::None;
                 }
+
+                // let mut hasher = DefaultHasher::new();
+                // Id::unique().0.hash(&mut hasher);
+                // frame.save(format!("test/{}.png", hasher.finish())).unwrap();
+
                 self.is_allocating_frame = true;
                 let (width, height) = (frame.width(), frame.height());
                 let handle = widget::image::Handle::from_rgba(

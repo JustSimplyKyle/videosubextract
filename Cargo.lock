@@ -1802,27 +1802,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dea2df4cf52843e0452895c455a1a2cfbb842a1e7329671acf418fdc53ed4c59"
 
 [[package]]
-name = "error_set"
-version = "0.9.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8ce8f47d095467cd3c796a35d95a0363877f59a91cc2df0c47770cb87dbb6a3c"
-dependencies = [
- "error_set_impl",
-]
-
-[[package]]
-name = "error_set_impl"
-version = "0.9.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7521f538d4b71021e32ee4e6c4ed2426fd04c49e0a0d34ea3c65dcb4ca5f7930"
-dependencies = [
- "proc-macro2",
- "quote",
- "regex",
- "syn",
-]
-
-[[package]]
 name = "etagere"
 version = "0.2.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6488,17 +6467,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
-name = "video-sub-finder"
-version = "0.1.0"
-dependencies = [
- "error_set",
- "opencv",
-]
-
-[[package]]
 name = "videosubextract"
 version = "0.1.0"
 dependencies = [
+ "cmake",
  "dioxus-devtools",
  "eyre",
  "ffmpeg-sidecar",
@@ -6513,11 +6485,12 @@ dependencies = [
  "open",
  "opencc",
  "opencv",
+ "pkg-config",
+ "rayon",
  "rfd 0.17.2",
  "rust-embed",
  "serde",
  "tokio",
- "video-sub-finder",
 ]
 
 [[package]]

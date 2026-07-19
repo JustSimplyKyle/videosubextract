@@ -121,7 +121,7 @@ impl Model {
             Message::OpenCcS2T => {
                 let cc = opencc::OpenCC::new("s2t.json");
                 for res in results.iter_mut() {
-                    res.text = cc.convert(&res.text);
+                    res.set_text(cc.convert(&res.text));
                 }
                 self.feedback = Some("Subtitles Converted to Traditional Chinese (S2T).".into());
                 Task::none()
@@ -129,7 +129,7 @@ impl Model {
             Message::OpenCcT2S => {
                 let cc = opencc::OpenCC::new("t2s.json");
                 for res in results.iter_mut() {
-                    res.text = cc.convert(&res.text);
+                    res.set_text(cc.convert(&res.text));
                 }
                 self.feedback = Some("Subtitles Converted to Simplified Chinese (T2S).".into());
                 Task::none()

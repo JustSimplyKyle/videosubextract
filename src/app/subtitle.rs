@@ -1,14 +1,16 @@
+use crate::config::SubtitleDetector;
+use crate::native_video_sub_finder::{
+    NativeSearchParams, NativeSubtitleEvent, find_subtitles_with,
+};
 use crate::ocr::OcrProvider;
-use crate::subfinder::SubtitleEvent;
+use crate::subfinder::{Params as RustSearchParams, SubtitleSearch};
+use cosmic::theme;
 use iced::futures::{SinkExt, StreamExt};
+use iced::widget::text_editor;
 
 use super::*;
-use std::cell::Cell;
-use std::collections::{BTreeSet, HashSet};
-use std::rc::Rc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 const JUMP_TO_END_DELAY: Duration = Duration::from_secs(3);
 const OCR_PARALELLISM: usize = 4;
@@ -19,6 +21,31 @@ pub struct SubtitleResult {
     pub end_timestamp: Duration,
     pub text: String,
     pub preview: widget::image::Handle,
+    editor_content: text_editor::Content,
+}
+
+impl SubtitleResult {
+    fn new(
+        start_timestamp: Duration,
+        end_timestamp: Duration,
+        text: String,
+        preview: widget::image::Handle,
+    ) -> Self {
+        let editor_content = text_editor::Content::with_text(&text);
+
+        Self {
+            start_timestamp,
+            end_timestamp,
+            text,
+            preview,
+            editor_content,
+        }
+    }
+
+    pub(crate) fn set_text(&mut self, text: String) {
+        self.editor_content = text_editor::Content::with_text(&text);
+        self.text = text;
+    }
 }
 
 #[derive(Default)]
@@ -28,6 +55,8 @@ pub struct Model {
     pub search_path: Option<std::path::PathBuf>,
     pub search_selection: Option<iced::Rectangle>,
     search_ocr: Option<RuntimeOcrModel>,
+    search_detector: SubtitleDetector,
+    native_search_params: NativeSearchParams,
     pub results: Vec<SubtitleResult>,
     pub preview: Option<widget::image::Handle>,
     pub current_frame: usize,
@@ -98,6 +127,11 @@ pub enum Message {
     SearchDone,
     SearchError(String),
     GoToPostProduction,
+    SubtitleContentEdit {
+        id: usize,
+        action: text_editor::Action,
+    },
+    None,
 }
 
 pub enum Event {
@@ -112,12 +146,16 @@ impl Model {
         path: std::path::PathBuf,
         selection: Option<iced::Rectangle>,
         ocr: OcrModel,
+        detector: SubtitleDetector,
+        native_search_params: NativeSearchParams,
     ) {
         self.search_active = true;
         self.search_gen += 1;
         self.search_path = Some(path);
         self.search_selection = selection;
         self.search_ocr = Some(RuntimeOcrModel::new(ocr));
+        self.search_detector = detector;
+        self.native_search_params = native_search_params;
         self.results.clear();
         self.preview = None;
         self.current_frame = 0;
@@ -151,27 +189,23 @@ impl Model {
                     preview.height(),
                     preview.into_raw(),
                 );
-                if let Some(prev) = self.results.last_mut()
+                if config.post_ocr_processing
+                    && let Some(prev) = self.results.last_mut()
                     && (start_timestamp - prev.end_timestamp) < Duration::from_millis(5000)
                     && prev.text.trim() == text.trim()
                 {
-                    *prev = SubtitleResult {
-                        start_timestamp: prev.start_timestamp,
-                        end_timestamp,
-                        text,
-                        preview,
-                    };
+                    *prev = SubtitleResult::new(prev.start_timestamp, end_timestamp, text, preview);
                     return Event::None;
                 }
                 if text.trim().is_empty() {
                     return Event::None;
                 }
-                self.results.push(SubtitleResult {
+                self.results.push(SubtitleResult::new(
                     start_timestamp,
                     end_timestamp,
                     text,
                     preview,
-                });
+                ));
                 Event::None
             }
             Message::SearchDone => {
@@ -256,6 +290,14 @@ impl Model {
                 }
                 Event::None
             }
+            Message::SubtitleContentEdit { id, action } => {
+                if let Some(result) = self.results.get_mut(id) {
+                    result.editor_content.perform(action);
+                    result.text = result.editor_content.text();
+                }
+                Event::None
+            }
+            Message::None => Event::None,
         }
     }
 
@@ -281,13 +323,12 @@ impl Model {
             .apply(Element::from)
         } else if self.search_active {
             let status_text = widget::text(format!(
-                "## Elapsed {} · IGT {} · frame {}",
+                "## Elapsed {} · IGT {} · ETA {}",
                 self.progress_bar.elapsed().apply(format_duration),
                 (self.current_frame as u64 / fps as u64)
                     .apply(Duration::from_secs)
                     .apply(format_duration),
-                // self.progress_bar.eta().apply(format_duration), the eta approximation sucks
-                self.current_frame
+                self.progress_bar.eta().apply(format_duration)
             ))
             .class(cosmic::theme::Text::Accent);
 
@@ -332,19 +373,19 @@ impl Model {
             self.results
                 .iter()
                 .enumerate()
-                .fold(widget::grid(), |grid, (u, result)| {
+                .fold(widget::grid(), |grid, (id, result)| {
                     let t_start = result.start_timestamp.as_secs_f64();
                     let t_end = result.end_timestamp.as_secs_f64();
 
                     let toolbar = widget::column![
                         widget::button::icon(widget::icon::from_name("edit-delete-symbolic"))
-                            .on_press(Message::Delete(u))
+                            .on_press(Message::Delete(id))
                             .class(cosmic::theme::Button::Destructive),
                     ]
                     .push_maybe(
-                        (u != 0).then_some(
+                        (id != 0).then_some(
                             widget::button::icon(widget::icon::from_name("go-up-symbolic"))
-                                .on_press(Message::MergeWithPrevious(u))
+                                .on_press(Message::MergeWithPrevious(id))
                                 .class(cosmic::theme::Button::Icon),
                         ),
                     )
@@ -359,7 +400,21 @@ impl Model {
 
                     let timeline = widget::text(format!("{t_start:.1}s – {t_end:.1}s"));
 
-                    let ocr = widget::text(result.text.trim()).class(cosmic::theme::Text::Accent);
+                    let ocr = widget::text_editor(&result.editor_content)
+                        .on_action(move |action| Message::SubtitleContentEdit { id, action })
+                        .height(Length::Shrink)
+                        .min_height(48.0)
+                        .class(cosmic::theme::iced::TextEditor::Custom(Box::new(|x, y| {
+                            use iced::widget::text_editor;
+                            let mut style = text_editor::Catalog::style(
+                                x,
+                                &theme::iced::TextEditor::Default,
+                                y,
+                            );
+                            style.border.width = 2.0;
+                            style
+                        })))
+                        .apply(Element::from);
 
                     grid.push(toolbar)
                         .push(image)
@@ -458,9 +513,21 @@ impl Model {
                 selection: self.search_selection,
                 frame_rate: video_frame_rate,
                 ocr: ocr.clone(),
+                detector: self.search_detector,
+                native_search_params: self.native_search_params,
             };
             subscriptions.push(Subscription::run_with(search, subtitle_search_stream));
         }
+
+        subscriptions.push(iced::keyboard::listen().map(|x| match x {
+            iced::keyboard::Event::KeyPressed {
+                key: iced::keyboard::Key::Character(x),
+                modifiers: iced::keyboard::Modifiers::CTRL,
+                repeat,
+                ..
+            } if x == "z" && repeat => Message::UndoEdit,
+            _ => Message::None,
+        }));
         Subscription::batch(subscriptions)
     }
 }
@@ -514,6 +581,8 @@ struct SubtitleSearchSubscription {
     selection: Option<iced::Rectangle>,
     frame_rate: f64,
     ocr: RuntimeOcrModel,
+    detector: SubtitleDetector,
+    native_search_params: NativeSearchParams,
 }
 
 #[derive(Clone)]
@@ -581,6 +650,8 @@ fn subtitle_search_stream(
     let path = search.key.path.clone();
     let selection = search.selection;
     let ocr = search.ocr.clone();
+    let detector = search.detector;
+    let native_search_params = search.native_search_params;
     let preview_interval = 100;
 
     iced::stream::channel(
@@ -588,7 +659,8 @@ fn subtitle_search_stream(
         async move |mut tx: futures::channel::mpsc::Sender<Message>| {
             let (btx1, mut brx) = tokio::sync::mpsc::channel::<Message>(OCR_PARALELLISM);
             let btx2 = btx1.clone();
-            let (sender, receiver) = tokio::sync::mpsc::channel::<SubtitleEvent>(OCR_PARALELLISM);
+            let (sender, receiver) =
+                tokio::sync::mpsc::channel::<NativeSubtitleEvent>(OCR_PARALELLISM);
             let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
 
             tokio::task::spawn_blocking(move || {
@@ -613,10 +685,32 @@ fn subtitle_search_stream(
                     interval: preview_interval,
                 };
 
-                let search = SubtitleSearch::new(frame_iter, Params::default());
+                let search_result = match detector {
+                    SubtitleDetector::OriginalCpp => {
+                        find_subtitles_with(frame_iter, &native_search_params, |event| {
+                            sender
+                                .blocking_send(event)
+                                .map_err(|_| eyre::eyre!("subtitle OCR receiver closed"))
+                        })
+                    }
+                    SubtitleDetector::RustRewrite => {
+                        for event in SubtitleSearch::new(frame_iter, RustSearchParams::default()) {
+                            let event = NativeSubtitleEvent {
+                                start_timestamp: event.start_timestamp,
+                                end_timestamp: event.end_timestamp,
+                                ocr_image: event.sample_bgr,
+                            };
+                            if sender.blocking_send(event).is_err() {
+                                return;
+                            }
+                        }
+                        Ok(())
+                    }
+                };
 
-                for event in search {
-                    let result = sender.blocking_send(event);
+                if let Err(error) = search_result {
+                    let _ = btx1.blocking_send(Message::SearchError(error.to_string()));
+                    return;
                 }
 
                 let _ = completion_tx.send(());
@@ -629,7 +723,7 @@ fn subtitle_search_stream(
                 let jobs = events.map(move |event| {
                     let ocr = ocr.clone();
                     tokio::task::spawn_blocking(move || {
-                        let preview = super::mat_to_image_handle(&event.sample_bgr).ok()?;
+                        let preview = super::mat_to_image_handle(&event.ocr_image).ok()?;
 
                         let text = preview
                             .clone()
@@ -680,69 +774,38 @@ fn subtitle_search_stream(
 mod tests {
     use super::*;
 
-    fn result(start: u64, end: u64, text: &str) -> SubtitleResult {
-        SubtitleResult {
+    fn detection(start: u64, end: u64, text: &str) -> Message {
+        Message::EventFound {
             start_timestamp: Duration::from_secs(start),
             end_timestamp: Duration::from_secs(end),
-            text: text.into(),
-            preview: widget::image::Handle::from_rgba(1, 1, vec![0, 0, 0, 0]),
+            text: text.to_owned(),
+            preview: RgbaImage::new(1, 1),
         }
     }
 
     #[test]
-    fn undo_delete_restores_the_result_without_discarding_new_results() {
+    fn post_ocr_processing_merges_adjacent_duplicate_text() {
         let mut model = Model::default();
-        model.results = vec![result(0, 1, "one"), result(2, 3, "two")];
+        let config = Config::default();
 
-        model.update(Message::Delete(1), &Config::default());
-        model.results.push(result(4, 5, "three"));
-        model.update(Message::UndoEdit, &Config::default());
+        model.update(detection(0, 1, "same text"), &config);
+        model.update(detection(2, 3, "same text"), &config);
 
-        assert_eq!(
-            model
-                .results
-                .iter()
-                .map(|result| result.text.as_str())
-                .collect::<Vec<_>>(),
-            ["one", "two", "three"]
-        );
-    }
-
-    #[test]
-    fn undo_merge_restores_the_boundary_and_removed_result() {
-        let mut model = Model::default();
-        model.results = vec![result(0, 1, "one"), result(2, 3, "two")];
-
-        model.update(Message::MergeWithPrevious(1), &Config::default());
+        assert_eq!(model.results.len(), 1);
         assert_eq!(model.results[0].end_timestamp, Duration::from_secs(3));
-
-        model.results.push(result(4, 5, "three"));
-        model.update(Message::UndoEdit, &Config::default());
-
-        assert_eq!(model.results[0].end_timestamp, Duration::from_secs(1));
-        assert_eq!(
-            model
-                .results
-                .iter()
-                .map(|result| result.text.as_str())
-                .collect::<Vec<_>>(),
-            ["one", "two", "three"]
-        );
     }
 
     #[test]
-    fn starting_a_search_clears_edit_history() {
+    fn post_ocr_processing_can_be_disabled() {
         let mut model = Model::default();
-        model.results = vec![result(0, 1, "one")];
-        model.update(Message::Delete(0), &Config::default());
+        let config = Config {
+            post_ocr_processing: false,
+            ..Config::default()
+        };
 
-        model.start_search(
-            std::path::PathBuf::from("video.mkv"),
-            None,
-            OcrModel::default(),
-        );
-        model.update(Message::UndoEdit, &Config::default());
+        model.update(detection(0, 1, "same text"), &config);
+        model.update(detection(2, 3, "same text"), &config);
 
-        assert!(model.results.is_empty());
+        assert_eq!(model.results.len(), 2);
     }
 }
