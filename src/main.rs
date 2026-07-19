@@ -1,14 +1,22 @@
 // SPDX-License-Identifier: MPL-2.0
 
 mod app;
+pub mod apply_traits;
 mod config;
 mod i18n;
+mod native_video_sub_finder;
 mod ocr;
-pub mod subfinder;
+mod subfinder;
 
 pub mod video_player;
 
 fn main() -> cosmic::iced::Result {
+    assert_eq!(
+        native_video_sub_finder::api_version(),
+        native_video_sub_finder::EXPECTED_API_VERSION,
+        "incompatible VideoSubFinder native library"
+    );
+
     // Get the system's preferred languages.
     let requested_languages = i18n_embed::DesktopLanguageRequester::requested_languages();
 

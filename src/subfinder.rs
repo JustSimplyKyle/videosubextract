@@ -81,6 +81,7 @@ impl ColorRange {
     }
 
     /// Bright yellow text, common for karaoke/emphasis styling.
+    #[allow(dead_code)]
     pub fn near_yellow() -> Self {
         Self {
             h_min: 20.0,
@@ -191,7 +192,8 @@ pub struct SubtitleEvent {
     pub start_timestamp: Duration,
     pub end_timestamp: Duration,
     pub sample_bgr: Mat, // temporal-median frame, cleaner input for OCR
-    pub mask: Mat,       // stability-filtered edge mask, reused by clean_for_ocr
+    #[allow(dead_code)]
+    pub mask: Mat, // stability-filtered edge mask, reused by clean_for_ocr
 }
 
 /// Tiny xorshift64* RNG so reservoir sampling doesn't need an extra crate.
@@ -845,3 +847,40 @@ impl<I: Iterator<Item = VideoFrame>> Iterator for SubtitleSearch<I> {
 //     }
 //     Ok(())
 // }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use opencv::core::{CV_8UC3, Point, Scalar};
+
+    #[test]
+    fn rust_rewrite_detects_a_synthetic_subtitle() {
+        let frames = (0..45).map(|index| {
+            let mut mat =
+                Mat::new_rows_cols_with_default(160, 640, CV_8UC3, Scalar::all(0.0)).unwrap();
+            if (8..32).contains(&index) {
+                imgproc::put_text(
+                    &mut mat,
+                    "SUBTITLE TEST",
+                    Point::new(110, 105),
+                    imgproc::FONT_HERSHEY_SIMPLEX,
+                    1.2,
+                    Scalar::all(255.0),
+                    3,
+                    imgproc::LINE_AA,
+                    false,
+                )
+                .unwrap();
+            }
+            VideoFrame {
+                mat,
+                timestamp: Duration::from_millis(index * 40),
+            }
+        });
+
+        let events = SubtitleSearch::new(frames, Params::default()).collect::<Vec<_>>();
+
+        assert!(!events.is_empty());
+        assert!(events.iter().all(|event| event.sample_bgr.typ() == CV_8UC3));
+    }
+}
