@@ -2,13 +2,9 @@ use crate::apply_traits::ApplyConditional;
 
 use super::*;
 use cosmic::iced::widget::Stack;
-use iced::{futures::SinkExt, id::Id};
+use iced::futures::SinkExt;
 use rfd::AsyncFileDialog;
-use std::{
-    env::current_dir,
-    hash::{DefaultHasher, Hash, Hasher},
-    time::Duration,
-};
+use std::{env::current_dir, time::Duration};
 
 #[derive(Default)]
 pub struct Model {

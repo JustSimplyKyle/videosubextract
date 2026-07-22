@@ -1,23 +1,23 @@
 use cosmic::iced;
 use eyre::{Context, ContextCompat};
 use ffmpeg_the_third::{
-    self as ffmpeg, codec,
+    self as ffmpeg, Rational, Rescale, codec,
     ffi::AV_TIME_BASE,
     filter::Graph,
     format::Pixel,
     frame::Video,
     media::{self},
     rescale::TIME_BASE,
-    threading, Rational, Rescale,
+    threading,
 };
 use opencv::{
-    core::{Scalar, CV_8UC3},
+    core::{CV_8UC3, Scalar},
     prelude::*,
 };
 
 use std::{
     collections::VecDeque,
-    sync::{atomic::AtomicUsize, Arc, Mutex},
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
@@ -33,7 +33,6 @@ pub(crate) struct InnerPlayer {
     pub(crate) state: Mutex<PlayerState>,
     pub(crate) stream_index: usize,
     pub info: DecoderInfo,
-    pub(crate) current_frame: AtomicUsize,
 }
 
 #[derive(Clone)]
@@ -127,7 +126,6 @@ pub fn create_video_player<const STOP_ON_SEEK: bool>(
         }),
         stream_index,
         info,
-        current_frame: 0.into(),
     });
 
     Ok((
@@ -150,11 +148,19 @@ enum Direction {
 impl VideoPlayerController {
     fn seek(&self, delta: Duration, direction: Direction) -> eyre::Result<()> {
         println!("attempt seeking {:2}s", delta.as_secs_f64());
-        let current_secs = self
+        let mut state = self
             .inner
-            .current_frame
-            .load(std::sync::atomic::Ordering::Relaxed) as f64
-            / self.inner.info.frame_rate;
+            .state
+            .lock()
+            .map_err(|_| eyre::eyre!("lock poisoned"))?;
+
+        let current_secs = state
+            .frame_buffer
+            .iter()
+            .last()
+            .and_then(|x| Some(x.as_ref().ok()?.timestamp))
+            .map(|x| x.as_secs_f64())
+            .unwrap_or_default();
 
         let target_secs = match direction {
             Direction::Forward => current_secs + delta.as_secs_f64(),
@@ -165,21 +171,11 @@ impl VideoPlayerController {
 
         println!("target: {target_us}");
 
-        let mut state = self
-            .inner
-            .state
-            .lock()
-            .map_err(|_| eyre::eyre!("lock poisoned"))?;
-
         println!("got locked");
 
         state.input.seek(target_us, i64::MIN..=target_us)?;
         state.decoder.flush();
 
-        self.inner.current_frame.store(
-            (target_secs * self.inner.info.frame_rate) as usize,
-            std::sync::atomic::Ordering::Relaxed,
-        );
         state.seek_generation += 1;
 
         drop(state);
