@@ -166,7 +166,7 @@ impl Model {
     }
 
     pub fn update(&mut self, message: Message, config: &Config) -> Event {
-        self.set_ocr_model(config.ocr_model);
+        self.set_ocr_model(config.ocr_model.clone());
         match message {
             Message::Progress { frame, preview } => {
                 self.progress_bar.set_position(self.current_frame as u64);
@@ -594,7 +594,10 @@ impl RuntimeOcrModel {
     }
 
     fn read(&self) -> OcrModel {
-        *self.0.read().unwrap_or_else(|error| error.into_inner())
+        self.0
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
     }
 
     fn set(&self, model: OcrModel) {

@@ -402,7 +402,7 @@ impl cosmic::Application for AppModel {
                         self.subtitle.start_search(
                             path,
                             selection,
-                            self.config.ocr_model,
+                            self.config.ocr_model.clone(),
                             self.config.subtitle_detector,
                             self.config.native_search_params,
                         );
@@ -446,9 +446,10 @@ impl cosmic::Application for AppModel {
 
 impl AppModel {
     fn settings_view(&self) -> Element<'_, Message> {
-        let selected_ocr = OcrModel::ALL
-            .iter()
-            .position(|model| *model == self.config.ocr_model);
+        let all = OcrModel::all(&self.config);
+        let labels = OcrModel::labels(&self.config);
+
+        let selected_ocr = all.iter().position(|model| *model == self.config.ocr_model);
         let selected_detector = SubtitleDetector::ALL
             .iter()
             .position(|detector| *detector == self.config.subtitle_detector);
@@ -461,8 +462,8 @@ impl AppModel {
                 .title("Text recognition")
                 .add(widget::settings::item(
                     "OCR model",
-                    widget::dropdown(&OcrModel::LABELS, selected_ocr, |index| {
-                        Message::SetOcrModel(OcrModel::ALL[index])
+                    widget::dropdown(labels, selected_ocr, move |index| {
+                        Message::SetOcrModel(all[index].clone())
                     })
                     .gap(f32::from(spacing.space_m)),
                 ))

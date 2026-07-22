@@ -4,7 +4,7 @@ use cosmic::cosmic_config::{self, CosmicConfigEntry, cosmic_config_derive::Cosmi
 use serde::{Deserialize, Serialize};
 
 use crate::native_video_sub_finder::NativeSearchParams;
-use crate::ocr::OcrModel;
+use crate::ocr::{self, OcrModel};
 
 #[derive(Debug, Default, Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
 pub enum SubtitleDetector {
@@ -19,9 +19,10 @@ impl SubtitleDetector {
 }
 
 #[derive(Debug, Clone, CosmicConfigEntry, PartialEq)]
-#[version = 3]
+#[version = 4]
 pub struct Config {
     pub ocr_model: OcrModel,
+    pub custom_ocrs: Vec<ocr::plugin_loader::DynamicLibrary>,
     pub subtitle_detector: SubtitleDetector,
     pub native_search_params: NativeSearchParams,
     pub post_ocr_processing: bool,
@@ -31,6 +32,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             ocr_model: OcrModel::default(),
+            custom_ocrs: Vec::new(),
             subtitle_detector: SubtitleDetector::default(),
             native_search_params: NativeSearchParams::default(),
             post_ocr_processing: true,
