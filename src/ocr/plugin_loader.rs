@@ -175,17 +175,21 @@ impl DynamicLibrary {
     }
 
     fn probe_name(path: &Path) -> Result<String> {
-        pub(crate) const NAME_SYMBOL: &[u8] = b"ocr_name\0";
+        pub const NAME_SYMBOL: &[u8] = b"ocr_name\0";
 
         let library = unsafe { Library::new(path) }
             .with_context(|| format!("failed to load {}", path.display()))?;
 
         let name = unsafe {
             let name = library
-                .get::<c_char>(NAME_SYMBOL)
+                .get::<*const c_char>(NAME_SYMBOL)
                 .context("missing ocr_name symbol")?;
 
-            CStr::from_ptr(&raw const *name)
+            if name.is_null() {
+                bail!("ocr_name from {} is null", path.display());
+            }
+
+            CStr::from_ptr(*name)
         };
 
         let name = name

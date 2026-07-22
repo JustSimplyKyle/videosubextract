@@ -1,0 +1,14 @@
+[package]
+name = "paddleocr-plugin-example"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+ocr-rs = "=2.3.1"
+
+[workspace]

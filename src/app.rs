@@ -20,7 +20,9 @@ use eyre::Context;
 use iced::futures::SinkExt;
 use image::{DynamicImage, RgbaImage};
 use opencv::core::{MatTraitConst, MatTraitConstManual};
+use rfd::AsyncFileDialog;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -51,6 +53,8 @@ pub enum Message {
     LaunchUrl(String),
     ToggleContextPage(ContextPage),
     SetOcrModel(OcrModel),
+    PickCustomOcr,
+    CustomOcrPicked(Option<PathBuf>),
     SetSubtitleDetector(SubtitleDetector),
     SetNativeSearchParams(NativeSearchParams),
     SetPostOcrProcessing(bool),
@@ -360,6 +364,37 @@ impl cosmic::Application for AppModel {
 
                 Task::none()
             }
+            Message::PickCustomOcr => Task::perform(
+                async {
+                    AsyncFileDialog::new()
+                        .add_filter("Dynamic library", &["so", "dylib", "dll"])
+                        .pick_file()
+                        .await
+                        .map(|file| file.path().to_path_buf())
+                },
+                Message::CustomOcrPicked,
+            )
+            .map(Into::into),
+            Message::CustomOcrPicked(Some(path)) => {
+                match crate::ocr::plugin_loader::DynamicLibrary::new(path) {
+                    Ok(library) if !self.config.custom_ocrs.contains(&library) => {
+                        let mut custom_ocrs = self.config.custom_ocrs.clone();
+                        custom_ocrs.push(library);
+
+                        if let Err(error) = self
+                            .config
+                            .set_custom_ocrs(&self.config_handler, custom_ocrs)
+                        {
+                            eprintln!("failed to save custom OCR library: {error}");
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(error) => eprintln!("failed to add custom OCR library: {error:#}"),
+                }
+
+                Task::none()
+            }
+            Message::CustomOcrPicked(None) => Task::none(),
             Message::SetSubtitleDetector(detector) => {
                 if let Err(error) = self
                     .config
@@ -449,24 +484,32 @@ impl AppModel {
         let all = OcrModel::all(&self.config);
         let labels = OcrModel::labels(&self.config);
 
-        let selected_ocr = all.iter().position(|model| *model == self.config.ocr_model);
-        let selected_detector = SubtitleDetector::ALL
+        let selected_ocr_index = all.iter().position(|model| *model == self.config.ocr_model);
+        let selected_detector_index = SubtitleDetector::ALL
             .iter()
             .position(|detector| *detector == self.config.subtitle_detector);
         let native = self.config.native_search_params;
 
         let spacing = cosmic::theme::spacing();
 
+        let ocr_model_picker = widget::row![
+            widget::dropdown(labels, selected_ocr_index, move |index| {
+                Message::SetOcrModel(all[index].clone())
+            })
+            .width(Length::Fill)
+            .gap(f32::from(spacing.space_m)),
+            widget::button::icon(icon::from_name("list-add-symbolic"))
+                .tooltip("Add custom OCR library")
+                .on_press(Message::PickCustomOcr),
+        ]
+        .align_y(Alignment::Center)
+        .spacing(spacing.space_s)
+        .width(Length::Fill);
+
         widget::settings::view_column(vec![
             widget::settings::section()
                 .title("Text recognition")
-                .add(widget::settings::item(
-                    "OCR model",
-                    widget::dropdown(labels, selected_ocr, move |index| {
-                        Message::SetOcrModel(all[index].clone())
-                    })
-                    .gap(f32::from(spacing.space_m)),
-                ))
+                .add(widget::settings::item("OCR model", ocr_model_picker))
                 .add(
                     widget::settings::item::builder("Post-OCR result processing")
                         .description("Merge adjacent detections with identical recognized text")
@@ -480,185 +523,184 @@ impl AppModel {
                 .title("Subtitle detection")
                 .add(widget::settings::item(
                     "Implementation",
-                    widget::dropdown(&SubtitleDetector::LABELS, selected_detector, |index| {
-                        Message::SetSubtitleDetector(SubtitleDetector::ALL[index])
-                    })
+                    widget::dropdown(
+                        &SubtitleDetector::LABELS,
+                        selected_detector_index,
+                        |index| Message::SetSubtitleDetector(SubtitleDetector::ALL[index]),
+                    )
                     .gap(f32::from(spacing.space_m)),
                 ))
                 .into(),
         ])
         .push_maybe(
-            if self.config.subtitle_detector == SubtitleDetector::OriginalCpp {
-                widget::settings::section()
-                    .title("Original C++ parameters")
-                    .add(
-                        widget::settings::item::builder("OCR image cleanup")
-                            .description("Run VideoSubFinder FindTextLines before OCR")
-                            .toggler(native.apply_ocr_image_cleanup, move |enabled| {
-                                let mut params = native;
-                                params.apply_ocr_image_cleanup = enabled;
-                                Message::SetNativeSearchParams(params)
-                            }),
-                    )
-                    .add(widget::settings::item(
+            widget::settings::section()
+                .title("Original C++ parameters")
+                .add(
+                    widget::settings::item::builder("OCR image cleanup")
+                        .description("Run VideoSubFinder FindTextLines before OCR")
+                        .toggler(native.apply_ocr_image_cleanup, move |enabled| {
+                            let mut params = native;
+                            params.apply_ocr_image_cleanup = enabled;
+                            Message::SetNativeSearchParams(params)
+                        }),
+                )
+                .add(widget::settings::item(
+                    "Worker threads",
+                    widget::spin_button(
+                        native.threads.to_string(),
                         "Worker threads",
-                        widget::spin_button(
-                            native.threads.to_string(),
-                            "Worker threads",
-                            native.threads,
-                            1,
-                            1,
-                            256,
-                            move |value| {
-                                let mut params = native;
-                                params.threads = value;
-                                Message::SetNativeSearchParams(params)
-                            },
-                        ),
-                    ))
-                    .add(widget::settings::item(
+                        native.threads,
+                        1,
+                        1,
+                        256,
+                        move |value| {
+                            let mut params = native;
+                            params.threads = value;
+                            Message::SetNativeSearchParams(params)
+                        },
+                    ),
+                ))
+                .add(widget::settings::item(
+                    "Minimum subtitle frames",
+                    widget::spin_button(
+                        native.min_subtitle_frames.to_string(),
                         "Minimum subtitle frames",
-                        widget::spin_button(
-                            native.min_subtitle_frames.to_string(),
-                            "Minimum subtitle frames",
-                            native.min_subtitle_frames,
-                            1,
-                            1,
-                            1000,
-                            move |value| {
-                                let mut params = native;
-                                params.min_subtitle_frames = value;
-                                Message::SetNativeSearchParams(params)
-                            },
-                        ),
-                    ))
-                    .add(widget::settings::item(
+                        native.min_subtitle_frames,
+                        1,
+                        1,
+                        1000,
+                        move |value| {
+                            let mut params = native;
+                            params.min_subtitle_frames = value;
+                            Message::SetNativeSearchParams(params)
+                        },
+                    ),
+                ))
+                .add(widget::settings::item(
+                    "Text percentage",
+                    widget::spin_button(
+                        format!("{:.3}", native.text_percent),
                         "Text percentage",
-                        widget::spin_button(
-                            format!("{:.3}", native.text_percent),
-                            "Text percentage",
-                            native.text_percent,
-                            0.01,
-                            0.0,
-                            1.0,
-                            move |value| {
-                                let mut params = native;
-                                params.text_percent = value;
-                                Message::SetNativeSearchParams(params)
-                            },
-                        ),
-                    ))
-                    .add(widget::settings::item(
+                        native.text_percent,
+                        0.01,
+                        0.0,
+                        1.0,
+                        move |value| {
+                            let mut params = native;
+                            params.text_percent = value;
+                            Message::SetNativeSearchParams(params)
+                        },
+                    ),
+                ))
+                .add(widget::settings::item(
+                    "Minimum text length",
+                    widget::spin_button(
+                        format!("{:.3}", native.min_text_length),
                         "Minimum text length",
-                        widget::spin_button(
-                            format!("{:.3}", native.min_text_length),
-                            "Minimum text length",
-                            native.min_text_length,
-                            0.001,
-                            0.0,
-                            1.0,
-                            move |value| {
-                                let mut params = native;
-                                params.min_text_length = value;
-                                Message::SetNativeSearchParams(params)
-                            },
-                        ),
-                    ))
-                    .add(widget::settings::item(
+                        native.min_text_length,
+                        0.001,
+                        0.0,
+                        1.0,
+                        move |value| {
+                            let mut params = native;
+                            params.min_text_length = value;
+                            Message::SetNativeSearchParams(params)
+                        },
+                    ),
+                ))
+                .add(widget::settings::item(
+                    "Vertical-edge line error",
+                    widget::spin_button(
+                        format!("{:.2}", native.vertical_edges_line_error),
                         "Vertical-edge line error",
-                        widget::spin_button(
-                            format!("{:.2}", native.vertical_edges_line_error),
-                            "Vertical-edge line error",
-                            native.vertical_edges_line_error,
-                            0.05,
-                            0.0,
-                            1.0,
-                            move |value| {
-                                let mut params = native;
-                                params.vertical_edges_line_error = value;
-                                Message::SetNativeSearchParams(params)
-                            },
-                        ),
-                    ))
-                    .add(widget::settings::item(
+                        native.vertical_edges_line_error,
+                        0.05,
+                        0.0,
+                        1.0,
+                        move |value| {
+                            let mut params = native;
+                            params.vertical_edges_line_error = value;
+                            Message::SetNativeSearchParams(params)
+                        },
+                    ),
+                ))
+                .add(widget::settings::item(
+                    "ILA-points line error",
+                    widget::spin_button(
+                        format!("{:.2}", native.ila_points_line_error),
                         "ILA-points line error",
-                        widget::spin_button(
-                            format!("{:.2}", native.ila_points_line_error),
-                            "ILA-points line error",
-                            native.ila_points_line_error,
-                            0.05,
-                            0.0,
-                            1.0,
-                            move |value| {
-                                let mut params = native;
-                                params.ila_points_line_error = value;
-                                Message::SetNativeSearchParams(params)
-                            },
-                        ),
-                    ))
-                    .add(widget::settings::item(
-                        "Maximum frame gap (down)",
-                        widget::spin_button(
-                            native.max_frame_gap_down.to_string(),
-                            "Maximum frame gap down",
-                            native.max_frame_gap_down,
-                            1,
-                            0,
-                            1000,
-                            move |value| {
-                                let mut params = native;
-                                params.max_frame_gap_down = value;
-                                Message::SetNativeSearchParams(params)
-                            },
-                        ),
-                    ))
-                    .add(widget::settings::item(
-                        "Maximum frame gap (up)",
-                        widget::spin_button(
-                            native.max_frame_gap_up.to_string(),
-                            "Maximum frame gap up",
-                            native.max_frame_gap_up,
-                            1,
-                            0,
-                            1000,
-                            move |value| {
-                                let mut params = native;
-                                params.max_frame_gap_up = value;
-                                Message::SetNativeSearchParams(params)
-                            },
-                        ),
-                    ))
-                    .add(widget::settings::item::builder("Use ISA images").toggler(
-                        native.use_isa_images,
-                        move |enabled| {
+                        native.ila_points_line_error,
+                        0.05,
+                        0.0,
+                        1.0,
+                        move |value| {
                             let mut params = native;
-                            params.use_isa_images = enabled;
+                            params.ila_points_line_error = value;
                             Message::SetNativeSearchParams(params)
                         },
-                    ))
-                    .add(widget::settings::item::builder("Use ILA images").toggler(
-                        native.use_ila_images,
-                        move |enabled| {
+                    ),
+                ))
+                .add(widget::settings::item(
+                    "Maximum frame gap (down)",
+                    widget::spin_button(
+                        native.max_frame_gap_down.to_string(),
+                        "Maximum frame gap down",
+                        native.max_frame_gap_down,
+                        1,
+                        0,
+                        1000,
+                        move |value| {
                             let mut params = native;
-                            params.use_ila_images = enabled;
+                            params.max_frame_gap_down = value;
                             Message::SetNativeSearchParams(params)
                         },
-                    ))
-                    .add(
-                        widget::settings::item::builder("Replace ISA with filtered image").toggler(
-                            native.replace_isa_with_filtered,
-                            move |enabled| {
-                                let mut params = native;
-                                params.replace_isa_with_filtered = enabled;
-                                Message::SetNativeSearchParams(params)
-                            },
-                        ),
-                    )
-                    .apply(Element::from)
-                    .apply(Some)
-            } else {
-                None
-            },
+                    ),
+                ))
+                .add(widget::settings::item(
+                    "Maximum frame gap (up)",
+                    widget::spin_button(
+                        native.max_frame_gap_up.to_string(),
+                        "Maximum frame gap up",
+                        native.max_frame_gap_up,
+                        1,
+                        0,
+                        1000,
+                        move |value| {
+                            let mut params = native;
+                            params.max_frame_gap_up = value;
+                            Message::SetNativeSearchParams(params)
+                        },
+                    ),
+                ))
+                .add(widget::settings::item::builder("Use ISA images").toggler(
+                    native.use_isa_images,
+                    move |enabled| {
+                        let mut params = native;
+                        params.use_isa_images = enabled;
+                        Message::SetNativeSearchParams(params)
+                    },
+                ))
+                .add(widget::settings::item::builder("Use ILA images").toggler(
+                    native.use_ila_images,
+                    move |enabled| {
+                        let mut params = native;
+                        params.use_ila_images = enabled;
+                        Message::SetNativeSearchParams(params)
+                    },
+                ))
+                .add(
+                    widget::settings::item::builder("Replace ISA with filtered image").toggler(
+                        native.replace_isa_with_filtered,
+                        move |enabled| {
+                            let mut params = native;
+                            params.replace_isa_with_filtered = enabled;
+                            Message::SetNativeSearchParams(params)
+                        },
+                    ),
+                )
+                .apply(|x| {
+                    (self.config.subtitle_detector == SubtitleDetector::OriginalCpp).then_some(x)
+                }),
         )
         .into()
     }
