@@ -19,7 +19,7 @@ impl SubtitleDetector {
 }
 
 #[derive(Debug, Clone, CosmicConfigEntry, PartialEq)]
-#[version = 4]
+#[version = 5]
 pub struct Config {
     pub ocr_model: OcrModel,
     pub custom_ocrs: Vec<ocr::plugin_loader::DynamicLibrary>,

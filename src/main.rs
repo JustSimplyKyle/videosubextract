@@ -23,8 +23,13 @@ fn main() -> cosmic::iced::Result {
     // Enable localizations to be applied.
     i18n::init(&requested_languages);
 
-    // Settings for configuring the application window and iced runtime.
-    let settings = cosmic::app::Settings::default().size_limits(
+    let mut frosted_theme = cosmic::cosmic_theme::Theme::dark_default();
+    frosted_theme.frosted = cosmic::cosmic_theme::BlurStrength::VeryHigh2;
+
+    let mut theme = cosmic::Theme::custom(std::sync::Arc::new(frosted_theme));
+    theme.transparent = true;
+
+    let settings = cosmic::app::Settings::default().theme(theme).size_limits(
         cosmic::iced::Limits::NONE
             .min_width(360.0)
             .min_height(180.0),

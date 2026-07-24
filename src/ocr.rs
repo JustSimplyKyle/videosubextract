@@ -66,7 +66,7 @@ impl PaddleOcr {
                     det_options: ocr_rs::DetOptions::default(),
                     rec_options: ocr_rs::RecOptions::default(),
                     enable_parallel: true,
-                    backend: ocr_rs::Backend::Vulkan,
+                    backend: ocr_rs::Backend::CPU,
                     ..Default::default()
                 }),
             )

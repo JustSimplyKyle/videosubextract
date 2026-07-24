@@ -29,6 +29,12 @@ use std::time::Duration;
 const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
 const APP_ICON: &[u8] = include_bytes!("../resources/icons/hicolor/scalable/apps/icon.svg");
 
+macro_rules! log {
+    ($($arg:tt)*) => {
+        Task::done(Message::ErrorReported(Arc::new(eyre::eyre!($($arg)*)))).map(Into::into)
+    };
+}
+
 pub struct AppModel {
     core: cosmic::Core,
     context_page: ContextPage,
@@ -46,6 +52,7 @@ pub struct AppModel {
     prepare: prepare::Model,
     subtitle: subtitle::Model,
     post_production: post_production::Model,
+    errors: Vec<Arc<eyre::Report>>,
 }
 
 #[derive(Debug, Clone)]
@@ -55,6 +62,7 @@ pub enum Message {
     SetOcrModel(OcrModel),
     PickCustomOcr,
     CustomOcrPicked(Option<PathBuf>),
+    RemoveCustomOcr(crate::ocr::plugin_loader::DynamicLibrary),
     SetSubtitleDetector(SubtitleDetector),
     SetNativeSearchParams(NativeSearchParams),
     SetPostOcrProcessing(bool),
@@ -63,6 +71,7 @@ pub enum Message {
     Prepare(prepare::Message),
     Subtitle(subtitle::Message),
     PostProduction(post_production::Message),
+    ErrorReported(Arc<eyre::Report>),
 }
 
 pub enum Page {
@@ -87,6 +96,7 @@ pub enum ContextPage {
     #[default]
     About,
     Settings,
+    Error,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -186,10 +196,12 @@ impl cosmic::Application for AppModel {
             prepare: prepare::Model::default(),
             subtitle: subtitle::Model::default(),
             post_production: post_production::Model::default(),
+            errors: Vec::new(),
         };
 
         let command = app.update_title();
-        (app, command)
+
+        (app, Task::batch([command]))
     }
 
     fn header_start(&self) -> Vec<Element<'_, Self::Message>> {
@@ -255,6 +267,11 @@ impl cosmic::Application for AppModel {
                 self.settings_view(),
                 Message::ToggleContextPage(ContextPage::Settings),
             ),
+            ContextPage::Error => build_dialog(
+                "Errors",
+                self.error_view(),
+                Message::ToggleContextPage(ContextPage::Error),
+            ),
         })
     }
 
@@ -313,7 +330,7 @@ impl cosmic::Application for AppModel {
                         let mut interval = tokio::time::interval(Duration::from_secs(1));
                         loop {
                             interval.tick().await;
-                            _ = emitter.send(Message::WatchTick(time)).await;
+                            emitter.send(Message::WatchTick(time)).await.ok();
                             time += 1;
                         }
                     },
@@ -337,6 +354,7 @@ impl cosmic::Application for AppModel {
                 self.time = time;
                 Task::none()
             }
+
             Message::ToggleContextPage(context_page) => {
                 if self.context_page == context_page {
                     self.core.window.show_context = !self.core.window.show_context;
@@ -349,7 +367,7 @@ impl cosmic::Application for AppModel {
             Message::UpdateConfig(config) => {
                 self.config = config;
                 if let Err(e) = self.config.write_entry(&self.config_handler) {
-                    eprintln!("failed to save configuration: {e}");
+                    return log!("failed to save configuration: {e}");
                 }
                 Task::none()
             }
@@ -359,7 +377,7 @@ impl cosmic::Application for AppModel {
                 }
 
                 if let Err(error) = self.config.set_ocr_model(&self.config_handler, model) {
-                    eprintln!("failed to save configuration: {error}");
+                    return log!("failed to save configuration: {error}");
                 }
 
                 Task::none()
@@ -385,22 +403,35 @@ impl cosmic::Application for AppModel {
                             .config
                             .set_custom_ocrs(&self.config_handler, custom_ocrs)
                         {
-                            eprintln!("failed to save custom OCR library: {error}");
+                            return log!("failed to save custom OCR library: {error}");
                         }
                     }
                     Ok(_) => {}
-                    Err(error) => eprintln!("failed to add custom OCR library: {error:#}"),
+                    Err(error) => return log!("failed to add custom OCR library: {error:#}"),
                 }
 
                 Task::none()
             }
             Message::CustomOcrPicked(None) => Task::none(),
+            Message::RemoveCustomOcr(library) => {
+                self.config.custom_ocrs.retain(|item| item != &library);
+
+                if self.config.ocr_model == OcrModel::Custom(library) {
+                    self.config.ocr_model = OcrModel::default();
+                }
+
+                if let Err(error) = self.config.write_entry(&self.config_handler) {
+                    return log!("failed to remove custom OCR library: {error}");
+                }
+
+                Task::none()
+            }
             Message::SetSubtitleDetector(detector) => {
                 if let Err(error) = self
                     .config
                     .set_subtitle_detector(&self.config_handler, detector)
                 {
-                    eprintln!("failed to save configuration: {error}");
+                    return log!("failed to save configuration: {error}");
                 }
                 Task::none()
             }
@@ -409,7 +440,7 @@ impl cosmic::Application for AppModel {
                     .config
                     .set_native_search_params(&self.config_handler, params)
                 {
-                    eprintln!("failed to save configuration: {error}");
+                    return log!("failed to save configuration: {error}");
                 }
                 Task::none()
             }
@@ -418,14 +449,13 @@ impl cosmic::Application for AppModel {
                     .config
                     .set_post_ocr_processing(&self.config_handler, enabled)
                 {
-                    eprintln!("failed to save configuration: {error}");
+                    return log!("failed to save configuration: {error}");
                 }
                 Task::none()
             }
             Message::LaunchUrl(url) => {
-                match open::that_detached(&url) {
-                    Ok(()) => {}
-                    Err(err) => eprintln!("failed to open {url:?}: {err}"),
+                if let Err(err) = open::that_detached(&url) {
+                    return log!("failed to open {url:?}: {err}");
                 }
                 Task::none()
             }
@@ -445,6 +475,7 @@ impl cosmic::Application for AppModel {
                         self.update_title()
                     }
                     prepare::Event::Run(task) => task.map(Message::Prepare).map(Into::into),
+                    prepare::Event::Error(error) => log!(error),
                     prepare::Event::None => Task::none(),
                 }
             }
@@ -458,18 +489,26 @@ impl cosmic::Application for AppModel {
                         self.update_title()
                     }
                     subtitle::Event::Run(task) => task.map(Message::Subtitle).map(Into::into),
+                    subtitle::Event::Error(error) => log!(error),
                     subtitle::Event::None => Task::none(),
                 }
             }
-            Message::PostProduction(msg) => self
-                .post_production
-                .update(
-                    msg,
-                    &mut self.subtitle.results,
-                    self.prepare.video_path.as_ref(),
-                )
-                .map(Message::PostProduction)
-                .map(Into::into),
+            Message::PostProduction(msg) => match self.post_production.update(
+                msg,
+                &mut self.subtitle.results,
+                self.prepare.video_path.as_ref(),
+            ) {
+                post_production::Event::Run(task) => {
+                    task.map(Message::PostProduction).map(Into::into)
+                }
+                post_production::Event::Error(error) => log!(error),
+            },
+            Message::ErrorReported(report) => {
+                self.errors.push(report);
+                self.context_page = ContextPage::Error;
+                self.core.window.show_context = true;
+                Task::none()
+            }
         }
     }
 
@@ -480,6 +519,29 @@ impl cosmic::Application for AppModel {
 }
 
 impl AppModel {
+    fn error_view(&self) -> Element<'_, Message> {
+        use std::fmt::Write;
+        let spacing = cosmic::theme::spacing();
+        let errors = self
+            .errors
+            .iter()
+            .flat_map(|report| report.chain())
+            .zip(1..)
+            .fold(String::new(), |mut acc, (x, u)| {
+                writeln!(acc, "{u}: {x}").ok();
+                acc
+            });
+
+        widget::text(errors)
+            .selectable()
+            .apply(widget::container)
+            .class(cosmic::theme::Container::Card)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .padding(spacing.space_l)
+            .into()
+    }
+
     fn settings_view(&self) -> Element<'_, Message> {
         let all = OcrModel::all(&self.config);
         let labels = OcrModel::labels(&self.config);
@@ -491,6 +553,10 @@ impl AppModel {
         let native = self.config.native_search_params;
 
         let spacing = cosmic::theme::spacing();
+        let selected_custom_ocr = match &self.config.ocr_model {
+            OcrModel::Custom(library) => Some(library),
+            OcrModel::PaddleOcr(_) => None,
+        };
 
         let ocr_model_picker = widget::row![
             widget::dropdown(labels, selected_ocr_index, move |index| {
@@ -502,10 +568,15 @@ impl AppModel {
                 .tooltip("Add custom OCR library")
                 .on_press(Message::PickCustomOcr),
         ]
+        .push_maybe(selected_custom_ocr.map(|x| {
+            widget::button::icon(icon::from_name("edit-delete-symbolic"))
+                .tooltip("Remove selected custom OCR library")
+                .on_press(Message::RemoveCustomOcr(x.clone()))
+                .class(cosmic::theme::Button::Destructive)
+        }))
         .align_y(Alignment::Center)
         .spacing(spacing.space_s)
         .width(Length::Fill);
-
         widget::settings::view_column(vec![
             widget::settings::section()
                 .title("Text recognition")

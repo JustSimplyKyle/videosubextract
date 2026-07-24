@@ -48,7 +48,12 @@ pub enum Message {
     OpenCcT2S,
     ConvertToSrt,
     MuxFinished(Result<String, String>),
-    SrtSaved(Option<std::path::PathBuf>),
+    SrtSaved(Result<Option<std::path::PathBuf>, String>),
+}
+
+pub enum Event {
+    Run(Task<Message>),
+    Error(eyre::Report),
 }
 
 impl Model {
@@ -57,36 +62,38 @@ impl Model {
         message: Message,
         results: &mut [super::subtitle::SubtitleResult],
         video_path: Option<&std::path::PathBuf>,
-    ) -> Task<Message> {
+    ) -> Event {
         use std::fmt::Write;
 
         match message {
             Message::SelectTab(id) => {
                 self.tabs.activate(id);
                 self.feedback = None;
-                Task::none()
+                Event::Run(Task::none())
             }
             Message::MergeWithVideo => {
                 let srt = super::subtitle::to_srt(results);
                 let temp_srt = std::env::temp_dir().join("temp_subs.srt");
 
-                if std::fs::write(&temp_srt, srt).is_err() {
+                if let Err(error) = std::fs::write(&temp_srt, srt) {
                     self.feedback =
                         Some("Failed to create temporary subtitle file for merge.".into());
-                    std::fs::remove_file(temp_srt).ok();
-                    return Task::none();
+                    std::fs::remove_file(&temp_srt).ok();
+                    return Event::Error(
+                        eyre::eyre!(error).wrap_err("creating temporary subtitle file for merge"),
+                    );
                 }
 
                 let Some(video) = video_path.cloned() else {
                     self.feedback = Some("No video loaded to merge with.".into());
                     std::fs::remove_file(temp_srt).ok();
-                    return Task::none();
+                    return Event::Run(Task::none());
                 };
 
                 let stem = video.file_stem().unwrap_or_default().to_string_lossy();
                 let output = video.with_file_name(format!("{stem}_merged.mkv"));
 
-                Task::perform(
+                Event::Run(Task::perform(
                     async move {
                         let mut command = FfmpegCommand::new();
 
@@ -110,13 +117,13 @@ impl Model {
                             .map_err(|error| format!("Failed to read FFmpeg output: {error}"))?;
 
                         for event in events {
-                            let _ = writeln!(log, "{event:?}");
+                            writeln!(log, "{event:?}").ok();
                         }
 
                         Ok(log)
                     },
                     Message::MuxFinished,
-                )
+                ))
             }
             Message::OpenCcS2T => {
                 let cc = opencc::OpenCC::new("s2t.json");
@@ -124,7 +131,7 @@ impl Model {
                     res.set_text(cc.convert(&res.text));
                 }
                 self.feedback = Some("Subtitles Converted to Traditional Chinese (S2T).".into());
-                Task::none()
+                Event::Run(Task::none())
             }
             Message::OpenCcT2S => {
                 let cc = opencc::OpenCC::new("t2s.json");
@@ -132,12 +139,12 @@ impl Model {
                     res.set_text(cc.convert(&res.text));
                 }
                 self.feedback = Some("Subtitles Converted to Simplified Chinese (T2S).".into());
-                Task::none()
+                Event::Run(Task::none())
             }
             Message::ConvertToSrt => {
                 self.feedback = None;
                 let srt = super::subtitle::to_srt(results);
-                Task::perform(
+                Event::Run(Task::perform(
                     async move {
                         let file = AsyncFileDialog::new()
                             .add_filter("Subtitle", &["srt"])
@@ -147,32 +154,43 @@ impl Model {
                             .await;
 
                         file.map(|f| {
-                            if let Err(e) = std::fs::write(f.path(), srt) {
-                                eprintln!("error writing to srt file {e}");
-                            }
-                            f.path().to_path_buf()
+                            std::fs::write(f.path(), srt)
+                                .map(|()| f.path().to_path_buf())
+                                .map_err(|error| error.to_string())
                         })
+                        .transpose()
                     },
                     Message::SrtSaved,
-                )
+                ))
             }
-            Message::SrtSaved(path_opt) => {
-                if let Some(p) = path_opt {
-                    self.feedback = Some(format!("Successfully saved SRT to {}", p.display()));
-                } else {
-                    self.feedback = Some("File save cancelled.".into());
+            Message::SrtSaved(result) => match result {
+                Ok(Some(path)) => {
+                    self.feedback = Some(format!("Successfully saved SRT to {}", path.display()));
+                    Event::Run(Task::none())
                 }
-                Task::none()
-            }
-            Message::MuxFinished(result) => {
-                self.feedback = Some(match result {
-                    Ok(log) if log.is_empty() => "Subtitles embedded successfully.".into(),
-                    Ok(log) => log,
-                    Err(error) => error,
-                });
-
-                Task::none()
-            }
+                Ok(None) => {
+                    self.feedback = Some("File save cancelled.".into());
+                    Event::Run(Task::none())
+                }
+                Err(error) => {
+                    self.feedback = Some("Failed to save the SRT file.".into());
+                    Event::Error(eyre::eyre!("writing the SRT file failed: {error}"))
+                }
+            },
+            Message::MuxFinished(result) => match result {
+                Ok(log) if log.is_empty() => {
+                    self.feedback = Some("Subtitles embedded successfully.".into());
+                    Event::Run(Task::none())
+                }
+                Ok(log) => {
+                    self.feedback = Some(log);
+                    Event::Run(Task::none())
+                }
+                Err(error) => {
+                    self.feedback = Some(error.clone());
+                    Event::Error(eyre::eyre!(error))
+                }
+            },
         }
     }
 

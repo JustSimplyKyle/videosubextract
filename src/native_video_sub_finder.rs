@@ -16,25 +16,19 @@ use std::{
 
 use crate::video_player::VideoFrame;
 
+#[allow(non_camel_case_types)]
+type c_context = c_void;
+
 unsafe extern "C" {
     fn vsf_headless_api_version() -> i32;
-    #[cfg(test)]
-    fn vsf_headless_transform_bgr(
-        bgr: *const u8,
-        bgr_len: usize,
-        width: i32,
-        height: i32,
-        transformed: *mut u8,
-        transformed_len: usize,
-    ) -> i32;
     fn vsf_headless_search(
         width: i32,
         height: i32,
         params: *const NativeSearchParamsFfi,
-        context: *mut c_void,
-        next_frame: unsafe extern "C" fn(*mut c_void, *mut u8, usize, *mut i64) -> i32,
+        context: *mut c_context,
+        next_frame: unsafe extern "C" fn(*mut c_context, *mut u8, usize, *mut i64) -> i32,
         segment: unsafe extern "C" fn(
-            *mut c_void,
+            *mut c_context,
             i64,
             i64,
             *const u8,
@@ -154,60 +148,6 @@ impl From<&NativeSearchParams> for NativeSearchParamsFfi {
             apply_ocr_image_cleanup: i32::from(params.apply_ocr_image_cleanup),
         }
     }
-}
-
-/// Apply VideoSubFinder's native C++ transform to a packed BGR OpenCV frame.
-///
-/// The returned boolean is the legacy algorithm's candidate-presence result;
-/// the returned `CV_8UC1` matrix is its transformed text mask.
-#[cfg(test)]
-pub fn transform_bgr(frame: &Mat) -> eyre::Result<(bool, Mat)> {
-    ensure!(
-        frame.typ() == CV_8UC3,
-        "VideoSubFinder expects CV_8UC3 BGR input"
-    );
-
-    let width = frame.cols();
-    let height = frame.rows();
-    ensure!(
-        width > 0 && height > 0,
-        "VideoSubFinder received an empty frame"
-    );
-
-    // ROIs can have a wider stride than their visible data. Make a packed copy
-    // before crossing the C ABI so C++ receives exactly width * height * 3 bytes.
-    let mut packed = Mat::default();
-    frame
-        .copy_to(&mut packed)
-        .context("packing the VideoSubFinder input frame")?;
-    let input = packed
-        .data_bytes()
-        .context("reading the VideoSubFinder input frame")?;
-
-    let mut transformed =
-        Mat::new_rows_cols_with_default(height, width, CV_8UC1, Scalar::all(0.0))?;
-    let output = transformed
-        .data_bytes_mut()
-        .context("allocating the VideoSubFinder output mask")?;
-
-    // SAFETY: Both slices remain alive and exclusively borrowed for the call;
-    // their exact lengths are supplied and validated again by the C++ bridge.
-    let status = unsafe {
-        vsf_headless_transform_bgr(
-            input.as_ptr(),
-            input.len(),
-            width,
-            height,
-            output.as_mut_ptr(),
-            output.len(),
-        )
-    };
-    ensure!(
-        status >= 0,
-        "VideoSubFinder C++ transform failed with status {status}"
-    );
-
-    Ok((status != 0, transformed))
 }
 
 pub struct NativeSubtitleEvent {
@@ -425,12 +365,13 @@ where
         )
     };
 
-    if let Some(error) = context
+    let value = context
         .error
         .lock()
         .unwrap_or_else(|error| error.into_inner())
-        .take()
-    {
+        .take();
+
+    if let Some(error) = value {
         return Err(eyre::eyre!(error));
     }
     ensure!(
@@ -462,18 +403,6 @@ mod tests {
     #[test]
     fn links_the_native_cpp_backend() {
         assert_eq!(api_version(), EXPECTED_API_VERSION);
-    }
-
-    #[test]
-    fn transforms_a_frame_through_cpp() {
-        let frame = Mat::new_rows_cols_with_default(160, 640, CV_8UC3, Scalar::all(0.0)).unwrap();
-
-        let (has_candidate, mask) = transform_bgr(&frame).unwrap();
-
-        assert!(!has_candidate);
-        assert_eq!(mask.rows(), frame.rows());
-        assert_eq!(mask.cols(), frame.cols());
-        assert_eq!(mask.typ(), CV_8UC1);
     }
 
     #[test]

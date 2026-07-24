@@ -239,7 +239,7 @@ impl<const STOP_ON_SEEK: bool> Iterator for VideoPlayerIterator<STOP_ON_SEEK> {
         }
 
         // 3. EOF: Flush the decoder when packets run out
-        let _ = state.decoder.send_eof();
+        state.decoder.send_eof().ok();
         let mut decoded_video = Video::empty();
         while state.decoder.receive_frame(&mut decoded_video).is_ok() {
             frame_to_mats(&mut state, &info, &decoded_video);

@@ -26,7 +26,7 @@ pub enum Message {
     VideoFilePicked(Option<std::path::PathBuf>),
     LoadVideo(std::path::PathBuf),
     VideoFrame(RgbaImage),
-    VideoFrameAllocated(Option<(iced::advanced::image::Allocation, iced::Size)>),
+    VideoFrameAllocated(Result<(iced::advanced::image::Allocation, iced::Size), String>),
     VideoSeekForward(Duration),
     VideoSeekBackward(Duration),
     VideoError(String),
@@ -36,6 +36,7 @@ pub enum Message {
 pub enum Event {
     StartSubtitleSearch(std::path::PathBuf, Option<iced::Rectangle>),
     Run(Task<Message>),
+    Error(eyre::Report),
     None,
 }
 
@@ -88,9 +89,15 @@ impl Model {
                             self.video_path = Some(path);
                             self.video_controller = Some(controller);
                         }
-                        Err(e) => eprintln!("video_player init error: {e}"),
+                        Err(error) => {
+                            return Event::Error(error.wrap_err("initializing the video player"));
+                        }
                     },
-                    Err(e) => eprintln!("ffmpeg open error: {e}"),
+                    Err(error) => {
+                        return Event::Error(
+                            eyre::eyre!(error).wrap_err("opening the video with FFmpeg"),
+                        );
+                    }
                 }
                 Event::None
             }
@@ -115,41 +122,43 @@ impl Model {
                     .map(move |result| {
                         Message::VideoFrameAllocated(
                             result
-                                .ok()
+                                .map_err(|error| error.to_string())
                                 .map(|x| (x, iced::Size::new(width as f32, height as f32))),
                         )
                     })
                     .apply(Event::Run)
             }
-            Message::VideoFrameAllocated(allocation_opt) => {
+            Message::VideoFrameAllocated(allocation) => {
                 self.is_allocating_frame = false;
-                if let Some(allocation) = allocation_opt {
-                    self.video_allocation = Some(allocation);
-                } else {
-                    eprintln!("Failed to allocate video frame on GPU");
+                match allocation {
+                    Ok(allocation) => self.video_allocation = Some(allocation),
+                    Err(error) => {
+                        return Event::Error(eyre::eyre!(
+                            "failed to allocate video frame on GPU: {error}"
+                        ));
+                    }
                 }
                 Event::None
             }
             Message::VideoSeekForward(duration) => {
-                if let Some(ref controller) = self.video_controller {
-                    if let Err(e) = controller.seek_forward(duration) {
-                        eprintln!("seek error: {e}");
-                    }
+                if let Some(ref controller) = self.video_controller
+                    && let Err(error) = controller.seek_forward(duration)
+                {
+                    return Event::Error(error.wrap_err("seeking forward"));
                 }
                 Event::None
             }
             Message::VideoSeekBackward(duration) => {
-                if let Some(ref controller) = self.video_controller {
-                    if let Err(e) = controller.seek_backward(duration) {
-                        eprintln!("seek error: {e}");
-                    }
+                if let Some(ref controller) = self.video_controller
+                    && let Err(error) = controller.seek_backward(duration)
+                {
+                    return Event::Error(error.wrap_err("seeking backward"));
                 }
                 Event::None
             }
             Message::VideoError(msg) => {
-                eprintln!("video error: {msg}");
                 self.video_controller = None;
-                Event::None
+                Event::Error(eyre::eyre!("video playback failed: {msg}"))
             }
             Message::StartSubtitleDisplay => {
                 if let Some(path) = &self.video_path {
@@ -345,12 +354,12 @@ fn video_frame_stream(
                                 }
                             }
                             Err(e) => {
-                                let _ = btx.blocking_send(Message::VideoError(e.to_string()));
+                                btx.blocking_send(Message::VideoError(e.to_string())).ok();
                                 break;
                             }
                         },
                         Some(Err(e)) => {
-                            let _ = btx.blocking_send(Message::VideoError(e.to_string()));
+                            btx.blocking_send(Message::VideoError(e.to_string())).ok();
                             break;
                         }
                         None => break,

@@ -137,6 +137,7 @@ pub enum Message {
 pub enum Event {
     GoToPostProduction,
     Run(Task<Message>),
+    Error(eyre::Report),
     None,
 }
 
@@ -215,9 +216,8 @@ impl Model {
                 Event::None
             }
             Message::SearchError(e) => {
-                eprintln!("subtitle search error: {e}");
                 self.search_active = false;
-                Event::None
+                Event::Error(eyre::eyre!("subtitle search failed: {e}"))
             }
             Message::GoToPostProduction => Event::GoToPostProduction,
             Message::Scrolled { at_end } => {
@@ -541,14 +541,15 @@ pub fn to_srt(results: &[SubtitleResult]) -> String {
         .fold(String::new(), |mut out, (i, r)| {
             let start = frame_to_srt_timestamp(r.start_timestamp);
             let end = frame_to_srt_timestamp(r.end_timestamp);
-            let _ = write!(
+            write!(
                 out,
                 "{}\n{} --> {}\n{}\n\n",
                 i + 1,
                 start,
                 end,
                 r.text.trim()
-            );
+            )
+            .ok();
             out
         })
 }
@@ -638,10 +639,12 @@ impl<I: Iterator<Item = VideoFrame>> Iterator for ProgressIter<I> {
         if self.count.is_multiple_of(self.interval)
             && let Ok(rgba) = super::mat_to_image_handle(&mat.mat)
         {
-            let _ = self.tx.try_send(Message::Progress {
-                frame: self.count,
-                preview: rgba,
-            });
+            self.tx
+                .try_send(Message::Progress {
+                    frame: self.count,
+                    preview: rgba,
+                })
+                .ok();
         }
         Some(mat)
     }
@@ -670,14 +673,14 @@ fn subtitle_search_stream(
                 let input = match ffmpeg_the_third::format::input(&path) {
                     Ok(x) => x,
                     Err(e) => {
-                        let _ = btx1.blocking_send(Message::SearchError(e.to_string()));
+                        btx1.blocking_send(Message::SearchError(e.to_string())).ok();
                         return;
                     }
                 };
                 let (_, iter) = match create_video_player::<false>(input, selection) {
                     Ok(x) => x,
                     Err(e) => {
-                        let _ = btx1.blocking_send(Message::SearchError(e.to_string()));
+                        btx1.blocking_send(Message::SearchError(e.to_string())).ok();
                         return;
                     }
                 };
@@ -712,11 +715,12 @@ fn subtitle_search_stream(
                 };
 
                 if let Err(error) = search_result {
-                    let _ = btx1.blocking_send(Message::SearchError(error.to_string()));
+                    btx1.blocking_send(Message::SearchError(error.to_string()))
+                        .ok();
                     return;
                 }
 
-                let _ = completion_tx.send(());
+                completion_tx.send(()).ok();
             });
 
             tokio::task::spawn(async move {
@@ -726,15 +730,15 @@ fn subtitle_search_stream(
                 let jobs = events.map(move |event| {
                     let ocr = ocr.clone();
                     tokio::task::spawn_blocking(move || {
-                        let preview = super::mat_to_image_handle(&event.ocr_image).ok()?;
+                        let preview = super::mat_to_image_handle(&event.ocr_image)?;
 
                         let text = preview
                             .clone()
                             .apply(DynamicImage::ImageRgba8)
                             .apply(|img| ocr.read().recognize_text(&img))
-                            .unwrap_or_default();
+                            .wrap_err("recognizing subtitle text")?;
 
-                        Some(Message::EventFound {
+                        eyre::Ok(Message::EventFound {
                             start_timestamp: event.start_timestamp,
                             end_timestamp: event.end_timestamp,
                             text,
@@ -746,21 +750,31 @@ fn subtitle_search_stream(
 
                 while let Some(result) = results.next().await {
                     match result {
-                        Ok(Some(message)) => {
+                        Ok(Ok(message)) => {
                             if btx2.send(message).await.is_err() {
                                 return;
                             }
                         }
-                        Ok(None) => {}
+                        Ok(Err(error)) => {
+                            if btx2
+                                .send(Message::SearchError(format!("{error:#}")))
+                                .await
+                                .is_err()
+                            {
+                                return;
+                            }
+                        }
                         Err(error) => {
-                            let _ = btx2.send(Message::SearchError(error.to_string())).await;
+                            btx2.send(Message::SearchError(error.to_string()))
+                                .await
+                                .ok();
                             return;
                         }
                     }
                 }
 
                 if completion_rx.await.is_ok() {
-                    let _ = btx2.send(Message::SearchDone).await;
+                    btx2.send(Message::SearchDone).await.ok();
                 }
             });
 

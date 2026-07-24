@@ -601,10 +601,7 @@ impl<I: Iterator<Item = VideoFrame>> SubtitleSearch<I> {
     fn run_dir(&self, run_id: usize) -> Option<PathBuf> {
         let base = self.params.debug_dir.as_ref()?;
         let dir = base.join(format!("run_{run_id:04}"));
-        if let Err(e) = std::fs::create_dir_all(&dir) {
-            eprintln!("debug_dir: failed to create {}: {e}", dir.display());
-            return None;
-        }
+        std::fs::create_dir_all(&dir).ok()?;
         Some(dir)
     }
 
@@ -621,14 +618,10 @@ impl<I: Iterator<Item = VideoFrame>> SubtitleSearch<I> {
         let write_params = core::Vector::<i32>::new();
 
         let bgr_path = dir.join(format!("frame_{frame_idx:06}_{tag}_bgr.png"));
-        if let Err(e) = imgcodecs::imwrite(&bgr_path.to_string_lossy(), cropped, &write_params) {
-            eprintln!("debug_dir: failed to write {}: {e}", bgr_path.display());
-        }
+        imgcodecs::imwrite(&bgr_path.to_string_lossy(), cropped, &write_params).ok();
 
         let mask_path = dir.join(format!("frame_{frame_idx:06}_{tag}_mask.png"));
-        if let Err(e) = imgcodecs::imwrite(&mask_path.to_string_lossy(), mask, &write_params) {
-            eprintln!("debug_dir: failed to write {}: {e}", mask_path.display());
-        }
+        imgcodecs::imwrite(&mask_path.to_string_lossy(), mask, &write_params).ok();
     }
 
     /// Writes SUMMARY.txt plus the finalized mask/sample for a run that just
@@ -646,25 +639,22 @@ impl<I: Iterator<Item = VideoFrame>> SubtitleSearch<I> {
             run.len,
             self.params.min_run_len,
         );
-        if let Err(e) = std::fs::write(dir.join("SUMMARY.txt"), summary) {
-            eprintln!(
-                "debug_dir: failed to write SUMMARY.txt in {}: {e}",
-                dir.display()
-            );
-        }
+        std::fs::write(dir.join("SUMMARY.txt"), summary).ok();
 
         if let Ok((mask, sample)) = run.finalize(self.params.mask_stability_thresh) {
             let write_params = core::Vector::<i32>::new();
-            let _ = imgcodecs::imwrite(
+            imgcodecs::imwrite(
                 &dir.join("final_mask.png").to_string_lossy(),
                 &mask,
                 &write_params,
-            );
-            let _ = imgcodecs::imwrite(
+            )
+            .ok();
+            imgcodecs::imwrite(
                 &dir.join("final_sample.png").to_string_lossy(),
                 &sample,
                 &write_params,
-            );
+            )
+            .ok();
         }
     }
 }
@@ -729,14 +719,13 @@ impl<I: Iterator<Item = VideoFrame>> Iterator for SubtitleSearch<I> {
                     let sim = Self::similarity(&run.anchor_mask, &mask).unwrap_or(0.0);
 
                     if sim >= self.params.similarity_thresh {
-                        if let Err(e) = run.push(
+                        run.push(
                             mask,
                             bgr,
                             self.params.max_stack_frames,
                             self.params.anchor_refresh_frames,
-                        ) {
-                            eprintln!("{e}");
-                        }
+                        )
+                        .ok();
 
                         let hit_cap = self.params.max_run_len.is_some_and(|cap| run.len >= cap);
 
