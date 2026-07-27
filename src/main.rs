@@ -4,6 +4,7 @@ mod app;
 pub mod apply_traits;
 mod config;
 mod i18n;
+mod icons;
 mod native_video_sub_finder;
 mod ocr;
 mod subfinder;

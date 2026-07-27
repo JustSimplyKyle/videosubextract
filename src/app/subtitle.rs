@@ -354,8 +354,10 @@ impl Model {
             .class(cosmic::theme::Button::Suggested)
             .on_press_maybe((!self.search_active).then_some(Message::GoToPostProduction));
 
-        let undo_edit = widget::button::icon(icon::from_name("edit-undo-symbolic"))
-            .on_press_maybe((!self.edit_history.is_empty()).then_some(Message::UndoEdit));
+        let undo_edit = widget::button::icon(icons::symbolic(freedesktop_icon_asset!(
+            "edit-undo-symbolic"
+        )))
+        .on_press_maybe((!self.edit_history.is_empty()).then_some(Message::UndoEdit));
 
         const TOOLBAR_SIZE: f32 = 48.0;
 
@@ -378,15 +380,20 @@ impl Model {
                     let t_end = result.end_timestamp.as_secs_f64();
 
                     let toolbar = widget::column![
-                        widget::button::icon(widget::icon::from_name("edit-delete-symbolic"))
-                            .on_press(Message::Delete(id))
-                            .class(cosmic::theme::Button::Destructive),
+                        widget::button::icon(icons::symbolic(freedesktop_icon_asset!(
+                            "edit-delete-symbolic"
+                        )))
+                        .on_press(Message::Delete(id))
+                        .class(cosmic::theme::Button::Destructive),
                     ]
                     .push_maybe(
                         (id != 0).then_some(
-                            widget::button::icon(widget::icon::from_name("go-up-symbolic"))
-                                .on_press(Message::MergeWithPrevious(id))
-                                .class(cosmic::theme::Button::Icon),
+                            widget::button::icon(icons::symbolic(freedesktop_icon_asset!(
+                                "go-up-symbolic"
+                            )))
+                            .on_press(Message::MergeWithPrevious(id))
+                            .tooltip("Merge with previous")
+                            .class(cosmic::theme::Button::Icon),
                         ),
                     )
                     .width(TOOLBAR_SIZE)
