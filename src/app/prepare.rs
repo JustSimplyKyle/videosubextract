@@ -232,17 +232,13 @@ impl Model {
             load_video.class(cosmic::theme::Button::Standard)
         };
 
-        let skip_backward = widget::button::icon(icons::symbolic(freedesktop_icon_asset!(
-            "media-seek-backward-symbolic"
-        )))
-        .on_press(Message::VideoSeekBackward(Duration::from_secs(5)))
-        .class(cosmic::theme::Button::NavToggle);
+        let skip_backward = widget::button::icon(icon::from_name("media-seek-backward-symbolic"))
+            .on_press(Message::VideoSeekBackward(Duration::from_secs(5)))
+            .class(cosmic::theme::Button::NavToggle);
 
-        let skip_forward = widget::button::icon(icons::symbolic(freedesktop_icon_asset!(
-            "media-seek-forward-symbolic"
-        )))
-        .on_press(Message::VideoSeekForward(Duration::from_secs(5)))
-        .class(cosmic::theme::Button::NavToggle);
+        let skip_forward = widget::button::icon(icon::from_name("media-seek-forward-symbolic"))
+            .on_press(Message::VideoSeekForward(Duration::from_secs(5)))
+            .class(cosmic::theme::Button::NavToggle);
 
         let selection_label = self
             .screenshot_selection_scaled

@@ -6,7 +6,6 @@ pub mod selection_canvas;
 pub mod subtitle;
 
 use crate::config::{Config, SubtitleDetector};
-use crate::icons;
 use crate::native_video_sub_finder::NativeSearchParams;
 use crate::ocr::OcrModel;
 use crate::video_player::{self, InnerPlayer, VideoFrame, create_video_player};
@@ -16,9 +15,8 @@ use cosmic::iced::alignment::{Horizontal, Vertical};
 use cosmic::iced::{self, Alignment, Length, Subscription, Task, futures};
 use cosmic::prelude::*;
 
-use cosmic::widget::{self, about::About, menu, nav_bar};
+use cosmic::widget::{self, about::About, icon, menu, nav_bar};
 use eyre::Context;
-use freedesktop_icon_asset::freedesktop_icon_asset;
 use iced::futures::SinkExt;
 use image::{DynamicImage, RgbaImage};
 use opencv::core::{MatTraitConst, MatTraitConstManual};
@@ -142,7 +140,7 @@ impl cosmic::Application for AppModel {
             .insert()
             .text(fl!("page-prepare"))
             .data::<Page>(Page::Prepare)
-            .icon(icons::symbolic(freedesktop_icon_asset!("applications-system-symbolic")).icon())
+            .icon(icon::from_name("applications-system-symbolic"))
             .id();
 
         nav.activate(prepare_id);
@@ -151,17 +149,14 @@ impl cosmic::Application for AppModel {
             .insert()
             .text(fl!("page-subtitle"))
             .data::<Page>(Page::Subtitle)
-            .icon(icons::symbolic(freedesktop_icon_asset!("applications-graphics-symbolic")).icon())
+            .icon(icon::from_name("applications-graphics-symbolic"))
             .id();
 
         let post_production_page_id = nav
             .insert()
             .text(fl!("page-post"))
             .data::<Page>(Page::PostProduction)
-            .icon(
-                icons::symbolic(freedesktop_icon_asset!("applications-engineering-symbolic"))
-                    .icon(),
-            )
+            .icon(icon::from_name("applications-engineering-symbolic"))
             .id();
 
         let about = About::default()
@@ -243,14 +238,12 @@ impl cosmic::Application for AppModel {
                 .center(700)
                 .apply(|x| {
                     let s = iced::widget::Stack::new();
-                    let btn = widget::button::icon(icons::symbolic(freedesktop_icon_asset!(
-                        "navbar-closed-symbolic"
-                    )))
-                    .class(cosmic::theme::Button::Destructive)
-                    .on_press(close_msg)
-                    .apply(widget::container)
-                    .align_right(Length::Fill)
-                    .padding(spacing.space_m);
+                    let btn = widget::button::icon(icon::from_name("navbar-closed-symbolic"))
+                        .class(cosmic::theme::Button::Destructive)
+                        .on_press(close_msg)
+                        .apply(widget::container)
+                        .align_right(Length::Fill)
+                        .padding(spacing.space_m);
                     s.push(x).push(btn)
                 })
                 .apply(widget::container)
@@ -571,19 +564,15 @@ impl AppModel {
             })
             .width(Length::Fill)
             .gap(f32::from(spacing.space_m)),
-            widget::button::icon(icons::symbolic(freedesktop_icon_asset!(
-                "list-add-symbolic"
-            )))
-            .tooltip("Add custom OCR library")
-            .on_press(Message::PickCustomOcr),
+            widget::button::icon(icon::from_name("list-add-symbolic"))
+                .tooltip("Add custom OCR library")
+                .on_press(Message::PickCustomOcr),
         ]
         .push_maybe(selected_custom_ocr.map(|x| {
-            widget::button::icon(icons::symbolic(freedesktop_icon_asset!(
-                "edit-delete-symbolic"
-            )))
-            .tooltip("Remove selected custom OCR library")
-            .on_press(Message::RemoveCustomOcr(x.clone()))
-            .class(cosmic::theme::Button::Destructive)
+            widget::button::icon(icon::from_name("edit-delete-symbolic"))
+                .tooltip("Remove selected custom OCR library")
+                .on_press(Message::RemoveCustomOcr(x.clone()))
+                .class(cosmic::theme::Button::Destructive)
         }))
         .align_y(Alignment::Center)
         .spacing(spacing.space_s)
