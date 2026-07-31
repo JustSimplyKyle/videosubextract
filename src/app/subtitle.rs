@@ -102,16 +102,19 @@ impl Default for ProgressBar {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(derive_more::Debug, Clone)]
 pub enum Message {
     Progress {
         frame: usize,
+
+        #[debug("{}x{}", preview.width(), preview.height())]
         preview: RgbaImage,
     },
     EventFound {
         start_timestamp: Duration,
         end_timestamp: Duration,
         text: String,
+        #[debug("{}x{}", preview.width(), preview.height())]
         preview: RgbaImage,
     },
     Delete(usize),

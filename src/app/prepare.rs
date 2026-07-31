@@ -18,13 +18,15 @@ pub struct Model {
     pub canvas_generation: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(derive_more::Debug, Clone)]
 pub enum Message {
     ResetSelection,
     Canvas(selection_canvas::Message),
     PickVideo,
     VideoFilePicked(Option<std::path::PathBuf>),
     LoadVideo(std::path::PathBuf),
+
+    #[debug("{}x{}", _0.width(), _0.height())]
     VideoFrame(RgbaImage),
     VideoFrameAllocated(Result<(iced::advanced::image::Allocation, iced::Size), String>),
     VideoSeekForward(Duration),

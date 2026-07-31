@@ -338,7 +338,15 @@ impl cosmic::Application for AppModel {
             }));
         }
 
-        subscriptions.push(self.prepare.subscription().map(Message::Prepare));
+        // state mangement?
+        match self.nav.active_data::<Page>() {
+            Some(Page::Prepare) => {
+                subscriptions.push(self.prepare.subscription().map(Message::Prepare));
+            }
+            Some(Page::Subtitle) => {}
+            None | Some(Page::PostProduction) => {}
+        }
+
         subscriptions.push(
             self.subtitle
                 .subscription(self.video_frame_rate)
