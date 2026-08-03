@@ -1,42 +1,30 @@
 use crate::config::SubtitleDetector;
-use crate::native_video_sub_finder::{
-    NativeSearchParams, NativeSubtitleEvent, find_subtitles_with,
-};
-use crate::ocr::OcrProvider;
-use crate::subfinder::{Params as RustSearchParams, SubtitleSearch};
+use crate::extraction::{self, OcrHandle, Request as ExtractionRequest, Subtitle};
+use crate::native_video_sub_finder::NativeSearchParams;
+use crate::video_player::CropRect;
 use cosmic::theme;
-use iced::futures::{SinkExt, StreamExt};
+use iced::futures::StreamExt;
 use iced::widget::text_editor;
+use image::RgbaImage;
 
 use super::*;
-use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 const JUMP_TO_END_DELAY: Duration = Duration::from_secs(3);
-const OCR_PARALELLISM: usize = 4;
 
 #[derive(Debug, Clone)]
 pub struct SubtitleResult {
-    pub start_timestamp: Duration,
-    pub end_timestamp: Duration,
-    pub text: String,
+    pub subtitle: Subtitle,
     pub preview: widget::image::Handle,
     editor_content: text_editor::Content,
 }
 
 impl SubtitleResult {
-    fn new(
-        start_timestamp: Duration,
-        end_timestamp: Duration,
-        text: String,
-        preview: widget::image::Handle,
-    ) -> Self {
-        let editor_content = text_editor::Content::with_text(&text);
+    fn new(subtitle: Subtitle, preview: widget::image::Handle) -> Self {
+        let editor_content = text_editor::Content::with_text(&subtitle.text);
 
         Self {
-            start_timestamp,
-            end_timestamp,
-            text,
+            subtitle,
             preview,
             editor_content,
         }
@@ -44,7 +32,7 @@ impl SubtitleResult {
 
     pub(crate) fn set_text(&mut self, text: String) {
         self.editor_content = text_editor::Content::with_text(&text);
-        self.text = text;
+        self.subtitle.text = text;
     }
 }
 
@@ -54,9 +42,10 @@ pub struct Model {
     pub search_gen: usize,
     pub search_path: Option<std::path::PathBuf>,
     pub search_selection: Option<iced::Rectangle>,
-    search_ocr: Option<RuntimeOcrModel>,
+    search_ocr: Option<OcrHandle>,
     search_detector: SubtitleDetector,
     native_search_params: NativeSearchParams,
+    post_ocr_processing: bool,
     pub results: Vec<SubtitleResult>,
     pub preview: Option<widget::image::Handle>,
     pub current_frame: usize,
@@ -111,11 +100,13 @@ pub enum Message {
         preview: RgbaImage,
     },
     EventFound {
-        start_timestamp: Duration,
-        end_timestamp: Duration,
-        text: String,
+        subtitle: Subtitle,
+        replace_previous: bool,
         #[debug("{}x{}", preview.width(), preview.height())]
         preview: RgbaImage,
+    },
+    SearchStarted {
+        total_frames: Option<usize>,
     },
     Delete(usize),
     MergeWithPrevious(usize),
@@ -152,14 +143,16 @@ impl Model {
         ocr: OcrModel,
         detector: SubtitleDetector,
         native_search_params: NativeSearchParams,
+        post_ocr_processing: bool,
     ) {
         self.search_active = true;
         self.search_gen += 1;
         self.search_path = Some(path);
         self.search_selection = selection;
-        self.search_ocr = Some(RuntimeOcrModel::new(ocr));
+        self.search_ocr = Some(OcrHandle::new(ocr));
         self.search_detector = detector;
         self.native_search_params = native_search_params;
+        self.post_ocr_processing = post_ocr_processing;
         self.results.clear();
         self.preview = None;
         self.current_frame = 0;
@@ -173,7 +166,7 @@ impl Model {
         self.set_ocr_model(config.ocr_model.clone());
         match message {
             Message::Progress { frame, preview } => {
-                self.progress_bar.set_position(self.current_frame as u64);
+                self.progress_bar.set_position(frame as u64);
                 self.current_frame = frame;
                 self.preview = Some(widget::image::Handle::from_rgba(
                     preview.width(),
@@ -183,9 +176,8 @@ impl Model {
                 Event::None
             }
             Message::EventFound {
-                start_timestamp,
-                end_timestamp,
-                text,
+                subtitle,
+                replace_previous,
                 preview,
             } => {
                 let preview = widget::image::Handle::from_rgba(
@@ -193,23 +185,17 @@ impl Model {
                     preview.height(),
                     preview.into_raw(),
                 );
-                if config.post_ocr_processing
-                    && let Some(prev) = self.results.last_mut()
-                    && (start_timestamp - prev.end_timestamp) < Duration::from_millis(5000)
-                    && prev.text.trim() == text.trim()
-                {
-                    *prev = SubtitleResult::new(prev.start_timestamp, end_timestamp, text, preview);
+                if replace_previous && let Some(previous) = self.results.last_mut() {
+                    *previous = SubtitleResult::new(subtitle, preview);
                     return Event::None;
                 }
-                if text.trim().is_empty() {
-                    return Event::None;
+                self.results.push(SubtitleResult::new(subtitle, preview));
+                Event::None
+            }
+            Message::SearchStarted { total_frames } => {
+                if let Some(total_frames) = total_frames {
+                    self.progress_bar.set_length(total_frames as u64);
                 }
-                self.results.push(SubtitleResult::new(
-                    start_timestamp,
-                    end_timestamp,
-                    text,
-                    preview,
-                ));
                 Event::None
             }
             Message::SearchDone => {
@@ -259,8 +245,8 @@ impl Model {
                 if x > 0 && x < self.results.len() {
                     let result = self.results.remove(x);
                     let previous_end_timestamp = std::mem::replace(
-                        &mut self.results[x - 1].end_timestamp,
-                        result.end_timestamp,
+                        &mut self.results[x - 1].subtitle.end_timestamp,
+                        result.subtitle.end_timestamp,
                     );
                     self.edit_history.push(SubtitleEdit::MergeWithPrevious {
                         index: x,
@@ -285,7 +271,7 @@ impl Model {
                                 .checked_sub(1)
                                 .and_then(|index| self.results.get_mut(index))
                             {
-                                previous.end_timestamp = previous_end_timestamp;
+                                previous.subtitle.end_timestamp = previous_end_timestamp;
                                 self.results.insert(index.min(self.results.len()), result);
                             }
                         }
@@ -296,7 +282,7 @@ impl Model {
             Message::SubtitleContentEdit { id, action } => {
                 if let Some(result) = self.results.get_mut(id) {
                     result.editor_content.perform(action);
-                    result.text = result.editor_content.text();
+                    result.subtitle.text = result.editor_content.text();
                 }
                 Event::None
             }
@@ -377,8 +363,8 @@ impl Model {
                 .iter()
                 .enumerate()
                 .fold(widget::grid(), |grid, (id, result)| {
-                    let t_start = result.start_timestamp.as_secs_f64();
-                    let t_end = result.end_timestamp.as_secs_f64();
+                    let t_start = result.subtitle.start_timestamp.as_secs_f64();
+                    let t_end = result.subtitle.end_timestamp.as_secs_f64();
 
                     let toolbar = widget::column![
                         widget::button::icon(widget::icon::from_name("edit-delete-symbolic"))
@@ -518,6 +504,7 @@ impl Model {
                 ocr: ocr.clone(),
                 detector: self.search_detector,
                 native_search_params: self.native_search_params,
+                post_ocr_processing: self.post_ocr_processing,
             };
             subscriptions.push(Subscription::run_with(search, subtitle_search_stream));
         }
@@ -536,25 +523,12 @@ impl Model {
 }
 
 pub fn to_srt(results: &[SubtitleResult]) -> String {
-    use std::fmt::Write;
-
-    results
-        .iter()
-        .enumerate()
-        .fold(String::new(), |mut out, (i, r)| {
-            let start = frame_to_srt_timestamp(r.start_timestamp);
-            let end = frame_to_srt_timestamp(r.end_timestamp);
-            write!(
-                out,
-                "{}\n{} --> {}\n{}\n\n",
-                i + 1,
-                start,
-                end,
-                r.text.trim()
-            )
-            .ok();
-            out
-        })
+    extraction::to_srt(
+        &results
+            .iter()
+            .map(|result| result.subtitle.clone())
+            .collect::<Vec<_>>(),
+    )
 }
 
 fn format_duration(duration: Duration) -> String {
@@ -563,15 +537,6 @@ fn format_duration(duration: Duration) -> String {
     let minutes = (total_seconds % 3_600) / 60;
     let seconds = total_seconds % 60;
     format!("{hours:02}:{minutes:02}:{seconds:02}")
-}
-
-fn frame_to_srt_timestamp(frame: Duration) -> String {
-    let total_ms = frame.as_millis();
-    let ms = total_ms % 1000;
-    let s = (total_ms / 1000) % 60;
-    let m = (total_ms / 60_000) % 60;
-    let h = total_ms / 3_600_000;
-    format!("{h:02}:{m:02}:{s:02},{ms:03}")
 }
 
 #[derive(Clone, Hash, PartialEq, Eq)]
@@ -584,29 +549,10 @@ struct SubtitleSearchSubscription {
     key: SubtitleSearchKey,
     selection: Option<iced::Rectangle>,
     frame_rate: f64,
-    ocr: RuntimeOcrModel,
+    ocr: OcrHandle,
     detector: SubtitleDetector,
     native_search_params: NativeSearchParams,
-}
-
-#[derive(Clone)]
-struct RuntimeOcrModel(Arc<RwLock<OcrModel>>);
-
-impl RuntimeOcrModel {
-    fn new(model: OcrModel) -> Self {
-        Self(Arc::new(RwLock::new(model)))
-    }
-
-    fn read(&self) -> OcrModel {
-        self.0
-            .read()
-            .unwrap_or_else(|error| error.into_inner())
-            .clone()
-    }
-
-    fn set(&self, model: OcrModel) {
-        *self.0.write().unwrap_or_else(|error| error.into_inner()) = model;
-    }
+    post_ocr_processing: bool,
 }
 
 impl std::hash::Hash for SubtitleSearchSubscription {
@@ -623,182 +569,62 @@ impl std::hash::Hash for SubtitleSearchSubscription {
             })
             .hash(state);
         self.frame_rate.to_bits().hash(state);
-    }
-}
-
-struct ProgressIter<I> {
-    inner: I,
-    tx: tokio::sync::mpsc::Sender<Message>,
-    count: usize,
-    interval: usize,
-}
-
-impl<I: Iterator<Item = VideoFrame>> Iterator for ProgressIter<I> {
-    type Item = VideoFrame;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let mat = self.inner.next()?;
-        self.count += 1;
-        if self.count.is_multiple_of(self.interval)
-            && let Ok(rgba) = super::mat_to_image_handle(&mat.mat)
-        {
-            self.tx
-                .try_send(Message::Progress {
-                    frame: self.count,
-                    preview: rgba,
-                })
-                .ok();
-        }
-        Some(mat)
+        self.post_ocr_processing.hash(state);
     }
 }
 
 fn subtitle_search_stream(
     search: &SubtitleSearchSubscription,
 ) -> impl futures::Stream<Item = Message> + Send + use<> {
-    let path = search.key.path.clone();
-    let selection = search.selection;
-    let ocr = search.ocr.clone();
-    let detector = search.detector;
-    let native_search_params = search.native_search_params;
-    let preview_interval = 100;
+    let request = ExtractionRequest {
+        input: search.key.path.clone(),
+        crop: search.selection.map(|selection| CropRect {
+            x: selection.x,
+            y: selection.y,
+            width: selection.width,
+            height: selection.height,
+        }),
+        ocr: search.ocr.clone(),
+        detector: search.detector,
+        native_search_params: search.native_search_params,
+        post_ocr_processing: search.post_ocr_processing,
+        progress_interval: 100,
+        include_progress_preview: true,
+    };
 
-    iced::stream::channel(
-        OCR_PARALELLISM,
-        async move |mut tx: futures::channel::mpsc::Sender<Message>| {
-            let (btx1, mut brx) = tokio::sync::mpsc::channel::<Message>(OCR_PARALELLISM);
-            let btx2 = btx1.clone();
-            let (sender, receiver) =
-                tokio::sync::mpsc::channel::<NativeSubtitleEvent>(OCR_PARALELLISM);
-            let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
-
-            tokio::task::spawn_blocking(move || {
-                let input = match ffmpeg_the_third::format::input(&path) {
-                    Ok(x) => x,
-                    Err(e) => {
-                        btx1.blocking_send(Message::SearchError(e.to_string())).ok();
-                        return;
-                    }
-                };
-                let (_, iter) = match create_video_player::<false>(input, selection) {
-                    Ok(x) => x,
-                    Err(e) => {
-                        btx1.blocking_send(Message::SearchError(e.to_string())).ok();
-                        return;
-                    }
-                };
-                let frame_iter = ProgressIter {
-                    inner: iter.filter_map(Result::ok),
-                    tx: btx1.clone(),
-                    count: 0,
-                    interval: preview_interval,
-                };
-
-                let search_result = match detector {
-                    SubtitleDetector::OriginalCpp => {
-                        find_subtitles_with(frame_iter, &native_search_params, |event| {
-                            sender
-                                .blocking_send(event)
-                                .map_err(|_| eyre::eyre!("subtitle OCR receiver closed"))
-                        })
-                    }
-                    SubtitleDetector::RustRewrite => {
-                        for event in SubtitleSearch::new(frame_iter, RustSearchParams::default()) {
-                            let event = NativeSubtitleEvent {
-                                start_timestamp: event.start_timestamp,
-                                end_timestamp: event.end_timestamp,
-                                ocr_image: event.sample_bgr,
-                            };
-                            if sender.blocking_send(event).is_err() {
-                                return;
-                            }
-                        }
-                        Ok(())
-                    }
-                };
-
-                if let Err(error) = search_result {
-                    btx1.blocking_send(Message::SearchError(error.to_string()))
-                        .ok();
-                    return;
-                }
-
-                completion_tx.send(()).ok();
-            });
-
-            tokio::task::spawn(async move {
-                let events = iced::futures::stream::unfold(receiver, |mut receiver| async move {
-                    receiver.recv().await.map(|event| (event, receiver))
-                });
-                let jobs = events.map(move |event| {
-                    let ocr = ocr.clone();
-                    tokio::task::spawn_blocking(move || {
-                        let preview = super::mat_to_image_handle(&event.ocr_image)?;
-
-                        let text = preview
-                            .clone()
-                            .apply(DynamicImage::ImageRgba8)
-                            .apply(|img| ocr.read().recognize_text(&img))
-                            .wrap_err("recognizing subtitle text")?;
-
-                        eyre::Ok(Message::EventFound {
-                            start_timestamp: event.start_timestamp,
-                            end_timestamp: event.end_timestamp,
-                            text,
-                            preview,
-                        })
-                    })
-                });
-                let mut results = Box::pin(jobs.buffered(OCR_PARALELLISM));
-
-                while let Some(result) = results.next().await {
-                    match result {
-                        Ok(Ok(message)) => {
-                            if btx2.send(message).await.is_err() {
-                                return;
-                            }
-                        }
-                        Ok(Err(error)) => {
-                            if btx2
-                                .send(Message::SearchError(format!("{error:#}")))
-                                .await
-                                .is_err()
-                            {
-                                return;
-                            }
-                        }
-                        Err(error) => {
-                            btx2.send(Message::SearchError(error.to_string()))
-                                .await
-                                .ok();
-                            return;
-                        }
-                    }
-                }
-
-                if completion_rx.await.is_ok() {
-                    btx2.send(Message::SearchDone).await.ok();
-                }
-            });
-
-            while let Some(msg) = brx.recv().await {
-                if tx.send(msg).await.is_err() {
-                    break;
-                }
-            }
+    extraction::stream(request.clone()).map(|event| match event {
+        extraction::Event::Started { total_frames } => Message::SearchStarted { total_frames },
+        extraction::Event::Progress {
+            frame,
+            preview: Some(preview),
+        } => Message::Progress { frame, preview },
+        extraction::Event::Progress { .. } => Message::None,
+        extraction::Event::SubtitleFound {
+            subtitle,
+            preview,
+            replace_previous,
+        } => Message::EventFound {
+            subtitle,
+            preview,
+            replace_previous,
         },
-    )
+        extraction::Event::Finished => Message::SearchDone,
+        extraction::Event::Error(error) => Message::SearchError(error),
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn detection(start: u64, end: u64, text: &str) -> Message {
+    fn detection(start: u64, end: u64, text: &str, replace_previous: bool) -> Message {
         Message::EventFound {
-            start_timestamp: Duration::from_secs(start),
-            end_timestamp: Duration::from_secs(end),
-            text: text.to_owned(),
+            subtitle: Subtitle {
+                start_timestamp: Duration::from_secs(start),
+                end_timestamp: Duration::from_secs(end),
+                text: text.to_owned(),
+            },
+            replace_previous,
             preview: RgbaImage::new(1, 1),
         }
     }
@@ -808,11 +634,14 @@ mod tests {
         let mut model = Model::default();
         let config = Config::default();
 
-        model.update(detection(0, 1, "same text"), &config);
-        model.update(detection(2, 3, "same text"), &config);
+        model.update(detection(0, 1, "same text", false), &config);
+        model.update(detection(0, 3, "same text", true), &config);
 
         assert_eq!(model.results.len(), 1);
-        assert_eq!(model.results[0].end_timestamp, Duration::from_secs(3));
+        assert_eq!(
+            model.results[0].subtitle.end_timestamp,
+            Duration::from_secs(3)
+        );
     }
 
     #[test]
@@ -823,8 +652,8 @@ mod tests {
             ..Config::default()
         };
 
-        model.update(detection(0, 1, "same text"), &config);
-        model.update(detection(2, 3, "same text"), &config);
+        model.update(detection(0, 1, "same text", false), &config);
+        model.update(detection(2, 3, "same text", false), &config);
 
         assert_eq!(model.results.len(), 2);
     }

@@ -7,8 +7,10 @@ description = "An application that extracts hard-subs into srt files"
 repository = "https://github.com/pop-os/cosmic-app-template"
 
 [dependencies]
+clap = { version = "4.5", features = ["derive"] }
 eyre = "0.6.12"
 ffmpeg-the-third = "5.0.0"
+futures = "0.3"
 i18n-embed = { version = "0.16", features = [
     "fluent-system",
     "desktop-requester",

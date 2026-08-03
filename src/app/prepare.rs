@@ -3,6 +3,7 @@ use crate::apply_traits::ApplyConditional;
 use super::*;
 use cosmic::iced::widget::Stack;
 use iced::futures::SinkExt;
+use image::RgbaImage;
 use rfd::AsyncFileDialog;
 use std::{env::current_dir, time::Duration};
 
@@ -349,7 +350,7 @@ fn video_frame_stream(
                 loop {
                     let t = std::time::Instant::now();
                     match iter.next() {
-                        Some(Ok(mat)) => match super::mat_to_image_handle(&mat.mat) {
+                        Some(Ok(mat)) => match video_player::mat_to_rgba(&mat.mat) {
                             Ok(handle) => {
                                 if btx.blocking_send(Message::VideoFrame(handle)).is_err() {
                                     break;

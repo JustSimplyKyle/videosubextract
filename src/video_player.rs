@@ -1,4 +1,3 @@
-use cosmic::iced;
 use eyre::{Context, ContextCompat};
 use ffmpeg_the_third::{
     self as ffmpeg, Rational, Rescale, codec,
@@ -52,9 +51,17 @@ pub struct VideoPlayerIterator<const STOP_ON_SEEK: bool> {
     pub(crate) current_generation: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CropRect {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
 pub fn create_video_player<const STOP_ON_SEEK: bool>(
     input: ffmpeg::format::context::Input,
-    crop_rectangle: impl Into<Option<iced::Rectangle>>,
+    crop_rectangle: impl Into<Option<CropRect>>,
 ) -> eyre::Result<(VideoPlayerController, VideoPlayerIterator<STOP_ON_SEEK>)> {
     let crop_rectangle = crop_rectangle.into();
     let vstream = input
@@ -62,12 +69,10 @@ pub fn create_video_player<const STOP_ON_SEEK: bool>(
         .best(media::Type::Video)
         .context("Video stream not found")?;
 
-    dbg!(vstream.time_base());
-
     let stream_index = vstream.index();
     let avg_frame_rate = f64::from(vstream.avg_frame_rate());
 
-    let exact_frames = dbg!(vstream.frames().max(0) as usize);
+    let exact_frames = vstream.frames().max(0) as usize;
 
     // If it's 0 (common for MKV/WebM), estimate it using duration and framerate.
     let total_frames = if exact_frames > 0 {
@@ -192,6 +197,51 @@ impl VideoPlayerController {
 pub struct VideoFrame {
     pub mat: Mat,
     pub timestamp: Duration,
+}
+
+pub fn mat_to_rgba(mat: &opencv::core::Mat) -> eyre::Result<image::RgbaImage> {
+    use opencv::core::{MatTraitConst, MatTraitConstManual};
+
+    let rows = u32::try_from(mat.rows()).context("image has a negative height")?;
+    let cols = u32::try_from(mat.cols()).context("image has a negative width")?;
+    let channels = mat.channels();
+
+    // A Mat ROI can have a stride wider than its visible rows. `copy_to` makes
+    // an independent, packed copy; `try_clone` would only clone the Mat header.
+    let mut packed = opencv::core::Mat::default();
+    mat.copy_to(&mut packed)
+        .context("failed to copy image into packed storage")?;
+    let pixels = packed
+        .data_bytes()
+        .context("failed to access packed image bytes")?;
+
+    let pixel_count = (cols as usize)
+        .checked_mul(rows as usize)
+        .ok_or_else(|| eyre::eyre!("image dimensions are too large"))?;
+    let expected_len = pixel_count
+        .checked_mul(channels as usize)
+        .ok_or_else(|| eyre::eyre!("image buffer is too large"))?;
+    if !matches!(channels, 1 | 3 | 4) || pixels.len() != expected_len {
+        return Err(eyre::eyre!(
+            "expected a packed 8-bit grayscale, BGR, or BGRA Mat; got {channels} channels and {} bytes for a {cols}x{rows} image",
+            pixels.len()
+        ));
+    }
+
+    let mut rgba = Vec::with_capacity(pixel_count * 4);
+    match channels {
+        1 => rgba.extend(pixels.iter().flat_map(|&v| [v, v, v, 255])),
+        3 => rgba.extend(pixels.chunks_exact(3).flat_map(|p| [p[2], p[1], p[0], 255])),
+        4 => rgba.extend(
+            pixels
+                .chunks_exact(4)
+                .flat_map(|p| [p[2], p[1], p[0], p[3]]),
+        ),
+        _ => unreachable!("channel count was checked above"),
+    }
+
+    image::RgbaImage::from_raw(cols, rows, rgba)
+        .ok_or_else(|| eyre::eyre!("failed to construct RGBA image"))
 }
 
 impl<const STOP_ON_SEEK: bool> Iterator for VideoPlayerIterator<STOP_ON_SEEK> {

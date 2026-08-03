@@ -8,7 +8,7 @@ pub mod subtitle;
 use crate::config::{Config, SubtitleDetector};
 use crate::native_video_sub_finder::NativeSearchParams;
 use crate::ocr::OcrModel;
-use crate::video_player::{self, InnerPlayer, VideoFrame, create_video_player};
+use crate::video_player::{self, InnerPlayer, create_video_player};
 use crate::{fl, video_player::VideoPlayerController};
 use cosmic::cosmic_config::{self, CosmicConfigEntry};
 use cosmic::iced::alignment::{Horizontal, Vertical};
@@ -16,10 +16,7 @@ use cosmic::iced::{self, Alignment, Length, Subscription, Task, futures};
 use cosmic::prelude::*;
 
 use cosmic::widget::{self, about::About, icon, menu, nav_bar};
-use eyre::Context;
 use iced::futures::SinkExt;
-use image::{DynamicImage, RgbaImage};
-use opencv::core::{MatTraitConst, MatTraitConstManual};
 use rfd::AsyncFileDialog;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -478,6 +475,7 @@ impl cosmic::Application for AppModel {
                             self.config.ocr_model.clone(),
                             self.config.subtitle_detector,
                             self.config.native_search_params,
+                            self.config.post_ocr_processing,
                         );
                         self.nav.activate(self.subtitle_page_id);
                         self.update_title()
@@ -794,47 +792,4 @@ impl AppModel {
             .main_window_id()
             .map_or_else(Task::none, |id| self.set_window_title(window_title, id))
     }
-}
-
-pub fn mat_to_image_handle(mat: &opencv::core::Mat) -> eyre::Result<RgbaImage> {
-    let rows = u32::try_from(mat.rows()).context("image has a negative height")?;
-    let cols = u32::try_from(mat.cols()).context("image has a negative width")?;
-    let channels = mat.channels();
-
-    // A Mat ROI can have a stride wider than its visible rows. `copy_to` makes
-    // an independent, packed copy; `try_clone` would only clone the Mat header.
-    let mut packed = opencv::core::Mat::default();
-    mat.copy_to(&mut packed)
-        .context("failed to copy image into packed storage")?;
-    let pixels = packed
-        .data_bytes()
-        .context("failed to access packed image bytes")?;
-
-    let pixel_count = (cols as usize)
-        .checked_mul(rows as usize)
-        .ok_or_else(|| eyre::eyre!("image dimensions are too large"))?;
-    let expected_len = pixel_count
-        .checked_mul(channels as usize)
-        .ok_or_else(|| eyre::eyre!("image buffer is too large"))?;
-    if !matches!(channels, 1 | 3 | 4) || pixels.len() != expected_len {
-        return Err(eyre::eyre!(
-            "expected a packed 8-bit grayscale, BGR, or BGRA Mat; got {channels} channels and {} bytes for a {cols}x{rows} image",
-            pixels.len()
-        ));
-    }
-
-    let mut rgba = Vec::with_capacity(pixel_count * 4);
-    match channels {
-        1 => rgba.extend(pixels.iter().flat_map(|&v| [v, v, v, 255])),
-        3 => rgba.extend(pixels.chunks_exact(3).flat_map(|p| [p[2], p[1], p[0], 255])),
-        4 => rgba.extend(
-            pixels
-                .chunks_exact(4)
-                .flat_map(|p| [p[2], p[1], p[0], p[3]]),
-        ),
-        _ => unreachable!("channel count was checked above"),
-    }
-
-    RgbaImage::from_raw(cols, rows, rgba)
-        .ok_or_else(|| eyre::eyre!("failed to construct RGBA image"))
 }

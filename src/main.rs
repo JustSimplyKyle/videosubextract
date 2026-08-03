@@ -2,7 +2,9 @@
 
 mod app;
 pub mod apply_traits;
+mod cli;
 mod config;
+mod extraction;
 mod i18n;
 mod native_video_sub_finder;
 mod ocr;
@@ -10,13 +12,30 @@ mod subfinder;
 
 pub mod video_player;
 
-fn main() -> cosmic::iced::Result {
+fn main() -> eyre::Result<()> {
+    use clap::Parser;
+
+    let args = cli::Args::parse();
+
     assert_eq!(
         native_video_sub_finder::api_version(),
         native_video_sub_finder::EXPECTED_API_VERSION,
         "incompatible VideoSubFinder native library"
     );
 
+    if let Some(input) = args.input {
+        let output = args.output.unwrap_or_else(|| input.with_extension("srt"));
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+        return runtime.block_on(cli::run(input, output, args.crop));
+    }
+
+    run_gui()?;
+    Ok(())
+}
+
+fn run_gui() -> cosmic::iced::Result {
     // Get the system's preferred languages.
     let requested_languages = i18n_embed::DesktopLanguageRequester::requested_languages();
 
