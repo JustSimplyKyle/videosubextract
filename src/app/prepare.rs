@@ -17,6 +17,7 @@ pub struct Model {
     pub screenshot_selection_scaled: Option<iced::Rectangle>,
     pub canvas_dimensions: iced::Rectangle,
     pub canvas_generation: u32,
+    current_time: Duration,
 }
 
 #[derive(derive_more::Debug, Clone)]
@@ -27,11 +28,16 @@ pub enum Message {
     VideoFilePicked(Option<std::path::PathBuf>),
     LoadVideo(std::path::PathBuf),
 
-    #[debug("{}x{}", _0.width(), _0.height())]
-    VideoFrame(RgbaImage),
+    #[debug("{}x{}@{}", image.width(), image.height(), format_duration(*timestamp))]
+    VideoFrame {
+        image: RgbaImage,
+        timestamp: Duration,
+    },
     VideoFrameAllocated(Result<(iced::advanced::image::Allocation, iced::Size), String>),
     VideoSeekForward(Duration),
     VideoSeekBackward(Duration),
+    VideoSeekAbsolute(Duration),
+    CopySelectionDimensions(String),
     VideoError(String),
     StartSubtitleDisplay,
 }
@@ -39,6 +45,7 @@ pub enum Message {
 pub enum Event {
     StartSubtitleSearch(std::path::PathBuf, Option<iced::Rectangle>),
     Run(Task<Message>),
+    CopySelectionDimensions(String),
     Error(eyre::Report),
     None,
 }
@@ -104,11 +111,16 @@ impl Model {
                 }
                 Event::None
             }
-            Message::VideoFrame(frame) => {
+            Message::VideoFrame {
+                image: frame,
+                timestamp,
+            } => {
                 if self.is_allocating_frame {
                     println!("ui overdrive");
                     return Event::None;
                 }
+
+                self.current_time = timestamp;
 
                 // let mut hasher = DefaultHasher::new();
                 // Id::unique().0.hash(&mut hasher);
@@ -158,6 +170,21 @@ impl Model {
                     return Event::Error(error.wrap_err("seeking backward"));
                 }
                 Event::None
+            }
+            Message::VideoSeekAbsolute(duration) => {
+                self.current_time = duration;
+
+                if let Some(ref controller) = self.video_controller
+                    && let Err(error) = controller.seek_absolute(duration)
+                {
+                    return Event::Error(
+                        error.wrap_err(format!("seeking to {:.2}s", duration.as_secs_f64())),
+                    );
+                }
+                Event::None
+            }
+            Message::CopySelectionDimensions(dimensions) => {
+                Event::CopySelectionDimensions(dimensions)
             }
             Message::VideoError(msg) => {
                 self.video_controller = None;
@@ -242,20 +269,26 @@ impl Model {
         let skip_forward = widget::button::icon(icon::from_name("media-seek-forward-symbolic"))
             .on_press(Message::VideoSeekForward(Duration::from_secs(5)))
             .class(cosmic::theme::Button::NavToggle);
+        let selection_label: Element<'_, Message> = self.screenshot_selection_scaled.map_or_else(
+            || {
+                widget::text("Click twice on the image to two corners")
+                    .class(cosmic::theme::Text::Accent)
+                    .into()
+            },
+            |rectangle| {
+                let dimensions = format!(
+                    "{:.0}×{:.0}@{:.0},{:.0}",
+                    rectangle.width, rectangle.height, rectangle.x, rectangle.y
+                );
+                let label = widget::text(format!("Selection: {dimensions}"))
+                    .class(cosmic::theme::Text::Accent);
 
-        let selection_label = self
-            .screenshot_selection_scaled
-            .map_or_else(
-                || "Click twice on the image to two corners".into(),
-                |r| {
-                    format!(
-                        "Selection: ({:.0}, {:.0})  {:.0}×{:.0}",
-                        r.x, r.y, r.width, r.height
-                    )
-                },
-            )
-            .apply(widget::text)
-            .class(cosmic::theme::Text::Accent);
+                widget::mouse_area(label)
+                    .on_press(Message::CopySelectionDimensions(dimensions))
+                    .interaction(iced::mouse::Interaction::Pointer)
+                    .into()
+            },
+        );
 
         let find_subs = widget::button::text("Find Subtitles");
         let find_subs = if self.video_path.is_some() {
@@ -266,9 +299,25 @@ impl Model {
             find_subs
         };
 
+        let slider = self
+            .video_controller
+            .as_ref()
+            .map(|x| x.inner.info.video_time.as_secs_f64())
+            .map(|video_time| {
+                widget::slider(0.0..=video_time, self.current_time.as_secs_f64(), |x| {
+                    Message::VideoSeekAbsolute(Duration::from_secs_f64(x))
+                })
+            });
+
+        let current_time = widget::text(self.current_time.apply(format_duration))
+            .width(Length::Fill)
+            .align_x(Horizontal::Right);
+
         widget::column! {
             full_img,
             cropped_img,
+            slider,
+            current_time,
             widget::row! {
                 load_video,
                 reset_btn,
@@ -352,7 +401,13 @@ fn video_frame_stream(
                     match iter.next() {
                         Some(Ok(mat)) => match video_player::mat_to_rgba(&mat.mat) {
                             Ok(handle) => {
-                                if btx.blocking_send(Message::VideoFrame(handle)).is_err() {
+                                if btx
+                                    .blocking_send(Message::VideoFrame {
+                                        image: handle,
+                                        timestamp: mat.timestamp,
+                                    })
+                                    .is_err()
+                                {
                                     break;
                                 }
                             }

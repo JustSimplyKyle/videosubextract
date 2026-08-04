@@ -615,12 +615,6 @@ fn visible_result_range(
         ..visible_end
             .saturating_add(RESULT_ROW_OVERSCAN)
             .min(result_count)
-fn format_duration(duration: Duration) -> String {
-    let total_seconds = duration.as_secs();
-    let hours = total_seconds / 3_600;
-    let minutes = (total_seconds % 3_600) / 60;
-    let seconds = total_seconds % 60;
-    format!("{hours:02}:{minutes:02}:{seconds:02}")
 }
 
 #[derive(Clone, Hash, PartialEq, Eq)]

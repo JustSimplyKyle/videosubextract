@@ -20,12 +20,13 @@ use std::{
     time::Duration,
 };
 
-pub(crate) struct PlayerState {
-    pub(crate) input: ffmpeg::format::context::Input,
-    pub(crate) decoder: codec::decoder::Video,
-    pub(crate) filter_graph: Option<GraphWithInfo>,
-    pub(crate) frame_buffer: VecDeque<eyre::Result<VideoFrame>>,
-    pub(crate) seek_generation: usize,
+pub struct PlayerState {
+    pub input: ffmpeg::format::context::Input,
+    pub decoder: codec::decoder::Video,
+    pub filter_graph: Option<GraphWithInfo>,
+    pub frame_buffer: VecDeque<eyre::Result<VideoFrame>>,
+    pub timestamp: Option<Duration>,
+    pub seek_generation: usize,
 }
 
 pub(crate) struct InnerPlayer {
@@ -88,11 +89,17 @@ pub fn create_video_player<const STOP_ON_SEEK: bool>(
         }
     };
 
+    let video_time = {
+        let duration = vstream.duration().max(input.duration());
+        let duration_sec = duration as f64 / AV_TIME_BASE as f64;
+        Duration::from_secs_f64(duration_sec)
+    };
+
     let mut vcodec = codec::context::Context::from_parameters(vstream.parameters())?;
     if let Ok(parallelism) = std::thread::available_parallelism() {
         vcodec.set_threading(threading::Config {
             kind: threading::Type::Frame,
-            count: parallelism.get() / 2,
+            count: parallelism.get().max(16),
         });
     }
 
@@ -105,6 +112,7 @@ pub fn create_video_player<const STOP_ON_SEEK: bool>(
         width: decoder.width(),
         height: decoder.height(),
         frame_rate: avg_frame_rate,
+        video_time,
         total_frames,
         time_base,
     };
@@ -128,6 +136,7 @@ pub fn create_video_player<const STOP_ON_SEEK: bool>(
             filter_graph,
             frame_buffer: Default::default(),
             seek_generation: 0,
+            timestamp: None,
         }),
         stream_index,
         info,
@@ -148,6 +157,7 @@ pub fn create_video_player<const STOP_ON_SEEK: bool>(
 enum Direction {
     Forward,
     Backward,
+    Absolute,
 }
 
 impl VideoPlayerController {
@@ -159,17 +169,14 @@ impl VideoPlayerController {
             .lock()
             .map_err(|_| eyre::eyre!("lock poisoned"))?;
 
-        let current_secs = state
-            .frame_buffer
-            .iter()
-            .last()
-            .and_then(|x| Some(x.as_ref().ok()?.timestamp))
-            .map(|x| x.as_secs_f64())
-            .unwrap_or_default();
+        let current_secs = state.timestamp.map(|x| x.as_secs_f64()).unwrap_or_default();
+
+        dbg!(current_secs);
 
         let target_secs = match direction {
             Direction::Forward => current_secs + delta.as_secs_f64(),
             Direction::Backward => (current_secs - delta.as_secs_f64()).max(0.),
+            Direction::Absolute => delta.as_secs_f64(),
         };
 
         let target_us = (target_secs * f64::from(AV_TIME_BASE)) as i64;
@@ -191,6 +198,9 @@ impl VideoPlayerController {
     }
     pub fn seek_backward(&self, delta: Duration) -> eyre::Result<()> {
         self.seek(delta, Direction::Backward)
+    }
+    pub fn seek_absolute(&self, timestamp: Duration) -> eyre::Result<()> {
+        self.seek(timestamp, Direction::Absolute)
     }
 }
 
@@ -258,6 +268,7 @@ impl<const STOP_ON_SEEK: bool> Iterator for VideoPlayerIterator<STOP_ON_SEEK> {
 
         // 1. If we have frames from a previous packet, yield one immediately!
         if let Some(mat) = state.frame_buffer.pop_front() {
+            state.timestamp = mat.as_ref().ok().map(|x| x.timestamp);
             return Some(mat);
         }
 
@@ -284,6 +295,7 @@ impl<const STOP_ON_SEEK: bool> Iterator for VideoPlayerIterator<STOP_ON_SEEK> {
             // If this packet generated frames, yield the first one,
             // the rest stay in the buffer for the next calls!
             if let Some(mat) = state.frame_buffer.pop_front() {
+                state.timestamp = mat.as_ref().ok().map(|x| x.timestamp);
                 return Some(mat);
             }
         }
@@ -332,6 +344,7 @@ pub(crate) struct DecoderInfo {
     pub(crate) height: u32,
     pub(crate) frame_rate: f64,
     pub total_frames: usize,
+    pub video_time: Duration,
     pub time_base: Rational,
 }
 

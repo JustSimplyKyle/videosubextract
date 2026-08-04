@@ -32,6 +32,14 @@ macro_rules! log {
     };
 }
 
+pub fn format_duration(duration: Duration) -> String {
+    let total_seconds = duration.as_secs();
+    let hours = total_seconds / 3_600;
+    let minutes = (total_seconds % 3_600) / 60;
+    let seconds = total_seconds % 60;
+    format!("{hours:02}:{minutes:02}:{seconds:02}")
+}
+
 pub struct AppModel {
     core: cosmic::Core,
     context_page: ContextPage,
@@ -49,6 +57,7 @@ pub struct AppModel {
     prepare: prepare::Model,
     subtitle: subtitle::Model,
     post_production: post_production::Model,
+    toasts: widget::Toasts<Message>,
     errors: Vec<Arc<eyre::Report>>,
 }
 
@@ -68,6 +77,7 @@ pub enum Message {
     Prepare(prepare::Message),
     Subtitle(subtitle::Message),
     PostProduction(post_production::Message),
+    CloseToast(widget::ToastId),
     ErrorReported(Arc<eyre::Report>),
 }
 
@@ -193,6 +203,7 @@ impl cosmic::Application for AppModel {
             prepare: prepare::Model::default(),
             subtitle: subtitle::Model::default(),
             post_production: post_production::Model::default(),
+            toasts: widget::Toasts::new(Message::CloseToast),
             errors: Vec::new(),
         };
 
@@ -300,15 +311,16 @@ impl cosmic::Application for AppModel {
             .align_y(Alignment::End)
             .spacing(space_s);
 
-        widget::container(widget::column!(header, content).spacing(space_s))
+        let content = widget::container(widget::column!(header, content).spacing(space_s))
             .width(Length::Fill)
             .height(Length::Fill)
             .apply(widget::container)
             .width(Length::Fill)
             .padding([0, 50])
             .align_x(Horizontal::Center)
-            .align_y(Vertical::Center)
-            .into()
+            .align_y(Vertical::Center);
+
+        widget::toaster(&self.toasts, content)
     }
 
     fn subscription(&self) -> Subscription<Self::Message> {
@@ -481,6 +493,14 @@ impl cosmic::Application for AppModel {
                         self.update_title()
                     }
                     prepare::Event::Run(task) => task.map(Message::Prepare).map(Into::into),
+                    prepare::Event::CopySelectionDimensions(dimensions) => {
+                        let copy = iced::clipboard::write(dimensions.clone());
+                        let toast = self
+                            .toasts
+                            .push(widget::Toast::new(format!("Copied {dimensions}")))
+                            .map(Into::into);
+                        Task::batch([copy, toast])
+                    }
                     prepare::Event::Error(error) => log!(error),
                     prepare::Event::None => Task::none(),
                 }
@@ -509,6 +529,10 @@ impl cosmic::Application for AppModel {
                 }
                 post_production::Event::Error(error) => log!(error),
             },
+            Message::CloseToast(id) => {
+                self.toasts.remove(id);
+                Task::none()
+            }
             Message::ErrorReported(report) => {
                 self.errors.push(report);
                 self.context_page = ContextPage::Error;
