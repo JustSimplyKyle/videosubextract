@@ -94,7 +94,11 @@ impl Model {
             Message::VideoFilePicked(None) => Event::None,
             Message::LoadVideo(path) => {
                 match ffmpeg_the_third::format::input(&path) {
-                    Ok(input) => match create_video_player::<false>(input, None) {
+                    Ok(input) => match create_video_player::<false>(
+                        input,
+                        None,
+                        crate::config::ProcessingResolution::None,
+                    ) {
                         Ok((controller, _iter)) => {
                             self.video_path = Some(path);
                             self.video_controller = Some(controller);

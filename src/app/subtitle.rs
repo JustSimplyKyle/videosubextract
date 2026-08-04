@@ -1,4 +1,4 @@
-use crate::config::SubtitleDetector;
+use crate::config::{ProcessingResolution, SubtitleDetector};
 use crate::extraction::{self, OcrHandle, Request as ExtractionRequest, Subtitle};
 use crate::native_video_sub_finder::NativeSearchParams;
 use crate::video_player::CropRect;
@@ -53,6 +53,7 @@ pub struct Model {
     search_detector: SubtitleDetector,
     native_search_params: NativeSearchParams,
     post_ocr_processing: bool,
+    processing_resolution: ProcessingResolution,
     pub results: Vec<SubtitleResult>,
     pub preview: Option<widget::image::Handle>,
     pub current_frame: usize,
@@ -159,19 +160,17 @@ impl Model {
         &mut self,
         path: std::path::PathBuf,
         selection: Option<iced::Rectangle>,
-        ocr: OcrModel,
-        detector: SubtitleDetector,
-        native_search_params: NativeSearchParams,
-        post_ocr_processing: bool,
+        config: &Config,
     ) {
         self.search_active = true;
         self.search_gen += 1;
         self.search_path = Some(path);
         self.search_selection = selection;
-        self.search_ocr = Some(OcrHandle::new(ocr));
-        self.search_detector = detector;
-        self.native_search_params = native_search_params;
-        self.post_ocr_processing = post_ocr_processing;
+        self.search_ocr = Some(OcrHandle::new(config.ocr_model.clone()));
+        self.search_detector = config.subtitle_detector;
+        self.native_search_params = config.native_search_params;
+        self.post_ocr_processing = config.post_ocr_processing;
+        self.processing_resolution = config.processing_resolution;
         self.results.clear();
         self.preview = None;
         self.current_frame = 0;
@@ -561,6 +560,7 @@ impl Model {
                 detector: self.search_detector,
                 native_search_params: self.native_search_params,
                 post_ocr_processing: self.post_ocr_processing,
+                processing_resolution: self.processing_resolution,
             };
             subscriptions.push(Subscription::run_with(search, subtitle_search_stream));
         }
@@ -631,6 +631,7 @@ struct SubtitleSearchSubscription {
     detector: SubtitleDetector,
     native_search_params: NativeSearchParams,
     post_ocr_processing: bool,
+    processing_resolution: ProcessingResolution,
 }
 
 impl std::hash::Hash for SubtitleSearchSubscription {
@@ -648,6 +649,7 @@ impl std::hash::Hash for SubtitleSearchSubscription {
             .hash(state);
         self.frame_rate.to_bits().hash(state);
         self.post_ocr_processing.hash(state);
+        self.processing_resolution.hash(state);
     }
 }
 
@@ -666,6 +668,7 @@ fn subtitle_search_stream(
         detector: search.detector,
         native_search_params: search.native_search_params,
         post_ocr_processing: search.post_ocr_processing,
+        processing_resolution: search.processing_resolution,
         progress_interval: 100,
         include_progress_preview: true,
     };

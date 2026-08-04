@@ -1,4 +1,4 @@
-use crate::config::SubtitleDetector;
+use crate::config::{ProcessingResolution, SubtitleDetector};
 use crate::native_video_sub_finder::{
     NativeSearchParams, NativeSubtitleEvent, find_subtitles_with,
 };
@@ -80,6 +80,7 @@ pub struct Request {
     pub detector: SubtitleDetector,
     pub native_search_params: NativeSearchParams,
     pub post_ocr_processing: bool,
+    pub processing_resolution: ProcessingResolution,
     pub progress_interval: usize,
     pub include_progress_preview: bool,
 }
@@ -120,6 +121,7 @@ async fn run(request: Request, event_tx: tokio::sync::mpsc::Sender<Event>) {
     let crop = request.crop;
     let detector = request.detector;
     let native_search_params = request.native_search_params;
+    let processing_resolution = request.processing_resolution;
     let progress_interval = request.progress_interval.max(1);
     let include_progress_preview = request.include_progress_preview;
 
@@ -127,8 +129,9 @@ async fn run(request: Request, event_tx: tokio::sync::mpsc::Sender<Event>) {
         let result = (|| {
             let input = ffmpeg_the_third::format::input(&input)
                 .wrap_err("opening the video with FFmpeg")?;
-            let (controller, iter) = create_video_player::<false>(input, crop)
-                .wrap_err("initializing the video decoder")?;
+            let (controller, iter) =
+                create_video_player::<false>(input, crop, processing_resolution)
+                    .wrap_err("initializing the video decoder")?;
             let total_frames = controller.inner.info.total_frames;
             blocking_event_tx
                 .blocking_send(Event::Started {

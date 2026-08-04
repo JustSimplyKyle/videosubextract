@@ -1,3 +1,4 @@
+use crate::config::ProcessingResolution;
 use eyre::{Context, ContextCompat};
 use ffmpeg_the_third::{
     self as ffmpeg, Rational, Rescale, codec,
@@ -63,6 +64,7 @@ pub struct CropRect {
 pub fn create_video_player<const STOP_ON_SEEK: bool>(
     input: ffmpeg::format::context::Input,
     crop_rectangle: impl Into<Option<CropRect>>,
+    processing_resolution: ProcessingResolution,
 ) -> eyre::Result<(VideoPlayerController, VideoPlayerIterator<STOP_ON_SEEK>)> {
     let crop_rectangle = crop_rectangle.into();
     let vstream = input
@@ -124,9 +126,10 @@ pub fn create_video_player<const STOP_ON_SEEK: bool>(
             rect.y as u32,
             rect.width as u32,
             rect.height as u32,
+            processing_resolution,
         )?)
     } else {
-        Some(build_filter_graph(info)?)
+        Some(build_filter_graph(info, processing_resolution)?)
     };
 
     let inner = Arc::new(InnerPlayer {
@@ -354,6 +357,7 @@ pub(crate) fn build_crop_graph(
     crop_y: u32,
     crop_w: u32,
     crop_h: u32,
+    processing_resolution: ProcessingResolution,
 ) -> eyre::Result<GraphWithInfo> {
     let pix_fmt_name = info
         .format
@@ -361,9 +365,14 @@ pub(crate) fn build_crop_graph(
         .context("pixel format has no descriptor")?
         .name();
 
+    let scaled = scaled_output_dimensions(info, crop_w, crop_h, processing_resolution);
+    let scale = scaled.map_or_else(String::new, |(width, height)| {
+        format!("scale=w={width}:h={height}:flags=bilinear,")
+    });
     let desc = format!(
         "buffer=video_size={w}x{h}:pix_fmt={pix_fmt_name}:time_base={}/{}:sar=1/1,\
          crop=x={crop_x}:y={crop_y}:w={crop_w}:h={crop_h},\
+         {scale}\
          format=pix_fmts=bgr24,\
          buffersink",
         info.time_base.numerator(),
@@ -379,19 +388,31 @@ pub(crate) fn build_crop_graph(
     Ok(GraphWithInfo {
         graph,
         source: "Parsed_buffer_0",
-        sink: "Parsed_buffersink_3",
+        sink: if scaled.is_some() {
+            "Parsed_buffersink_4"
+        } else {
+            "Parsed_buffersink_3"
+        },
     })
 }
 
-pub(crate) fn build_filter_graph(info: DecoderInfo) -> eyre::Result<GraphWithInfo> {
+pub(crate) fn build_filter_graph(
+    info: DecoderInfo,
+    processing_resolution: ProcessingResolution,
+) -> eyre::Result<GraphWithInfo> {
     let pix_fmt_name = info
         .format
         .descriptor()
         .context("pixel format has no descriptor")?
         .name();
 
+    let scaled = scaled_output_dimensions(info, info.width, info.height, processing_resolution);
+    let scale = scaled.map_or_else(String::new, |(width, height)| {
+        format!("scale=w={width}:h={height}:flags=bilinear,")
+    });
     let desc = format!(
         "buffer=video_size={w}x{h}:pix_fmt={pix_fmt_name}:time_base={}/{}:sar=1/1,\
+         {scale}\
          format=pix_fmts=bgr24,\
          buffersink",
         info.time_base.numerator(),
@@ -407,8 +428,30 @@ pub(crate) fn build_filter_graph(info: DecoderInfo) -> eyre::Result<GraphWithInf
     Ok(GraphWithInfo {
         graph,
         source: "Parsed_buffer_0",
-        sink: "Parsed_buffersink_2",
+        sink: if scaled.is_some() {
+            "Parsed_buffersink_3"
+        } else {
+            "Parsed_buffersink_2"
+        },
     })
+}
+
+fn scaled_output_dimensions(
+    info: DecoderInfo,
+    output_width: u32,
+    output_height: u32,
+    processing_resolution: ProcessingResolution,
+) -> Option<(u32, u32)> {
+    let max_height = processing_resolution.max_height()?;
+    if info.height <= max_height {
+        return None;
+    }
+
+    let scale = f64::from(max_height) / f64::from(info.height);
+    Some((
+        (f64::from(output_width) * scale).round().max(1.0) as u32,
+        (f64::from(output_height) * scale).round().max(1.0) as u32,
+    ))
 }
 
 pub(crate) struct GraphWithInfo {

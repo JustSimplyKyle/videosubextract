@@ -5,7 +5,7 @@ pub mod prepare;
 pub mod selection_canvas;
 pub mod subtitle;
 
-use crate::config::{Config, SubtitleDetector};
+use crate::config::{Config, ProcessingResolution, SubtitleDetector};
 use crate::native_video_sub_finder::NativeSearchParams;
 use crate::ocr::OcrModel;
 use crate::video_player::{self, InnerPlayer, create_video_player};
@@ -72,6 +72,7 @@ pub enum Message {
     SetSubtitleDetector(SubtitleDetector),
     SetNativeSearchParams(NativeSearchParams),
     SetPostOcrProcessing(bool),
+    SetProcessingResolution(ProcessingResolution),
     UpdateConfig(Config),
     WatchTick(u32),
     Prepare(prepare::Message),
@@ -470,6 +471,15 @@ impl cosmic::Application for AppModel {
                 }
                 Task::none()
             }
+            Message::SetProcessingResolution(resolution) => {
+                if let Err(error) = self
+                    .config
+                    .set_processing_resolution(&self.config_handler, resolution)
+                {
+                    return log!("failed to save configuration: {error}");
+                }
+                Task::none()
+            }
             Message::LaunchUrl(url) => {
                 if let Err(err) = open::that_detached(&url) {
                     return log!("failed to open {url:?}: {err}");
@@ -481,14 +491,7 @@ impl cosmic::Application for AppModel {
 
                 match event {
                     prepare::Event::StartSubtitleSearch(path, selection) => {
-                        self.subtitle.start_search(
-                            path,
-                            selection,
-                            self.config.ocr_model.clone(),
-                            self.config.subtitle_detector,
-                            self.config.native_search_params,
-                            self.config.post_ocr_processing,
-                        );
+                        self.subtitle.start_search(path, selection, &self.config);
                         self.nav.activate(self.subtitle_page_id);
                         self.update_title()
                     }
@@ -580,6 +583,9 @@ impl AppModel {
         let selected_detector_index = SubtitleDetector::ALL
             .iter()
             .position(|detector| *detector == self.config.subtitle_detector);
+        let selected_resolution_index = ProcessingResolution::ALL
+            .iter()
+            .position(|resolution| *resolution == self.config.processing_resolution);
         let native = self.config.native_search_params;
 
         let spacing = cosmic::theme::spacing();
@@ -622,6 +628,15 @@ impl AppModel {
                 .into(),
             widget::settings::section()
                 .title("Subtitle detection")
+                .add(widget::settings::item(
+                    "Processing resolution",
+                    widget::dropdown(
+                        &ProcessingResolution::LABELS,
+                        selected_resolution_index,
+                        |index| Message::SetProcessingResolution(ProcessingResolution::ALL[index]),
+                    )
+                    .gap(f32::from(spacing.space_m)),
+                ))
                 .add(widget::settings::item(
                     "Implementation",
                     widget::dropdown(

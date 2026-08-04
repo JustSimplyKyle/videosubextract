@@ -86,6 +86,7 @@ pub async fn run(input: PathBuf, output: PathBuf, crop: Option<Crop>) -> eyre::R
         detector: config.subtitle_detector,
         native_search_params: config.native_search_params,
         post_ocr_processing: config.post_ocr_processing,
+        processing_resolution: config.processing_resolution,
         progress_interval: 10,
         include_progress_preview: false,
     };
