@@ -12,18 +12,25 @@ use std::time::Duration;
 
 const JUMP_TO_END_DELAY: Duration = Duration::from_secs(3);
 
+const TOOLBAR_SIZE: f32 = 48.0;
+const RESULT_ROW_HEIGHT: f32 = 120.0;
+const RESULT_ROW_OVERSCAN: usize = 3;
+const INITIAL_VISIBLE_RESULT_ROWS: usize = 8;
+
 #[derive(Debug, Clone)]
 pub struct SubtitleResult {
+    id: u64,
     pub subtitle: Subtitle,
     pub preview: widget::image::Handle,
     editor_content: text_editor::Content,
 }
 
 impl SubtitleResult {
-    fn new(subtitle: Subtitle, preview: widget::image::Handle) -> Self {
+    fn new(id: u64, subtitle: Subtitle, preview: widget::image::Handle) -> Self {
         let editor_content = text_editor::Content::with_text(&subtitle.text);
 
         Self {
+            id,
             subtitle,
             preview,
             editor_content,
@@ -52,6 +59,9 @@ pub struct Model {
     pub done: bool,
     pub progress_bar: ProgressBar,
     scrollbar_jump_status: ScrollbarJumpStatus,
+    next_result_id: u64,
+    result_scroll_offset: f32,
+    result_viewport_height: f32,
     edit_history: Vec<SubtitleEdit>,
 }
 
@@ -74,6 +84,13 @@ enum ScrollbarJumpStatus {
     NoShow,
     TimeoutRunning,
     DisplayButton,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VirtualRowKey {
+    TopSpacer,
+    Result(u64),
+    BottomSpacer,
 }
 
 pub struct ProgressBar(indicatif::ProgressBar);
@@ -113,6 +130,8 @@ pub enum Message {
     UndoEdit,
     Scrolled {
         at_end: bool,
+        offset: f32,
+        viewport_height: f32,
     },
     JumpToEnd {
         id: iced::id::Id,
@@ -160,6 +179,9 @@ impl Model {
         self.edit_history.clear();
         self.progress_bar.set_elapsed(Duration::ZERO);
         self.scrollbar_jump_status = ScrollbarJumpStatus::NoShow;
+        self.next_result_id = 0;
+        self.result_scroll_offset = 0.0;
+        self.result_viewport_height = 0.0;
     }
 
     pub fn update(&mut self, message: Message, config: &Config) -> Event {
@@ -186,10 +208,13 @@ impl Model {
                     preview.into_raw(),
                 );
                 if replace_previous && let Some(previous) = self.results.last_mut() {
-                    *previous = SubtitleResult::new(subtitle, preview);
+                    *previous = SubtitleResult::new(previous.id, subtitle, preview);
                     return Event::None;
                 }
-                self.results.push(SubtitleResult::new(subtitle, preview));
+                let id = self.next_result_id;
+                self.next_result_id = self.next_result_id.wrapping_add(1);
+                self.results
+                    .push(SubtitleResult::new(id, subtitle, preview));
                 Event::None
             }
             Message::SearchStarted { total_frames } => {
@@ -209,7 +234,13 @@ impl Model {
                 Event::Error(eyre::eyre!("subtitle search failed: {e}"))
             }
             Message::GoToPostProduction => Event::GoToPostProduction,
-            Message::Scrolled { at_end } => {
+            Message::Scrolled {
+                at_end,
+                offset,
+                viewport_height,
+            } => {
+                self.result_scroll_offset = offset;
+                self.result_viewport_height = viewport_height;
                 if at_end {
                     self.scrollbar_jump_status = ScrollbarJumpStatus::NoShow;
                     Event::None
@@ -345,82 +376,103 @@ impl Model {
 
         let undo_edit = widget::button::icon(icon::from_name("edit-undo-symbolic"))
             .on_press_maybe((!self.edit_history.is_empty()).then_some(Message::UndoEdit));
+        let row_spacing = f32::from(spacing.space_m);
+        let row_pitch = RESULT_ROW_HEIGHT + row_spacing;
 
-        const TOOLBAR_SIZE: f32 = 48.0;
+        let visible_rows = visible_result_range(
+            self.result_scroll_offset,
+            self.result_viewport_height,
+            row_pitch,
+            self.results.len(),
+        );
+        let top_spacer_height = visible_rows.start as f32 * row_pitch;
+        let bottom_spacer_height =
+            self.results.len().saturating_sub(visible_rows.end) as f32 * row_pitch;
 
-        let grid = widget::responsive(move |size| {
-            let horizontal_padding = 80.0; // [0, 40] on both sides
-            let column_gaps = f32::from(spacing.space_s) * 2.0;
+        let mut virtual_rows = Vec::with_capacity(visible_rows.len() + 2);
 
-            let available_width =
-                (size.width - horizontal_padding - column_gaps - TOOLBAR_SIZE).max(0.0);
+        if top_spacer_height > 0.0 {
+            virtual_rows.push((
+                VirtualRowKey::TopSpacer,
+                widget::Space::new()
+                    .height(Length::Fixed(top_spacer_height))
+                    .into(),
+            ));
+        }
 
-            let text_width = (available_width * 0.35).max(160.0).min(available_width);
+        virtual_rows.extend(self.results[visible_rows.clone()].iter().enumerate().map(
+            |(relative_id, result)| {
+                let id = visible_rows.start + relative_id;
+                let t_start = result.subtitle.start_timestamp.as_secs_f64();
+                let t_end = result.subtitle.end_timestamp.as_secs_f64();
 
-            let image_width = (available_width - text_width).max(0.0);
+                let toolbar = widget::column![
+                    widget::button::icon(widget::icon::from_name("edit-delete-symbolic"))
+                        .on_press(Message::Delete(id))
+                        .class(cosmic::theme::Button::Destructive),
+                ]
+                .push_maybe(
+                    (id != 0).then_some(
+                        widget::button::icon(widget::icon::from_name("go-up-symbolic"))
+                            .on_press(Message::MergeWithPrevious(id))
+                            .class(cosmic::theme::Button::Icon),
+                    ),
+                )
+                .width(TOOLBAR_SIZE)
+                .spacing(space_s)
+                .align_x(Alignment::Center);
 
-            self.results
-                .iter()
-                .enumerate()
-                .fold(widget::grid(), |grid, (id, result)| {
-                    let t_start = result.subtitle.start_timestamp.as_secs_f64();
-                    let t_end = result.subtitle.end_timestamp.as_secs_f64();
+                let image = widget::image(result.preview.clone())
+                    .content_fit(iced::ContentFit::Contain)
+                    .width(Length::FillPortion(65))
+                    .height(Length::Fill);
 
-                    let toolbar = widget::column![
-                        widget::button::icon(widget::icon::from_name("edit-delete-symbolic"))
-                            .on_press(Message::Delete(id))
-                            .class(cosmic::theme::Button::Destructive),
-                    ]
-                    .push_maybe(
-                        (id != 0).then_some(
-                            widget::button::icon(widget::icon::from_name("go-up-symbolic"))
-                                .on_press(Message::MergeWithPrevious(id))
-                                .class(cosmic::theme::Button::Icon),
-                        ),
-                    )
-                    .width(TOOLBAR_SIZE)
-                    .spacing(space_s)
-                    .align_x(Alignment::Center);
+                let timeline = widget::text(format!("{t_start:.1}s – {t_end:.1}s"));
 
-                    let image = widget::image(result.preview.clone())
-                        .content_fit(iced::ContentFit::Contain)
-                        .width(image_width)
-                        .height(Length::Shrink);
+                let ocr = widget::text_editor(&result.editor_content)
+                    .on_action(move |action| Message::SubtitleContentEdit { id, action })
+                    .height(Length::Fill)
+                    .min_height(48.0)
+                    .class(cosmic::theme::iced::TextEditor::Custom(Box::new(|x, y| {
+                        use iced::widget::text_editor::Catalog;
+                        let mut style = x.style(&theme::iced::TextEditor::default(), y);
+                        style.border.width = 2.0;
+                        style
+                    })))
+                    .apply(Element::from);
 
-                    let timeline = widget::text(format!("{t_start:.1}s – {t_end:.1}s"));
+                let row = widget::row!(
+                    toolbar,
+                    image,
+                    widget::column![timeline, ocr]
+                        .spacing(space_s / 2)
+                        .width(Length::FillPortion(35))
+                        .height(Length::Fill)
+                        .align_x(Alignment::Start),
+                )
+                .spacing(space_s)
+                .padding([0, 40])
+                .height(Length::Fixed(RESULT_ROW_HEIGHT))
+                .align_y(Alignment::Center);
 
-                    let ocr = widget::text_editor(&result.editor_content)
-                        .on_action(move |action| Message::SubtitleContentEdit { id, action })
-                        .height(Length::Shrink)
-                        .min_height(48.0)
-                        .class(cosmic::theme::iced::TextEditor::Custom(Box::new(|x, y| {
-                            use iced::widget::text_editor;
-                            let mut style = text_editor::Catalog::style(
-                                x,
-                                &theme::iced::TextEditor::Default,
-                                y,
-                            );
-                            style.border.width = 2.0;
-                            style
-                        })))
-                        .apply(Element::from);
+                let row = widget::container(row)
+                    .height(Length::Fixed(row_pitch))
+                    .padding(iced::Padding::ZERO.bottom(row_spacing));
 
-                    grid.push(toolbar)
-                        .push(image)
-                        .push(
-                            widget::column![timeline, ocr]
-                                .spacing(space_s / 2)
-                                .width(text_width)
-                                .align_x(Alignment::Start),
-                        )
-                        .insert_row()
-                })
-                .row_spacing(spacing.space_m)
-                .column_spacing(spacing.space_s)
-                .padding([0, 40].into())
-                .row_alignment(Alignment::Center)
-                .into()
-        });
+                (VirtualRowKey::Result(result.id), row.into())
+            },
+        ));
+
+        if bottom_spacer_height > 0.0 {
+            virtual_rows.push((
+                VirtualRowKey::BottomSpacer,
+                widget::Space::new()
+                    .height(Length::Fixed(bottom_spacer_height))
+                    .into(),
+            ));
+        }
+
+        let result_rows = iced::widget::keyed_column(virtual_rows).width(Length::Fill);
 
         let mut col = widget::column!(
             widget::row!(status, undo_edit, to_post_prod)
@@ -459,7 +511,7 @@ impl Model {
         let scrollable_id = iced::id::Id::new("scrollable");
         let scrollable_id_clone = scrollable_id.clone();
 
-        let results = grid
+        let results = result_rows
             .apply(widget::container)
             .padding(iced::Padding::ZERO.right(60))
             .height(Length::Fill)
@@ -468,7 +520,11 @@ impl Model {
                 let content_fits =
                     viewport.content_bounds().height <= viewport.bounds().height + 1.0;
                 let at_end = content_fits || viewport.relative_offset().y >= 0.999;
-                Message::Scrolled { at_end }
+                Message::Scrolled {
+                    at_end,
+                    offset: viewport.absolute_offset().y,
+                    viewport_height: viewport.bounds().height,
+                }
             })
             .id(scrollable_id_clone)
             .apply(Element::from);
@@ -531,6 +587,34 @@ pub fn to_srt(results: &[SubtitleResult]) -> String {
     )
 }
 
+fn visible_result_range(
+    scroll_offset: f32,
+    viewport_height: f32,
+    row_pitch: f32,
+    result_count: usize,
+) -> std::ops::Range<usize> {
+    if result_count == 0 || !row_pitch.is_finite() || row_pitch <= 0.0 {
+        return 0..0;
+    }
+
+    if !viewport_height.is_finite() || viewport_height <= 0.0 {
+        return 0..INITIAL_VISIBLE_RESULT_ROWS.min(result_count);
+    }
+
+    let scroll_offset = if scroll_offset.is_finite() {
+        scroll_offset.max(0.0)
+    } else {
+        0.0
+    };
+    let first_visible = ((scroll_offset / row_pitch).floor() as usize).min(result_count);
+    let visible_end = (((scroll_offset + viewport_height) / row_pitch).ceil() as usize)
+        .max(first_visible.saturating_add(1))
+        .min(result_count);
+
+    first_visible.saturating_sub(RESULT_ROW_OVERSCAN)
+        ..visible_end
+            .saturating_add(RESULT_ROW_OVERSCAN)
+            .min(result_count)
 fn format_duration(duration: Duration) -> String {
     let total_seconds = duration.as_secs();
     let hours = total_seconds / 3_600;
@@ -656,5 +740,33 @@ mod tests {
         model.update(detection(2, 3, "same text", false), &config);
 
         assert_eq!(model.results.len(), 2);
+    }
+
+    #[test]
+    fn visible_range_only_contains_viewport_and_overscan() {
+        let row_pitch = 176.0;
+
+        assert_eq!(
+            visible_result_range(5.0 * row_pitch, 2.0 * row_pitch, row_pitch, 20),
+            2..10
+        );
+        assert_eq!(
+            visible_result_range(0.0, 2.0 * row_pitch, row_pitch, 20),
+            0..5
+        );
+        assert_eq!(
+            visible_result_range(18.0 * row_pitch, 2.0 * row_pitch, row_pitch, 20),
+            15..20
+        );
+    }
+
+    #[test]
+    fn visible_range_has_an_initial_window_before_viewport_is_known() {
+        assert_eq!(
+            visible_result_range(0.0, 0.0, RESULT_ROW_HEIGHT, 20),
+            0..INITIAL_VISIBLE_RESULT_ROWS
+        );
+        assert_eq!(visible_result_range(0.0, 0.0, RESULT_ROW_HEIGHT, 2), 0..2);
+        assert_eq!(visible_result_range(0.0, 0.0, RESULT_ROW_HEIGHT, 0), 0..0);
     }
 }
