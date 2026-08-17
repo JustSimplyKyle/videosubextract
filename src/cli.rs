@@ -106,14 +106,14 @@ pub async fn run(input: PathBuf, output: PathBuf, crop: Option<Crop>) -> eyre::R
     let mut completed = false;
     while let Some(event) = events.next().await {
         match event {
-            Event::Started { total_frames } => {
-                if let Some(total_frames) = total_frames {
-                    progress.set_length(total_frames as u64);
-                }
-                progress.set_message("Extracting subtitles");
-            }
-            Event::Progress { frame, .. } => {
-                progress.set_position(frame as u64);
+            // Event::Started { total_frames } => {
+            //     if let Some(total_frames) = total_frames {
+            //         progress.set_length(total_frames as u64);
+            //     }
+            //     progress.set_message("Extracting subtitles");
+            // }
+            Event::Progress { timestamp, .. } => {
+                progress.set_position(timestamp.as_millis() as u64);
             }
             Event::SubtitleFound {
                 subtitle,

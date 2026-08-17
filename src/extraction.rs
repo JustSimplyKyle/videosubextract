@@ -87,11 +87,8 @@ pub struct Request {
 
 #[derive(Debug)]
 pub enum Event {
-    Started {
-        total_frames: Option<usize>,
-    },
     Progress {
-        frame: usize,
+        timestamp: Duration,
         preview: Option<RgbaImage>,
     },
     SubtitleFound {
@@ -132,12 +129,6 @@ async fn run(request: Request, event_tx: tokio::sync::mpsc::Sender<Event>) {
             let (controller, iter) =
                 create_video_player::<false>(input, crop, processing_resolution)
                     .wrap_err("initializing the video decoder")?;
-            let total_frames = controller.inner.info.total_frames;
-            blocking_event_tx
-                .blocking_send(Event::Started {
-                    total_frames: (total_frames > 0).then_some(total_frames),
-                })
-                .map_err(|_| eyre::eyre!("extraction event receiver closed"))?;
 
             let frame_iter = ProgressIter {
                 inner: iter.filter_map(Result::ok),
@@ -198,6 +189,7 @@ async fn run(request: Request, event_tx: tokio::sync::mpsc::Sender<Event>) {
             ))
         })
     });
+
     let mut jobs = Box::pin(jobs.buffered(OCR_PARALLELISM));
     let mut previous: Option<Subtitle> = None;
 
@@ -289,7 +281,7 @@ impl<I: Iterator<Item = VideoFrame>> Iterator for ProgressIter<I> {
                 .flatten();
             self.event_tx
                 .blocking_send(Event::Progress {
-                    frame: self.count,
+                    timestamp: frame.timestamp,
                     preview,
                 })
                 .ok();

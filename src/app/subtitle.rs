@@ -3,8 +3,8 @@ use crate::extraction::{self, OcrHandle, Request as ExtractionRequest, Subtitle}
 use crate::native_video_sub_finder::NativeSearchParams;
 use crate::video_player::CropRect;
 use cosmic::theme;
+use cosmic::widget::text_editor;
 use iced::futures::StreamExt;
-use iced::widget::text_editor;
 use image::RgbaImage;
 
 use super::*;
@@ -56,7 +56,7 @@ pub struct Model {
     processing_resolution: ProcessingResolution,
     pub results: Vec<SubtitleResult>,
     pub preview: Option<widget::image::Handle>,
-    pub current_frame: usize,
+    pub current_timestamp: Duration,
     pub done: bool,
     pub progress_bar: ProgressBar,
     scrollbar_jump_status: ScrollbarJumpStatus,
@@ -112,7 +112,7 @@ impl Default for ProgressBar {
 #[derive(derive_more::Debug, Clone)]
 pub enum Message {
     Progress {
-        frame: usize,
+        timestamp: Duration,
 
         #[debug("{}x{}", preview.width(), preview.height())]
         preview: RgbaImage,
@@ -122,9 +122,6 @@ pub enum Message {
         replace_previous: bool,
         #[debug("{}x{}", preview.width(), preview.height())]
         preview: RgbaImage,
-    },
-    SearchStarted {
-        total_frames: Option<usize>,
     },
     Delete(usize),
     MergeWithPrevious(usize),
@@ -173,7 +170,7 @@ impl Model {
         self.processing_resolution = config.processing_resolution;
         self.results.clear();
         self.preview = None;
-        self.current_frame = 0;
+        self.current_timestamp = Duration::ZERO;
         self.done = false;
         self.edit_history.clear();
         self.progress_bar.set_elapsed(Duration::ZERO);
@@ -186,9 +183,9 @@ impl Model {
     pub fn update(&mut self, message: Message, config: &Config) -> Event {
         self.set_ocr_model(config.ocr_model.clone());
         match message {
-            Message::Progress { frame, preview } => {
-                self.progress_bar.set_position(frame as u64);
-                self.current_frame = frame;
+            Message::Progress { timestamp, preview } => {
+                self.progress_bar.set_position(timestamp.as_millis() as u64);
+                self.current_timestamp = timestamp;
                 self.preview = Some(widget::image::Handle::from_rgba(
                     preview.width(),
                     preview.height(),
@@ -214,12 +211,6 @@ impl Model {
                 self.next_result_id = self.next_result_id.wrapping_add(1);
                 self.results
                     .push(SubtitleResult::new(id, subtitle, preview));
-                Event::None
-            }
-            Message::SearchStarted { total_frames } => {
-                if let Some(total_frames) = total_frames {
-                    self.progress_bar.set_length(total_frames as u64);
-                }
                 Event::None
             }
             Message::SearchDone => {
@@ -326,12 +317,12 @@ impl Model {
         }
     }
 
-    pub fn view(&self, total_frames: Option<usize>, fps: f64) -> Element<'_, Message> {
+    pub fn view(&self, video_duration: Duration) -> Element<'_, Message> {
         let spacing = cosmic::theme::spacing();
         let space_s = cosmic::theme::spacing().space_s;
-        if let Some(len) = total_frames {
-            self.progress_bar.set_length(len as u64);
-        }
+
+        self.progress_bar
+            .set_length(video_duration.as_millis() as u64);
 
         let status = if self.done {
             widget::text(format!(
@@ -344,15 +335,13 @@ impl Model {
             let status_text = widget::text(format!(
                 "## Elapsed {} · IGT {} · ETA {}",
                 self.progress_bar.elapsed().apply(format_duration),
-                (self.current_frame as u64 / fps as u64)
-                    .apply(Duration::from_secs)
-                    .apply(format_duration),
+                (self.current_timestamp).apply(format_duration),
                 self.progress_bar.eta().apply(format_duration)
             ))
             .class(cosmic::theme::Text::Accent);
 
             let progress_bar = widget::progress_bar::determinate_linear(
-                self.current_frame as f32 / total_frames.unwrap_or(1) as f32,
+                self.current_timestamp.as_secs_f32() / video_duration.as_secs_f32(),
             )
             .width(Length::Fill);
 
@@ -428,16 +417,16 @@ impl Model {
 
                 let timeline = widget::text(format!("{t_start:.1}s – {t_end:.1}s"));
 
-                let ocr = widget::text_editor(&result.editor_content)
+                let ocr = widget::text_editor::text_editor(&result.editor_content)
                     .on_action(move |action| Message::SubtitleContentEdit { id, action })
                     .height(Length::Fill)
                     .min_height(48.0)
-                    .class(cosmic::theme::iced::TextEditor::Custom(Box::new(|x, y| {
+                    .style(|x, y| {
                         use iced::widget::text_editor::Catalog;
                         let mut style = x.style(&theme::iced::TextEditor::default(), y);
                         style.border.width = 2.0;
                         style
-                    })))
+                    })
                     .apply(Element::from);
 
                 let row = widget::row!(
@@ -473,13 +462,6 @@ impl Model {
 
         let result_rows = iced::widget::keyed_column(virtual_rows).width(Length::Fill);
 
-        let mut col = widget::column!(
-            widget::row!(status, undo_edit, to_post_prod)
-                .spacing(space_s)
-                .align_y(Alignment::Center)
-        )
-        .spacing(space_s);
-
         let view_card = |title, handle| {
             widget::column!(
                 widget::text(title),
@@ -494,21 +476,28 @@ impl Model {
             .padding(20)
         };
 
-        if let Some(handle) = &self.preview {
-            let preview = widget::Row::new()
+        let header = self.preview.as_ref().map(|handle| {
+            widget::Row::new()
                 .spacing(space_s)
                 .push(view_card("View", handle))
                 .push_maybe(
                     self.results
                         .last()
                         .map(|x| view_card("Current", &x.preview)),
-                );
-
-            col = col.push(preview);
-        }
+                )
+        });
 
         let scrollable_id = iced::id::Id::new("scrollable");
         let scrollable_id_clone = scrollable_id.clone();
+
+        let jump_to_end = (self.scrollbar_jump_status == ScrollbarJumpStatus::DisplayButton)
+            .then_some(
+                widget::button::text("Jump to latest ↓")
+                    .class(cosmic::theme::Button::Suggested)
+                    .on_press(Message::JumpToEnd { id: scrollable_id })
+                    .apply(iced::widget::bottom_right)
+                    .padding(spacing.space_m),
+            );
 
         let results = result_rows
             .apply(widget::container)
@@ -528,19 +517,15 @@ impl Model {
             .id(scrollable_id_clone)
             .apply(Element::from);
 
-        let stack = iced::widget::Stack::new().push(results);
-
-        let stack = if self.scrollbar_jump_status == ScrollbarJumpStatus::DisplayButton {
-            let jump_to_end = widget::button::text("Jump to latest ↓")
-                .class(cosmic::theme::Button::Suggested)
-                .on_press(Message::JumpToEnd { id: scrollable_id });
-
-            stack.push(iced::widget::bottom_right(jump_to_end).padding(spacing.space_m))
-        } else {
-            stack
-        };
-
-        col.push(stack).into()
+        widget::column![
+            header,
+            widget::row![status, undo_edit, to_post_prod]
+                .spacing(space_s)
+                .align_y(Alignment::Center),
+            iced::widget::stack![results, jump_to_end],
+        ]
+        .spacing(space_s)
+        .into()
     }
 
     pub fn subscription(&self, video_frame_rate: f64) -> Subscription<Message> {
@@ -673,12 +658,11 @@ fn subtitle_search_stream(
         include_progress_preview: true,
     };
 
-    extraction::stream(request.clone()).map(|event| match event {
-        extraction::Event::Started { total_frames } => Message::SearchStarted { total_frames },
+    extraction::stream(request).map(|event| match event {
         extraction::Event::Progress {
-            frame,
+            timestamp,
             preview: Some(preview),
-        } => Message::Progress { frame, preview },
+        } => Message::Progress { timestamp, preview },
         extraction::Event::Progress { .. } => Message::None,
         extraction::Event::SubtitleFound {
             subtitle,

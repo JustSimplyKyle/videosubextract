@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
+use cosmic::iced_anim::Motion;
+
 mod app;
 pub mod apply_traits;
 mod cli;
@@ -48,11 +50,15 @@ fn run_gui() -> cosmic::iced::Result {
     let mut theme = cosmic::Theme::custom(std::sync::Arc::new(frosted_theme));
     theme.transparent = true;
 
-    let settings = cosmic::app::Settings::default().theme(theme).size_limits(
-        cosmic::iced::Limits::NONE
-            .min_width(360.0)
-            .min_height(180.0),
-    );
+    let settings = cosmic::app::Settings::default()
+        .theme(theme)
+        .size_limits(
+            cosmic::iced::Limits::NONE
+                .min_width(360.0)
+                .min_height(180.0),
+        )
+        .animation(Motion::SMOOTH)
+        .nav_bar_content_transition(Motion::SMOOTH);
 
     // Starts the application's event loop with `()` as the application's flags.
     cosmic::app::run::<app::AppModel>(settings, ())

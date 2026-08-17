@@ -88,6 +88,16 @@ pub enum Page {
     PostProduction,
 }
 
+impl Page {
+    pub fn details(&self) -> String {
+        match self {
+            Page::Prepare => fl!("page-prepare-details"),
+            Page::Subtitle => fl!("page-subtitle-details"),
+            Page::PostProduction => fl!("page-post-details"),
+        }
+    }
+}
+
 impl std::fmt::Display for Page {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let x = match self {
@@ -236,25 +246,18 @@ impl cosmic::Application for AppModel {
             return None;
         }
 
-        let spacing = cosmic::theme::spacing();
-
         let build_dialog = |title, element, close_msg| {
             widget::dialog()
                 .title(title)
                 .control(widget::scrollable(element).height(Length::Fill))
+                .primary_action({
+                    widget::button::icon(icon::from_name("window-close-symbolic"))
+                        .class(cosmic::theme::Button::Destructive)
+                        .on_press(close_msg)
+                })
                 .width(Length::Fill)
                 .apply(widget::container)
                 .center(700)
-                .apply(|x| {
-                    let s = iced::widget::Stack::new();
-                    let btn = widget::button::icon(icon::from_name("navbar-closed-symbolic"))
-                        .class(cosmic::theme::Button::Destructive)
-                        .on_press(close_msg)
-                        .apply(widget::container)
-                        .align_right(Length::Fill)
-                        .padding(spacing.space_m);
-                    s.push(x).push(btn)
-                })
                 .apply(widget::container)
                 .center(Length::Fill)
                 .style(|_| widget::container::background(iced::Color::from_rgba(0., 0., 0., 0.45)))
@@ -284,21 +287,20 @@ impl cosmic::Application for AppModel {
         })
     }
 
-    fn view(&self) -> Element<'_, Self::Message> {
+    fn nav_view(&self, id: nav_bar::Id) -> Element<'_, Self::Message> {
         let space_s = cosmic::theme::spacing().space_s;
-        let active = self.nav.active_data::<Page>().unwrap();
+        let page = self.nav.data(id).unwrap();
 
-        let content: Element<_> = match active {
+        let content: Element<_> = match page {
             Page::Prepare => self.prepare.view().map(Message::Prepare),
             Page::Subtitle => {
-                let total_frames = self
+                let video_duration = self
                     .prepare
                     .video_controller
                     .as_ref()
-                    .map(|x| x.inner.info.total_frames);
-                self.subtitle
-                    .view(total_frames, self.video_frame_rate)
-                    .map(Message::Subtitle)
+                    .map(|x| x.inner.info.video_time)
+                    .unwrap_or_default();
+                self.subtitle.view(video_duration).map(Message::Subtitle)
             }
             Page::PostProduction => self
                 .post_production
@@ -306,11 +308,11 @@ impl cosmic::Application for AppModel {
                 .map(Message::PostProduction),
         };
 
-        let header = widget::row::with_capacity(2)
-            .push(widget::text::title1(fl!("welcome")))
-            .push(widget::text::title3(active.to_string()))
-            .align_y(Alignment::End)
-            .spacing(space_s);
+        let header = widget::column![
+            widget::text::title1(page.to_string()),
+            widget::text(page.details())
+        ]
+        .spacing(cosmic::theme::spacing().space_xxs);
 
         let content = widget::container(widget::column!(header, content).spacing(space_s))
             .width(Length::Fill)
@@ -321,7 +323,10 @@ impl cosmic::Application for AppModel {
             .align_x(Horizontal::Center)
             .align_y(Vertical::Center);
 
-        widget::toaster(&self.toasts, content)
+        widget::toaster(&self.toasts, content).into()
+    }
+    fn view(&self) -> Element<'_, Self::Message> {
+        self.nav_view(self.nav.active())
     }
 
     fn subscription(&self) -> Subscription<Self::Message> {

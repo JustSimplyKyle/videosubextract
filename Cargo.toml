@@ -29,7 +29,6 @@ rfd = "0.17.2"
 opencc = "0.3.0"
 ffmpeg-sidecar = "2.5.2"
 indicatif = "0.18.6"
-dioxus-devtools = "0.7.9"
 rayon = "1.12.0"
 libloading = "0.9.0"
 derive_more = { version = "2.1.1", features = ["debug"] }
@@ -40,10 +39,12 @@ pkg-config = "0.3.32"
 
 [features]
 debug = ["libcosmic/debug"]
-hot = ["iced/hot"]
+hot-patch = ["libcosmic/hot"]
 
 [dependencies.libcosmic]
-git = "https://github.com/pop-os/libcosmic.git"
+# git = "https://github.com/justsimplykyle/libcosmic.git"
+# branch = "cosmic-web"
+path = "../libcosmic"
 # See https://github.com/pop-os/libcosmic/blob/master/Cargo.toml for available features.
 # Remove features if not needed.
 features = [
@@ -67,7 +68,9 @@ features = [
 ]
 
 [dependencies.iced]
-git = "https://github.com/pop-os/libcosmic.git"
+# git = "https://github.com/justsimplykyle/libcosmic.git"
+# branch = "cosmic-web"
+path = "../libcosmic/iced"
 features = [
     "advanced",
     "image-without-codecs",
@@ -79,7 +82,11 @@ features = [
 
 
 # Uncomment to test a locally-cloned libcosmic
-# [patch.'https://github.com/pop-os/libcosmic']
-# libcosmic = { path = "../libcosmic" }
+[patch.'https://github.com/pop-os/libcosmic']
+libcosmic = { path = "../libcosmic" }
+
+[patch."https://github.com/iced-rs/iced"]
+iced = { path = "../libcosmic/iced" }
+
 # cosmic-config = { path = "../libcosmic/cosmic-config" }
 # cosmic-theme = { path = "../libcosmic/cosmic-theme" }

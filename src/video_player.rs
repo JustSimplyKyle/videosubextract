@@ -75,22 +75,6 @@ pub fn create_video_player<const STOP_ON_SEEK: bool>(
     let stream_index = vstream.index();
     let avg_frame_rate = f64::from(vstream.avg_frame_rate());
 
-    let exact_frames = vstream.frames().max(0) as usize;
-
-    // If it's 0 (common for MKV/WebM), estimate it using duration and framerate.
-    let total_frames = if exact_frames > 0 {
-        exact_frames
-    } else {
-        let duration = input.duration();
-
-        if duration > 0 {
-            let duration_sec = duration as f64 / AV_TIME_BASE as f64;
-            (duration_sec * avg_frame_rate).round() as usize
-        } else {
-            0 // Fallback if duration is also unknown
-        }
-    };
-
     let video_time = {
         let duration = vstream.duration().max(input.duration());
         let duration_sec = duration as f64 / AV_TIME_BASE as f64;
@@ -115,7 +99,6 @@ pub fn create_video_player<const STOP_ON_SEEK: bool>(
         height: decoder.height(),
         frame_rate: avg_frame_rate,
         video_time,
-        total_frames,
         time_base,
     };
 
@@ -346,7 +329,6 @@ pub(crate) struct DecoderInfo {
     pub(crate) width: u32,
     pub(crate) height: u32,
     pub(crate) frame_rate: f64,
-    pub total_frames: usize,
     pub video_time: Duration,
     pub time_base: Rational,
 }
