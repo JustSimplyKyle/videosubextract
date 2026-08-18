@@ -19,6 +19,9 @@ fn main() -> eyre::Result<()> {
 
     let args = cli::Args::parse();
 
+    let requested_languages = i18n_embed::DesktopLanguageRequester::requested_languages();
+    i18n::init(&requested_languages);
+
     assert_eq!(
         native_video_sub_finder::api_version(),
         native_video_sub_finder::EXPECTED_API_VERSION,
@@ -38,12 +41,6 @@ fn main() -> eyre::Result<()> {
 }
 
 fn run_gui() -> cosmic::iced::Result {
-    // Get the system's preferred languages.
-    let requested_languages = i18n_embed::DesktopLanguageRequester::requested_languages();
-
-    // Enable localizations to be applied.
-    i18n::init(&requested_languages);
-
     let mut frosted_theme = cosmic::cosmic_theme::Theme::dark_default();
     frosted_theme.frosted = cosmic::cosmic_theme::BlurStrength::VeryHigh2;
 

@@ -1,5 +1,6 @@
 use crate::config::Config;
 use crate::extraction::{self, Event, OcrHandle, Request, Subtitle};
+use crate::fl;
 use crate::video_player::CropRect;
 use clap::Parser;
 use eyre::{Context, ContextCompat};
@@ -99,7 +100,7 @@ pub async fn run(input: PathBuf, output: PathBuf, crop: Option<Crop>) -> eyre::R
         .expect("valid progress bar template")
         .progress_chars("=>-"),
     );
-    progress.set_message("Opening video");
+    progress.set_message(fl!("opening-video"));
     progress.enable_steady_tick(std::time::Duration::from_millis(100));
 
     let mut subtitles = Vec::<Subtitle>::new();
@@ -134,22 +135,18 @@ pub async fn run(input: PathBuf, output: PathBuf, crop: Option<Crop>) -> eyre::R
                 break;
             }
             Event::Error(error) => {
-                progress.abandon_with_message("Extraction failed");
+                progress.abandon_with_message(fl!("extraction-failed"));
                 return Err(eyre::eyre!(error));
             }
         }
     }
 
     if !completed {
-        progress.abandon_with_message("Extraction stopped");
+        progress.abandon_with_message(fl!("extraction-stopped"));
         return Err(eyre::eyre!("subtitle extraction stopped before completion"));
     }
 
-    progress.finish_with_message(format!(
-        "Found {} subtitle{}",
-        subtitles.len(),
-        if subtitles.len() == 1 { "" } else { "s" }
-    ));
+    progress.finish_with_message(fl!("found-subtitles", count = subtitles.len()));
     let srt = extraction::to_srt(&subtitles);
     std::fs::write(&output, srt).wrap_err_with(|| format!("writing {}", output.display()))?;
     println!("{}", output.display());

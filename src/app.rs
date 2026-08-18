@@ -18,6 +18,7 @@ use cosmic::prelude::*;
 use cosmic::widget::{self, about::About, icon, menu, nav_bar};
 use iced::futures::SinkExt;
 use rfd::AsyncFileDialog;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -229,8 +230,8 @@ impl cosmic::Application for AppModel {
             menu::items(
                 &self.key_binds,
                 vec![
-                    menu::Item::Button("Settings", None, MenuAction::Settings),
-                    menu::Item::Button("About", None, MenuAction::About),
+                    menu::Item::Button(fl!("settings"), None, MenuAction::Settings),
+                    menu::Item::Button(fl!("about"), None, MenuAction::About),
                 ],
             ),
         )]);
@@ -268,19 +269,19 @@ impl cosmic::Application for AppModel {
             ContextPage::About => {
                 let about = widget::about(&self.about, |url| Message::LaunchUrl(url.to_string()));
                 build_dialog(
-                    "About",
+                    fl!("about"),
                     about,
                     Message::ToggleContextPage(ContextPage::About),
                 )
             }
 
             ContextPage::Settings => build_dialog(
-                "Settings",
+                fl!("settings"),
                 self.settings_view(),
                 Message::ToggleContextPage(ContextPage::Settings),
             ),
             ContextPage::Error => build_dialog(
-                "Errors",
+                fl!("errors"),
                 self.error_view(),
                 Message::ToggleContextPage(ContextPage::Error),
             ),
@@ -583,6 +584,8 @@ impl AppModel {
     fn settings_view(&self) -> Element<'_, Message> {
         let all = OcrModel::all(&self.config);
         let labels = OcrModel::labels(&self.config);
+        let resolution_labels = ProcessingResolution::labels();
+        let detector_labels = SubtitleDetector::labels();
 
         let selected_ocr_index = all.iter().position(|model| *model == self.config.ocr_model);
         let selected_detector_index = SubtitleDetector::ALL
@@ -606,25 +609,26 @@ impl AppModel {
             .width(Length::Fill)
             .gap(f32::from(spacing.space_m)),
             widget::button::icon(icon::from_name("list-add-symbolic"))
-                .tooltip("Add custom OCR library")
+                .tooltip(fl!("add-custom-ocr"))
                 .on_press(Message::PickCustomOcr),
         ]
         .push_maybe(selected_custom_ocr.map(|x| {
             widget::button::icon(icon::from_name("edit-delete-symbolic"))
-                .tooltip("Remove selected custom OCR library")
+                .tooltip(fl!("remove-custom-ocr"))
                 .on_press(Message::RemoveCustomOcr(x.clone()))
                 .class(cosmic::theme::Button::Destructive)
         }))
         .align_y(Alignment::Center)
         .spacing(spacing.space_s)
         .width(Length::Fill);
+
         widget::settings::view_column(vec![
             widget::settings::section()
-                .title("Text recognition")
-                .add(widget::settings::item("OCR model", ocr_model_picker))
+                .title(fl!("text-recognition"))
+                .add(widget::settings::item(fl!("ocr-model"), ocr_model_picker))
                 .add(
-                    widget::settings::item::builder("Post-OCR result processing")
-                        .description("Merge adjacent detections with identical recognized text")
+                    widget::settings::item::builder(fl!("post-ocr-result-processing"))
+                        .description(fl!("merge-adjacent-detections"))
                         .toggler(
                             self.config.post_ocr_processing,
                             Message::SetPostOcrProcessing,
@@ -632,33 +636,29 @@ impl AppModel {
                 )
                 .into(),
             widget::settings::section()
-                .title("Subtitle detection")
+                .title(fl!("subtitle-detection"))
                 .add(widget::settings::item(
-                    "Processing resolution",
-                    widget::dropdown(
-                        &ProcessingResolution::LABELS,
-                        selected_resolution_index,
-                        |index| Message::SetProcessingResolution(ProcessingResolution::ALL[index]),
-                    )
+                    fl!("processing-resolution"),
+                    widget::dropdown(resolution_labels, selected_resolution_index, |index| {
+                        Message::SetProcessingResolution(ProcessingResolution::ALL[index])
+                    })
                     .gap(f32::from(spacing.space_m)),
                 ))
                 .add(widget::settings::item(
-                    "Implementation",
-                    widget::dropdown(
-                        &SubtitleDetector::LABELS,
-                        selected_detector_index,
-                        |index| Message::SetSubtitleDetector(SubtitleDetector::ALL[index]),
-                    )
+                    fl!("implementation"),
+                    widget::dropdown(detector_labels, selected_detector_index, |index| {
+                        Message::SetSubtitleDetector(SubtitleDetector::ALL[index])
+                    })
                     .gap(f32::from(spacing.space_m)),
                 ))
                 .into(),
         ])
         .push_maybe(
             widget::settings::section()
-                .title("Original C++ parameters")
+                .title(fl!("original-cpp-parameters"))
                 .add(
-                    widget::settings::item::builder("OCR image cleanup")
-                        .description("Run VideoSubFinder FindTextLines before OCR")
+                    widget::settings::item::builder(fl!("ocr-image-cleanup"))
+                        .description(fl!("run-find-text-lines"))
                         .toggler(native.apply_ocr_image_cleanup, move |enabled| {
                             let mut params = native;
                             params.apply_ocr_image_cleanup = enabled;
@@ -666,10 +666,10 @@ impl AppModel {
                         }),
                 )
                 .add(widget::settings::item(
-                    "Worker threads",
+                    fl!("worker-threads"),
                     widget::spin_button(
                         native.threads.to_string(),
-                        "Worker threads",
+                        fl!("worker-threads"),
                         native.threads,
                         1,
                         1,
@@ -682,10 +682,10 @@ impl AppModel {
                     ),
                 ))
                 .add(widget::settings::item(
-                    "Minimum subtitle frames",
+                    fl!("minimum-subtitle-frames"),
                     widget::spin_button(
                         native.min_subtitle_frames.to_string(),
-                        "Minimum subtitle frames",
+                        fl!("minimum-subtitle-frames"),
                         native.min_subtitle_frames,
                         1,
                         1,
@@ -698,10 +698,10 @@ impl AppModel {
                     ),
                 ))
                 .add(widget::settings::item(
-                    "Text percentage",
+                    fl!("text-percentage"),
                     widget::spin_button(
                         format!("{:.3}", native.text_percent),
-                        "Text percentage",
+                        fl!("text-percentage"),
                         native.text_percent,
                         0.01,
                         0.0,
@@ -714,10 +714,10 @@ impl AppModel {
                     ),
                 ))
                 .add(widget::settings::item(
-                    "Minimum text length",
+                    fl!("minimum-text-length"),
                     widget::spin_button(
                         format!("{:.3}", native.min_text_length),
-                        "Minimum text length",
+                        fl!("minimum-text-length"),
                         native.min_text_length,
                         0.001,
                         0.0,
@@ -730,10 +730,10 @@ impl AppModel {
                     ),
                 ))
                 .add(widget::settings::item(
-                    "Vertical-edge line error",
+                    fl!("vertical-edge-line-error"),
                     widget::spin_button(
                         format!("{:.2}", native.vertical_edges_line_error),
-                        "Vertical-edge line error",
+                        fl!("vertical-edge-line-error"),
                         native.vertical_edges_line_error,
                         0.05,
                         0.0,
@@ -746,10 +746,10 @@ impl AppModel {
                     ),
                 ))
                 .add(widget::settings::item(
-                    "ILA-points line error",
+                    fl!("ila-points-line-error"),
                     widget::spin_button(
                         format!("{:.2}", native.ila_points_line_error),
-                        "ILA-points line error",
+                        fl!("ila-points-line-error"),
                         native.ila_points_line_error,
                         0.05,
                         0.0,
@@ -762,10 +762,10 @@ impl AppModel {
                     ),
                 ))
                 .add(widget::settings::item(
-                    "Maximum frame gap (down)",
+                    fl!("maximum-frame-gap-down"),
                     widget::spin_button(
                         native.max_frame_gap_down.to_string(),
-                        "Maximum frame gap down",
+                        fl!("maximum-frame-gap-down"),
                         native.max_frame_gap_down,
                         1,
                         0,
@@ -778,10 +778,10 @@ impl AppModel {
                     ),
                 ))
                 .add(widget::settings::item(
-                    "Maximum frame gap (up)",
+                    fl!("maximum-frame-gap-up"),
                     widget::spin_button(
                         native.max_frame_gap_up.to_string(),
-                        "Maximum frame gap up",
+                        fl!("maximum-frame-gap-up"),
                         native.max_frame_gap_up,
                         1,
                         0,
@@ -793,31 +793,33 @@ impl AppModel {
                         },
                     ),
                 ))
-                .add(widget::settings::item::builder("Use ISA images").toggler(
-                    native.use_isa_images,
-                    move |enabled| {
-                        let mut params = native;
-                        params.use_isa_images = enabled;
-                        Message::SetNativeSearchParams(params)
-                    },
-                ))
-                .add(widget::settings::item::builder("Use ILA images").toggler(
-                    native.use_ila_images,
-                    move |enabled| {
-                        let mut params = native;
-                        params.use_ila_images = enabled;
-                        Message::SetNativeSearchParams(params)
-                    },
-                ))
                 .add(
-                    widget::settings::item::builder("Replace ISA with filtered image").toggler(
-                        native.replace_isa_with_filtered,
+                    widget::settings::item::builder(fl!("use-isa-images")).toggler(
+                        native.use_isa_images,
                         move |enabled| {
                             let mut params = native;
-                            params.replace_isa_with_filtered = enabled;
+                            params.use_isa_images = enabled;
                             Message::SetNativeSearchParams(params)
                         },
                     ),
+                )
+                .add(
+                    widget::settings::item::builder(fl!("use-ila-images")).toggler(
+                        native.use_ila_images,
+                        move |enabled| {
+                            let mut params = native;
+                            params.use_ila_images = enabled;
+                            Message::SetNativeSearchParams(params)
+                        },
+                    ),
+                )
+                .add(
+                    widget::settings::item::builder(fl!("replace-isa-with-filtered-image"))
+                        .toggler(native.replace_isa_with_filtered, move |enabled| {
+                            let mut params = native;
+                            params.replace_isa_with_filtered = enabled;
+                            Message::SetNativeSearchParams(params)
+                        }),
                 )
                 .apply(|x| {
                     (self.config.subtitle_detector == SubtitleDetector::OriginalCpp).then_some(x)

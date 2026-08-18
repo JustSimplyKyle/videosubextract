@@ -7,6 +7,7 @@ use std::sync::OnceLock;
 pub mod plugin_loader;
 
 use crate::config::Config;
+use crate::fl;
 
 static PADDLE_OCR_V6_MEDIUM: OnceLock<Result<ocr_rs::OcrEngine>> = OnceLock::new();
 static PADDLE_OCR_V5_MOBILE: OnceLock<Result<ocr_rs::OcrEngine>> = OnceLock::new();
@@ -32,7 +33,7 @@ impl OcrModel {
         })
     }
     pub fn labels(config: &Config) -> Vec<String> {
-        vec!["PaddleOCR v6 Medium".into(), "PaddleOCR v5 Mobile".into()].apply(|mut models| {
+        vec![fl!("paddleocr-v6-medium"), fl!("paddleocr-v5-mobile")].apply(|mut models| {
             let custom_model_names = config.custom_ocrs.iter().map(|x| x.name.clone());
 
             models.extend(custom_model_names);

@@ -325,18 +325,15 @@ impl Model {
             .set_length(video_duration.as_millis() as u64);
 
         let status = if self.done {
-            widget::text(format!(
-                "Complete — {} subtitle(s) found",
-                self.results.len()
-            ))
-            .class(cosmic::theme::Text::Accent)
-            .apply(Element::from)
+            widget::text(fl!("complete-subtitles-found", count = self.results.len()))
+                .class(cosmic::theme::Text::Accent)
+                .apply(Element::from)
         } else if self.search_active {
-            let status_text = widget::text(format!(
-                "## Elapsed {} · IGT {} · ETA {}",
-                self.progress_bar.elapsed().apply(format_duration),
-                (self.current_timestamp).apply(format_duration),
-                self.progress_bar.eta().apply(format_duration)
+            let status_text = widget::text(fl!(
+                "elapsed-status",
+                elapsed = self.progress_bar.elapsed().apply(format_duration),
+                igt = self.current_timestamp.apply(format_duration),
+                eta = self.progress_bar.eta().apply(format_duration)
             ))
             .class(cosmic::theme::Text::Accent);
 
@@ -351,14 +348,12 @@ impl Model {
                 .width(Length::Fill)
                 .apply(Element::from)
         } else {
-            widget::text(
-                "No active search. Load a video and select a subtitle region on Page Prepare.",
-            )
-            .class(cosmic::theme::Text::Accent)
-            .apply(Element::from)
+            widget::text(fl!("no-active-search"))
+                .class(cosmic::theme::Text::Accent)
+                .apply(Element::from)
         };
 
-        let to_post_prod = widget::button::text("Post Production")
+        let to_post_prod = widget::button::text(fl!("post-production"))
             .class(cosmic::theme::Button::Suggested)
             .on_press_maybe((!self.search_active).then_some(Message::GoToPostProduction));
 
@@ -479,11 +474,11 @@ impl Model {
         let header = self.preview.as_ref().map(|handle| {
             widget::Row::new()
                 .spacing(space_s)
-                .push(view_card("View", handle))
+                .push(view_card(fl!("view"), handle))
                 .push_maybe(
                     self.results
                         .last()
-                        .map(|x| view_card("Current", &x.preview)),
+                        .map(|x| view_card(fl!("current"), &x.preview)),
                 )
         });
 
@@ -492,7 +487,7 @@ impl Model {
 
         let jump_to_end = (self.scrollbar_jump_status == ScrollbarJumpStatus::DisplayButton)
             .then_some(
-                widget::button::text("Jump to latest ↓")
+                widget::button::text(fl!("jump-to-latest"))
                     .class(cosmic::theme::Button::Suggested)
                     .on_press(Message::JumpToEnd { id: scrollable_id })
                     .apply(iced::widget::bottom_right)

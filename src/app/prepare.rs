@@ -75,7 +75,7 @@ impl Model {
                 Task::perform(
                     async move {
                         let dialog = AsyncFileDialog::new().add_filter(
-                            "Video",
+                            fl!("video"),
                             &["mkv", "mp4", "avi", "mov", "webm", "flv", "wmv"],
                         );
 
@@ -249,14 +249,14 @@ impl Model {
 
         let full_img = Stack::new().push(full_img).push(canvas_widget);
 
-        let reset_btn = widget::button::text("Reset Selection")
+        let reset_btn = widget::button::text(fl!("reset-selection"))
             .on_press(Message::ResetSelection)
             .class(cosmic::theme::Button::Destructive);
 
         let load_video = widget::button::text(if self.video_path.is_none() {
-            "Load Video"
+            fl!("load-video")
         } else {
-            "Change Video"
+            fl!("change-video")
         })
         .on_press(Message::PickVideo);
 
@@ -275,7 +275,7 @@ impl Model {
             .class(cosmic::theme::Button::NavToggle);
         let selection_label: Element<'_, Message> = self.screenshot_selection_scaled.map_or_else(
             || {
-                widget::text("Click twice on the image to two corners")
+                widget::text(fl!("select-region"))
                     .class(cosmic::theme::Text::Accent)
                     .into()
             },
@@ -284,7 +284,7 @@ impl Model {
                     "{:.0}×{:.0}@{:.0},{:.0}",
                     rectangle.width, rectangle.height, rectangle.x, rectangle.y
                 );
-                let label = widget::text(format!("Selection: {dimensions}"))
+                let label = widget::text(fl!("selection", dimensions = dimensions.clone()))
                     .class(cosmic::theme::Text::Accent);
 
                 widget::mouse_area(label)
@@ -294,7 +294,7 @@ impl Model {
             },
         );
 
-        let find_subs = widget::button::text("Find Subtitles");
+        let find_subs = widget::button::text(fl!("find-subtitles"));
         let find_subs = if self.video_path.is_some() {
             find_subs
                 .on_press(Message::StartSubtitleDisplay)

@@ -1,3 +1,4 @@
+use crate::fl;
 use cosmic::{
     Apply, Element,
     widget::{self, segmented_button::SingleSelectModel},
@@ -24,12 +25,14 @@ impl Default for Model {
         let mut tabs = SingleSelectModel::default();
         let srt_tab = tabs
             .insert()
-            .text("Convert to SRT")
+            .text(fl!("convert-to-srt"))
             .data::<Tab>(Tab::Srt)
             .id();
-        tabs.insert().text("Merge Video").data::<Tab>(Tab::Merge);
         tabs.insert()
-            .text("OpenCC Translate")
+            .text(fl!("merge-video"))
+            .data::<Tab>(Tab::Merge);
+        tabs.insert()
+            .text(fl!("opencc-translate"))
             .data::<Tab>(Tab::OpenCc);
         tabs.activate(srt_tab);
 
@@ -76,8 +79,7 @@ impl Model {
                 let temp_srt = std::env::temp_dir().join("temp_subs.srt");
 
                 if let Err(error) = std::fs::write(&temp_srt, srt) {
-                    self.feedback =
-                        Some("Failed to create temporary subtitle file for merge.".into());
+                    self.feedback = Some(fl!("failed-create-temp-subtitle"));
                     std::fs::remove_file(&temp_srt).ok();
                     return Event::Error(
                         eyre::eyre!(error).wrap_err("creating temporary subtitle file for merge"),
@@ -85,7 +87,7 @@ impl Model {
                 }
 
                 let Some(video) = video_path.cloned() else {
-                    self.feedback = Some("No video loaded to merge with.".into());
+                    self.feedback = Some(fl!("no-video-loaded"));
                     std::fs::remove_file(temp_srt).ok();
                     return Event::Run(Task::none());
                 };
@@ -107,14 +109,14 @@ impl Model {
                             .codec_subtitle("srt")
                             .output(output.to_string_lossy());
 
-                        let mut child = ffmpeg
-                            .spawn()
-                            .map_err(|error| format!("Failed to start FFmpeg: {error}"))?;
+                        let mut child = ffmpeg.spawn().map_err(|error| {
+                            fl!("ffmpeg-start-failed", error = error.to_string())
+                        })?;
 
                         let mut log = String::new();
-                        let events = child
-                            .iter()
-                            .map_err(|error| format!("Failed to read FFmpeg output: {error}"))?;
+                        let events = child.iter().map_err(|error| {
+                            fl!("ffmpeg-read-failed", error = error.to_string())
+                        })?;
 
                         for event in events {
                             writeln!(log, "{event:?}").ok();
@@ -130,7 +132,7 @@ impl Model {
                 for res in results.iter_mut() {
                     res.set_text(cc.convert(&res.subtitle.text));
                 }
-                self.feedback = Some("Subtitles Converted to Traditional Chinese (S2T).".into());
+                self.feedback = Some(fl!("converted-to-traditional"));
                 Event::Run(Task::none())
             }
             Message::OpenCcT2S => {
@@ -138,7 +140,7 @@ impl Model {
                 for res in results.iter_mut() {
                     res.set_text(cc.convert(&res.subtitle.text));
                 }
-                self.feedback = Some("Subtitles Converted to Simplified Chinese (T2S).".into());
+                self.feedback = Some(fl!("converted-to-simplified"));
                 Event::Run(Task::none())
             }
             Message::ConvertToSrt => {
@@ -147,7 +149,7 @@ impl Model {
                 Event::Run(Task::perform(
                     async move {
                         let file = AsyncFileDialog::new()
-                            .add_filter("Subtitle", &["srt"])
+                            .add_filter(fl!("subtitle-file"), &["srt"])
                             .set_file_name("output.srt")
                             .set_directory("./")
                             .save_file()
@@ -165,21 +167,24 @@ impl Model {
             }
             Message::SrtSaved(result) => match result {
                 Ok(Some(path)) => {
-                    self.feedback = Some(format!("Successfully saved SRT to {}", path.display()));
+                    self.feedback = Some(fl!(
+                        "successfully-saved-srt",
+                        path = path.display().to_string()
+                    ));
                     Event::Run(Task::none())
                 }
                 Ok(None) => {
-                    self.feedback = Some("File save cancelled.".into());
+                    self.feedback = Some(fl!("file-save-cancelled"));
                     Event::Run(Task::none())
                 }
                 Err(error) => {
-                    self.feedback = Some("Failed to save the SRT file.".into());
+                    self.feedback = Some(fl!("failed-save-srt"));
                     Event::Error(eyre::eyre!("writing the SRT file failed: {error}"))
                 }
             },
             Message::MuxFinished(result) => match result {
                 Ok(log) if log.is_empty() => {
-                    self.feedback = Some("Subtitles embedded successfully.".into());
+                    self.feedback = Some(fl!("subtitles-embedded"));
                     Event::Run(Task::none())
                 }
                 Ok(log) => {
@@ -201,27 +206,27 @@ impl Model {
 
         let tab_content: Element<_> = match self.tabs.active_data::<Tab>() {
             Some(Tab::Srt) => {
-                let btn = widget::button::text("Save as SRT")
+                let btn = widget::button::text(fl!("save-as-srt"))
                     .class(cosmic::theme::Button::Suggested)
                     .on_press_maybe((!search_active).then_some(Message::ConvertToSrt));
                 widget::column![btn].into()
             }
             Some(Tab::Merge) => {
-                let btn = widget::button::text("Merge Subtitles with Video")
+                let btn = widget::button::text(fl!("merge-subtitles-with-video"))
                     .class(cosmic::theme::Button::Suggested)
                     .on_press_maybe((!search_active).then_some(Message::MergeWithVideo));
                 widget::column![btn].into()
             }
             Some(Tab::OpenCc) => {
-                let btn_s2t = widget::button::text("Simplified to Traditional")
+                let btn_s2t = widget::button::text(fl!("simplified-to-traditional"))
                     .class(cosmic::theme::Button::Suggested)
                     .on_press_maybe((!search_active).then_some(Message::OpenCcS2T));
-                let btn_t2s = widget::button::text("Traditional to Simplified")
+                let btn_t2s = widget::button::text(fl!("traditional-to-simplified"))
                     .class(cosmic::theme::Button::Suggested)
                     .on_press_maybe((!search_active).then_some(Message::OpenCcT2S));
                 widget::row![btn_s2t, btn_t2s].spacing(space_s).into()
             }
-            None => widget::text("Select a tab").into(),
+            None => widget::text(fl!("select-tab")).into(),
         };
 
         let mut col = widget::column![tabs, tab_content].spacing(space_s);

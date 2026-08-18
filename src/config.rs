@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: MPL-2.0
 
+use std::sync::Arc;
+
 use cosmic::cosmic_config::{self, CosmicConfigEntry, cosmic_config_derive::CosmicConfigEntry};
 use serde::{Deserialize, Serialize};
 
+use crate::fl;
 use crate::native_video_sub_finder::NativeSearchParams;
 use crate::ocr::{self, OcrModel};
 
@@ -17,7 +20,14 @@ pub enum ProcessingResolution {
 
 impl ProcessingResolution {
     pub const ALL: [Self; 4] = [Self::Hd720, Self::FullHd1080, Self::UltraHd4k, Self::None];
-    pub const LABELS: [&'static str; 4] = ["720p", "1080p", "4K", "None"];
+    pub fn labels() -> Vec<String> {
+        vec![
+            fl!("resolution-720p"),
+            fl!("resolution-1080p"),
+            fl!("resolution-4k"),
+            fl!("resolution-none"),
+        ]
+    }
 
     pub const fn max_height(self) -> Option<u32> {
         match self {
@@ -38,7 +48,9 @@ pub enum SubtitleDetector {
 
 impl SubtitleDetector {
     pub const ALL: [Self; 2] = [Self::OriginalCpp, Self::RustRewrite];
-    pub const LABELS: [&'static str; 2] = ["Original C++", "Rust rewrite(WIP)"];
+    pub fn labels() -> Vec<String> {
+        vec![fl!("original-cpp"), fl!("rust-rewrite-wip")]
+    }
 }
 
 #[derive(Debug, Clone, CosmicConfigEntry, PartialEq)]
