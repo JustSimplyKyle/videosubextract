@@ -9,6 +9,28 @@ use crate::fl;
 use crate::native_video_sub_finder::NativeSearchParams;
 use crate::ocr::{self, OcrModel};
 
+#[derive(Debug, Default, Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
+pub enum Language {
+    #[default]
+    English,
+    ZhTw,
+}
+
+impl Language {
+    pub const ALL: [Self; 2] = [Self::English, Self::ZhTw];
+
+    pub fn labels() -> Vec<String> {
+        vec![fl!("language-english"), fl!("language-zh-tw")]
+    }
+
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::English => "en",
+            Self::ZhTw => "zh-TW",
+        }
+    }
+}
+
 #[derive(Debug, Default, Clone, Copy, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub enum ProcessingResolution {
     Hd720,
@@ -54,8 +76,9 @@ impl SubtitleDetector {
 }
 
 #[derive(Debug, Clone, CosmicConfigEntry, PartialEq)]
-#[version = 6]
+#[version = 7]
 pub struct Config {
+    pub language: Language,
     pub ocr_model: OcrModel,
     pub custom_ocrs: Vec<ocr::plugin_loader::DynamicLibrary>,
     pub subtitle_detector: SubtitleDetector,
@@ -67,6 +90,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            language: Language::default(),
             ocr_model: OcrModel::default(),
             custom_ocrs: Vec::new(),
             subtitle_detector: SubtitleDetector::default(),

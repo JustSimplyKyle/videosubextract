@@ -60,6 +60,19 @@ pub enum Event {
 }
 
 impl Model {
+    pub fn refresh_language(&mut self) {
+        let tabs: Vec<_> = self.tabs.iter().collect();
+        if let Some(id) = tabs.first() {
+            self.tabs.text_set(*id, fl!("convert-to-srt"));
+        }
+        if let Some(id) = tabs.get(1) {
+            self.tabs.text_set(*id, fl!("merge-video"));
+        }
+        if let Some(id) = tabs.get(2) {
+            self.tabs.text_set(*id, fl!("opencc-translate"));
+        }
+    }
+
     pub fn update(
         &mut self,
         message: Message,

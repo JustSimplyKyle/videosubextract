@@ -5,11 +5,11 @@ pub mod prepare;
 pub mod selection_canvas;
 pub mod subtitle;
 
-use crate::config::{Config, ProcessingResolution, SubtitleDetector};
+use crate::config::{Config, Language, ProcessingResolution, SubtitleDetector};
 use crate::native_video_sub_finder::NativeSearchParams;
 use crate::ocr::OcrModel;
 use crate::video_player::{self, InnerPlayer, create_video_player};
-use crate::{fl, video_player::VideoPlayerController};
+use crate::{fl, i18n, video_player::VideoPlayerController};
 use cosmic::cosmic_config::{self, CosmicConfigEntry};
 use cosmic::iced::alignment::{Horizontal, Vertical};
 use cosmic::iced::{self, Alignment, Length, Subscription, Task, futures};
@@ -51,6 +51,7 @@ pub struct AppModel {
     config: Config,
     time: u32,
     watch_is_active: bool,
+    prepare_page_id: nav_bar::Id,
     subtitle_page_id: nav_bar::Id,
     post_production_page_id: nav_bar::Id,
     video_frame_rate: f64,
@@ -74,6 +75,7 @@ pub enum Message {
     SetNativeSearchParams(NativeSearchParams),
     SetPostOcrProcessing(bool),
     SetProcessingResolution(ProcessingResolution),
+    SetLanguage(Language),
     UpdateConfig(Config),
     WatchTick(u32),
     Prepare(prepare::Message),
@@ -153,6 +155,21 @@ impl cosmic::Application for AppModel {
         core: cosmic::Core,
         _flags: Self::Flags,
     ) -> (Self, Task<cosmic::Action<Self::Message>>) {
+        let (config_handler, config) =
+            match cosmic_config::Config::new(Self::APP_ID, Config::VERSION) {
+                Ok(context) => {
+                    let config = match Config::get_entry(&context) {
+                        Ok(config) => config,
+                        Err((_errors, config)) => config,
+                    };
+                    (context, config)
+                }
+                Err(error) => {
+                    panic!("failed to load configuration: {error}");
+                }
+            };
+        i18n::select(config.language.code()).ok();
+
         let mut nav = nav_bar::Model::default();
 
         let prepare_id = nav
@@ -185,19 +202,6 @@ impl cosmic::Application for AppModel {
             .links([(fl!("repository"), REPOSITORY)])
             .license(env!("CARGO_PKG_LICENSE"));
 
-        let (config_handler, config) =
-            match cosmic_config::Config::new(Self::APP_ID, Config::VERSION) {
-                Ok(context) => {
-                    let config = match Config::get_entry(&context) {
-                        Ok(config) => config,
-                        Err((_errors, config)) => config,
-                    };
-                    (context, config)
-                }
-                Err(error) => {
-                    panic!("failed to load configuration: {error}");
-                }
-            };
         let mut app = Self {
             core,
             context_page: ContextPage::default(),
@@ -208,6 +212,7 @@ impl cosmic::Application for AppModel {
             config,
             time: 0,
             watch_is_active: false,
+            prepare_page_id: prepare_id,
             subtitle_page_id,
             post_production_page_id,
             video_frame_rate: 24.0,
@@ -289,45 +294,10 @@ impl cosmic::Application for AppModel {
     }
 
     fn nav_view(&self, id: nav_bar::Id) -> Element<'_, Self::Message> {
-        let space_s = cosmic::theme::spacing().space_s;
-        let page = self.nav.data(id).unwrap();
-
-        let content: Element<_> = match page {
-            Page::Prepare => self.prepare.view().map(Message::Prepare),
-            Page::Subtitle => {
-                let video_duration = self
-                    .prepare
-                    .video_controller
-                    .as_ref()
-                    .map(|x| x.inner.info.video_time)
-                    .unwrap_or_default();
-                self.subtitle.view(video_duration).map(Message::Subtitle)
-            }
-            Page::PostProduction => self
-                .post_production
-                .view(self.subtitle.search_active)
-                .map(Message::PostProduction),
-        };
-
-        let header = widget::column![
-            widget::text::title1(page.to_string()),
-            widget::text(page.details())
-        ]
-        .spacing(cosmic::theme::spacing().space_xxs);
-
-        let content = widget::container(widget::column!(header, content).spacing(space_s))
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .apply(widget::container)
-            .width(Length::Fill)
-            .padding([0, 50])
-            .align_x(Horizontal::Center)
-            .align_y(Vertical::Center);
-
-        widget::toaster(&self.toasts, content).into()
+        self.page_view(id)
     }
     fn view(&self) -> Element<'_, Self::Message> {
-        self.nav_view(self.nav.active())
+        self.page_view(self.nav.active())
     }
 
     fn subscription(&self) -> Subscription<Self::Message> {
@@ -486,6 +456,33 @@ impl cosmic::Application for AppModel {
                 }
                 Task::none()
             }
+            Message::SetLanguage(language) => {
+                if language == self.config.language {
+                    return Task::none();
+                }
+
+                if let Err(error) = i18n::select(language.code()) {
+                    return log!("failed to select language: {error}");
+                }
+
+                if let Err(error) = self.config.set_language(&self.config_handler, language) {
+                    return log!("failed to save language preference: {error}");
+                }
+
+                self.nav.text_set(self.prepare_page_id, fl!("page-prepare"));
+                self.nav
+                    .text_set(self.subtitle_page_id, fl!("page-subtitle"));
+                self.nav
+                    .text_set(self.post_production_page_id, fl!("page-post"));
+                self.post_production.refresh_language();
+                self.about = self
+                    .about
+                    .clone()
+                    .name(fl!("app-title"))
+                    .links([(fl!("repository"), REPOSITORY)]);
+
+                self.update_title()
+            }
             Message::LaunchUrl(url) => {
                 if let Err(err) = open::that_detached(&url) {
                     return log!("failed to open {url:?}: {err}");
@@ -558,6 +555,44 @@ impl cosmic::Application for AppModel {
 }
 
 impl AppModel {
+    fn page_view(&self, id: nav_bar::Id) -> Element<'_, Message> {
+        let space_s = cosmic::theme::spacing().space_s;
+        let page = self.nav.data(id).unwrap();
+
+        let content: Element<_> = match page {
+            Page::Prepare => self.prepare.view().map(Message::Prepare),
+            Page::Subtitle => {
+                let video_duration = self
+                    .prepare
+                    .video_controller
+                    .as_ref()
+                    .map(|x| x.inner.info.video_time)
+                    .unwrap_or_default();
+                self.subtitle.view(video_duration).map(Message::Subtitle)
+            }
+            Page::PostProduction => self
+                .post_production
+                .view(self.subtitle.search_active)
+                .map(Message::PostProduction),
+        };
+
+        let header = widget::column![
+            widget::text::title1(page.to_string()),
+            widget::text(page.details())
+        ]
+        .spacing(cosmic::theme::spacing().space_xxs);
+
+        let content = widget::container(widget::column!(header, content).spacing(space_s))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .apply(widget::container)
+            .width(Length::Fill)
+            .padding([0, 50])
+            .align_x(Horizontal::Center)
+            .align_y(Vertical::Center);
+
+        widget::toaster(&self.toasts, content).into()
+    }
     fn error_view(&self) -> Element<'_, Message> {
         use std::fmt::Write;
         let spacing = cosmic::theme::spacing();
@@ -586,6 +621,7 @@ impl AppModel {
         let labels = OcrModel::labels(&self.config);
         let resolution_labels = ProcessingResolution::labels();
         let detector_labels = SubtitleDetector::labels();
+        let language_labels = Language::labels();
 
         let selected_ocr_index = all.iter().position(|model| *model == self.config.ocr_model);
         let selected_detector_index = SubtitleDetector::ALL
@@ -594,6 +630,9 @@ impl AppModel {
         let selected_resolution_index = ProcessingResolution::ALL
             .iter()
             .position(|resolution| *resolution == self.config.processing_resolution);
+        let selected_language_index = Language::ALL
+            .iter()
+            .position(|language| *language == self.config.language);
         let native = self.config.native_search_params;
 
         let spacing = cosmic::theme::spacing();
@@ -623,6 +662,15 @@ impl AppModel {
         .width(Length::Fill);
 
         widget::settings::view_column(vec![
+            widget::settings::section()
+                .title(fl!("internationalization"))
+                .add(widget::settings::item(
+                    fl!("language"),
+                    widget::dropdown(language_labels, selected_language_index, |index| {
+                        Message::SetLanguage(Language::ALL[index])
+                    }),
+                ))
+                .into(),
             widget::settings::section()
                 .title(fl!("text-recognition"))
                 .add(widget::settings::item(fl!("ocr-model"), ocr_model_picker))

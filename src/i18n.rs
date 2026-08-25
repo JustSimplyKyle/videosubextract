@@ -15,6 +15,17 @@ pub fn init(requested_languages: &[LanguageIdentifier]) {
     localizer().select(requested_languages).ok();
 }
 
+/// Select a specific language for the running application.
+pub fn select(language: &str) -> Result<(), String> {
+    let language = language
+        .parse::<LanguageIdentifier>()
+        .map_err(|error| format!("invalid language identifier {language}: {error}"))?;
+    localizer()
+        .select(&[language])
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
 // Get the `Localizer` to be used for localizing this library.
 #[must_use]
 pub fn localizer() -> Box<dyn Localizer> {

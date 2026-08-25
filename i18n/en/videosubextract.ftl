@@ -80,3 +80,7 @@ opening-video = Opening video
 extraction-failed = Extraction failed
 extraction-stopped = Extraction stopped
 found-subtitles = Found { $count } subtitle(s)
+internationalization = Internationalization
+language = Language
+language-english = English
+language-zh-tw = 繁體中文（台灣）
