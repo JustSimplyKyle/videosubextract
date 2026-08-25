@@ -15,7 +15,6 @@ const JUMP_TO_END_DELAY: Duration = Duration::from_secs(3);
 const TOOLBAR_SIZE: f32 = 48.0;
 const RESULT_ROW_HEIGHT: f32 = 120.0;
 const RESULT_ROW_OVERSCAN: usize = 3;
-const INITIAL_VISIBLE_RESULT_ROWS: usize = 8;
 
 #[derive(Debug, Clone)]
 pub struct SubtitleResult {
@@ -87,13 +86,6 @@ enum ScrollbarJumpStatus {
     DisplayButton,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum VirtualRowKey {
-    TopSpacer,
-    Result(u64),
-    BottomSpacer,
-}
-
 pub struct ProgressBar(indicatif::ProgressBar);
 
 impl std::ops::Deref for ProgressBar {
@@ -150,6 +142,284 @@ pub enum Event {
     Run(Task<Message>),
     Error(eyre::Report),
     None,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum VirtualRowKey {
+    TopSpacer,
+    Row { id: usize },
+    BottomSpacer,
+}
+
+struct SubtitleTable<'a> {
+    scroll_offset: f32,
+    viewport_height: f32,
+    results: &'a [SubtitleResult],
+}
+
+impl<'a> SubtitleTable<'a> {
+    fn row_spacing() -> f32 {
+        f32::from(cosmic::theme::spacing().space_m)
+    }
+    fn row_pitch() -> f32 {
+        RESULT_ROW_HEIGHT + Self::row_spacing()
+    }
+    fn visible_result_range(&self, result_count: usize) -> std::ops::Range<usize> {
+        let first_visible =
+            ((self.scroll_offset / Self::row_pitch()).floor() as usize).min(result_count);
+
+        let visible_end = (((self.scroll_offset + self.viewport_height) / Self::row_pitch()).ceil()
+            as usize)
+            .max(first_visible.saturating_add(1))
+            .min(result_count);
+
+        first_visible.saturating_sub(RESULT_ROW_OVERSCAN)
+            ..visible_end
+                .saturating_add(RESULT_ROW_OVERSCAN)
+                .min(result_count)
+    }
+    fn spacer(amount: usize) -> Element<'static, Message> {
+        let height = amount as f32 * Self::row_pitch();
+
+        widget::Space::new().height(Length::Fixed(height)).into()
+    }
+
+    fn wrap_row(item: Element<'a, Message>) -> Element<'a, Message> {
+        item.apply(widget::container)
+            .height(Length::Fixed(Self::row_pitch()))
+            .padding(iced::Padding::ZERO.bottom(Self::row_spacing()))
+            .into()
+    }
+
+    fn active_subtitles(
+        results: &'a [SubtitleResult],
+        active_range: std::ops::Range<usize>,
+    ) -> impl Iterator<Item = (VirtualRowKey, Element<'a, Message>)> {
+        results[active_range.clone()]
+            .iter()
+            .enumerate()
+            .map(move |(relative_id, result)| {
+                let id = active_range.start + relative_id;
+                (
+                    VirtualRowKey::Row { id },
+                    Self::subtitle_row(id, result).apply(Self::wrap_row),
+                )
+            })
+    }
+    fn timestamp(result: &SubtitleResult) -> Element<'_, Message> {
+        let t_start = result.subtitle.start_timestamp.as_secs_f64();
+        let t_end = result.subtitle.end_timestamp.as_secs_f64();
+        widget::text(format!("{t_start:.1}s – {t_end:.1}s")).into()
+    }
+    fn subtitle_row(id: usize, result: &'a SubtitleResult) -> Element<'a, Message> {
+        let toolbar = Self::toolbar(id);
+        let space_s = cosmic::theme::spacing().space_s;
+
+        widget::row!(
+            toolbar,
+            widget::image(result.preview.clone())
+                .content_fit(iced::ContentFit::Contain)
+                .width(Length::FillPortion(65))
+                .height(Length::Fill),
+            widget::column![
+                Self::timestamp(result),
+                Self::text_editor(id, &result.editor_content)
+            ]
+            .spacing(space_s / 2)
+            .width(Length::FillPortion(35))
+            .height(Length::Fill)
+            .align_x(Alignment::Start),
+        )
+        .spacing(space_s)
+        .padding([0, 40])
+        .height(Length::Fixed(RESULT_ROW_HEIGHT))
+        .align_y(Alignment::Center)
+        .into()
+    }
+    fn toolbar(id: usize) -> Element<'static, Message> {
+        widget::column::with_capacity(2)
+            .push(Self::delete(id))
+            .width(TOOLBAR_SIZE)
+            .spacing(cosmic::theme::spacing().space_s)
+            .align_x(Alignment::Center)
+            .push_maybe((id != 0).then_some(Self::merge_with_previous(id)))
+            .into()
+    }
+    fn text_editor(id: usize, content: &'a widget::text_editor::Content) -> Element<'a, Message> {
+        widget::text_editor::text_editor(content)
+            .on_action(move |action| Message::SubtitleContentEdit { id, action })
+            .height(Length::Fill)
+            .min_height(48.0)
+            .style(|x, y| {
+                use iced::widget::text_editor::Catalog;
+                let mut style = x.style(&theme::iced::TextEditor::default(), y);
+                style.border.width = 2.0;
+                style
+            })
+            .apply(Element::from)
+    }
+    fn delete(id: usize) -> Element<'static, Message> {
+        widget::button::icon(widget::icon::from_name("edit-delete-symbolic"))
+            .on_press(Message::Delete(id))
+            .class(cosmic::theme::Button::Destructive)
+            .into()
+    }
+    fn merge_with_previous(id: usize) -> Element<'static, Message> {
+        widget::button::icon(widget::icon::from_name("go-up-symbolic"))
+            .on_press(Message::MergeWithPrevious(id))
+            .class(cosmic::theme::Button::Icon)
+            .into()
+    }
+    fn view(self) -> Element<'a, Message> {
+        let visible_range = self.visible_result_range(self.results.len());
+        let active_subtitles = Self::active_subtitles(self.results, visible_range.clone());
+
+        let top_spacer = Self::spacer(visible_range.start);
+        let bottom_spacer = Self::spacer(self.results.len().saturating_sub(visible_range.end));
+
+        // we need a keyed column here because without it, state such as "is text_editor selected" will be lost in scrolling since iced treats every "first row" as the same.
+        iced::widget::keyed::column::Column::with_capacity(visible_range.len() + 2)
+            .push(VirtualRowKey::TopSpacer, top_spacer)
+            .extend(active_subtitles)
+            .push(VirtualRowKey::BottomSpacer, bottom_spacer)
+            .width(Length::Fill)
+            // .apply(widget::container)
+            // .class(theme::Container::List)
+            .into()
+    }
+}
+
+struct SubtitleView<'a> {
+    model: &'a Model,
+    video_duration: Duration,
+}
+
+impl<'a> SubtitleView<'a> {
+    fn status(&self) -> Element<'a, Message> {
+        self.model
+            .progress_bar
+            .set_length(self.video_duration.as_millis() as u64);
+
+        if self.model.done {
+            widget::text(fl!(
+                "complete-subtitles-found",
+                count = self.model.results.len()
+            ))
+            .class(cosmic::theme::Text::Accent)
+            .into()
+        } else if self.model.search_active {
+            let status_text = widget::text(fl!(
+                "elapsed-status",
+                elapsed = self.model.progress_bar.elapsed().apply(format_duration),
+                igt = self.model.current_timestamp.apply(format_duration),
+                eta = self.model.progress_bar.eta().apply(format_duration)
+            ))
+            .class(cosmic::theme::Text::Accent);
+
+            let progress_bar = widget::progress_bar::determinate_linear(
+                self.model.current_timestamp.as_secs_f32() / self.video_duration.as_secs_f32(),
+            )
+            .width(Length::Fill);
+
+            widget::row!(status_text, progress_bar)
+                .spacing(cosmic::theme::spacing().space_s)
+                .align_y(Alignment::Center)
+                .width(Length::Fill)
+                .into()
+        } else {
+            widget::text(fl!("no-active-search"))
+                .class(cosmic::theme::Text::Accent)
+                .into()
+        }
+    }
+
+    fn controls(&self) -> Element<'a, Message> {
+        let to_post_prod = widget::button::text(fl!("post-production"))
+            .class(cosmic::theme::Button::Suggested)
+            .on_press_maybe((!self.model.search_active).then_some(Message::GoToPostProduction));
+        let undo_edit = widget::button::icon(icon::from_name("edit-undo-symbolic"))
+            .on_press_maybe((!self.model.edit_history.is_empty()).then_some(Message::UndoEdit));
+
+        widget::row![self.status(), undo_edit, to_post_prod]
+            .spacing(cosmic::theme::spacing().space_s)
+            .align_y(Alignment::Center)
+            .into()
+    }
+
+    fn preview_card(title: String, handle: &'a widget::image::Handle) -> Element<'a, Message> {
+        widget::column!(
+            widget::text(title),
+            widget::image(handle)
+                .width(Length::Fill)
+                .height(Length::Fixed(120.))
+                .content_fit(iced::ContentFit::Contain)
+        )
+        .align_x(Alignment::Center)
+        .apply(widget::container)
+        .class(cosmic::theme::Container::Card)
+        .padding(20)
+        .into()
+    }
+
+    fn header(&self) -> Option<Element<'a, Message>> {
+        self.model.preview.as_ref().map(|handle| {
+            widget::Row::new()
+                .spacing(cosmic::theme::spacing().space_s)
+                .push(Self::preview_card(fl!("view"), handle))
+                .push_maybe(
+                    self.model
+                        .results
+                        .last()
+                        .map(|result| Self::preview_card(fl!("current"), &result.preview)),
+                )
+                .into()
+        })
+    }
+
+    fn scrolled(viewport: iced::widget::scrollable::Viewport) -> Message {
+        let content_fits = viewport.content_bounds().height <= viewport.bounds().height + 1.0;
+        let at_end = content_fits || viewport.relative_offset().y >= 0.999;
+        Message::Scrolled {
+            at_end,
+            offset: viewport.absolute_offset().y,
+            viewport_height: viewport.bounds().height,
+        }
+    }
+
+    fn results(&self) -> Element<'a, Message> {
+        let scrollable_id = iced::id::Id::new("scrollable");
+        let jump_to_end = (self.model.scrollbar_jump_status == ScrollbarJumpStatus::DisplayButton)
+            .then_some(
+                widget::button::text(fl!("jump-to-latest"))
+                    .class(cosmic::theme::Button::Suggested)
+                    .on_press(Message::JumpToEnd {
+                        id: scrollable_id.clone(),
+                    })
+                    .apply(iced::widget::bottom_right)
+                    .padding(cosmic::theme::spacing().space_m),
+            );
+
+        SubtitleTable {
+            scroll_offset: self.model.result_scroll_offset,
+            viewport_height: self.model.result_viewport_height,
+            results: &self.model.results,
+        }
+        .view()
+        .apply(widget::container)
+        .padding(iced::Padding::ZERO.right(20))
+        .height(Length::Fill)
+        .apply(widget::scrollable)
+        .on_scroll(Self::scrolled)
+        .id(scrollable_id)
+        .apply(Element::from)
+        .apply(|results| iced::widget::stack![results, jump_to_end].into())
+    }
+
+    fn view(&self) -> Element<'a, Message> {
+        widget::column![self.header(), self.controls(), self.results()]
+            .spacing(cosmic::theme::spacing().space_s)
+            .into()
+    }
 }
 
 impl Model {
@@ -318,209 +588,11 @@ impl Model {
     }
 
     pub fn view(&self, video_duration: Duration) -> Element<'_, Message> {
-        let spacing = cosmic::theme::spacing();
-        let space_s = cosmic::theme::spacing().space_s;
-
-        self.progress_bar
-            .set_length(video_duration.as_millis() as u64);
-
-        let status = if self.done {
-            widget::text(fl!("complete-subtitles-found", count = self.results.len()))
-                .class(cosmic::theme::Text::Accent)
-                .apply(Element::from)
-        } else if self.search_active {
-            let status_text = widget::text(fl!(
-                "elapsed-status",
-                elapsed = self.progress_bar.elapsed().apply(format_duration),
-                igt = self.current_timestamp.apply(format_duration),
-                eta = self.progress_bar.eta().apply(format_duration)
-            ))
-            .class(cosmic::theme::Text::Accent);
-
-            let progress_bar = widget::progress_bar::determinate_linear(
-                self.current_timestamp.as_secs_f32() / video_duration.as_secs_f32(),
-            )
-            .width(Length::Fill);
-
-            widget::row!(status_text, progress_bar)
-                .spacing(space_s)
-                .align_y(Alignment::Center)
-                .width(Length::Fill)
-                .apply(Element::from)
-        } else {
-            widget::text(fl!("no-active-search"))
-                .class(cosmic::theme::Text::Accent)
-                .apply(Element::from)
-        };
-
-        let to_post_prod = widget::button::text(fl!("post-production"))
-            .class(cosmic::theme::Button::Suggested)
-            .on_press_maybe((!self.search_active).then_some(Message::GoToPostProduction));
-
-        let undo_edit = widget::button::icon(icon::from_name("edit-undo-symbolic"))
-            .on_press_maybe((!self.edit_history.is_empty()).then_some(Message::UndoEdit));
-        let row_spacing = f32::from(spacing.space_m);
-        let row_pitch = RESULT_ROW_HEIGHT + row_spacing;
-
-        let visible_rows = visible_result_range(
-            self.result_scroll_offset,
-            self.result_viewport_height,
-            row_pitch,
-            self.results.len(),
-        );
-        let top_spacer_height = visible_rows.start as f32 * row_pitch;
-        let bottom_spacer_height =
-            self.results.len().saturating_sub(visible_rows.end) as f32 * row_pitch;
-
-        let mut virtual_rows = Vec::with_capacity(visible_rows.len() + 2);
-
-        if top_spacer_height > 0.0 {
-            virtual_rows.push((
-                VirtualRowKey::TopSpacer,
-                widget::Space::new()
-                    .height(Length::Fixed(top_spacer_height))
-                    .into(),
-            ));
+        SubtitleView {
+            model: self,
+            video_duration,
         }
-
-        virtual_rows.extend(self.results[visible_rows.clone()].iter().enumerate().map(
-            |(relative_id, result)| {
-                let id = visible_rows.start + relative_id;
-                let t_start = result.subtitle.start_timestamp.as_secs_f64();
-                let t_end = result.subtitle.end_timestamp.as_secs_f64();
-
-                let toolbar = widget::column![
-                    widget::button::icon(widget::icon::from_name("edit-delete-symbolic"))
-                        .on_press(Message::Delete(id))
-                        .class(cosmic::theme::Button::Destructive),
-                ]
-                .push_maybe(
-                    (id != 0).then_some(
-                        widget::button::icon(widget::icon::from_name("go-up-symbolic"))
-                            .on_press(Message::MergeWithPrevious(id))
-                            .class(cosmic::theme::Button::Icon),
-                    ),
-                )
-                .width(TOOLBAR_SIZE)
-                .spacing(space_s)
-                .align_x(Alignment::Center);
-
-                let image = widget::image(result.preview.clone())
-                    .content_fit(iced::ContentFit::Contain)
-                    .width(Length::FillPortion(65))
-                    .height(Length::Fill);
-
-                let timeline = widget::text(format!("{t_start:.1}s – {t_end:.1}s"));
-
-                let ocr = widget::text_editor::text_editor(&result.editor_content)
-                    .on_action(move |action| Message::SubtitleContentEdit { id, action })
-                    .height(Length::Fill)
-                    .min_height(48.0)
-                    .style(|x, y| {
-                        use iced::widget::text_editor::Catalog;
-                        let mut style = x.style(&theme::iced::TextEditor::default(), y);
-                        style.border.width = 2.0;
-                        style
-                    })
-                    .apply(Element::from);
-
-                let row = widget::row!(
-                    toolbar,
-                    image,
-                    widget::column![timeline, ocr]
-                        .spacing(space_s / 2)
-                        .width(Length::FillPortion(35))
-                        .height(Length::Fill)
-                        .align_x(Alignment::Start),
-                )
-                .spacing(space_s)
-                .padding([0, 40])
-                .height(Length::Fixed(RESULT_ROW_HEIGHT))
-                .align_y(Alignment::Center);
-
-                let row = widget::container(row)
-                    .height(Length::Fixed(row_pitch))
-                    .padding(iced::Padding::ZERO.bottom(row_spacing));
-
-                (VirtualRowKey::Result(result.id), row.into())
-            },
-        ));
-
-        if bottom_spacer_height > 0.0 {
-            virtual_rows.push((
-                VirtualRowKey::BottomSpacer,
-                widget::Space::new()
-                    .height(Length::Fixed(bottom_spacer_height))
-                    .into(),
-            ));
-        }
-
-        let result_rows = iced::widget::keyed_column(virtual_rows).width(Length::Fill);
-
-        let view_card = |title, handle| {
-            widget::column!(
-                widget::text(title),
-                widget::image(handle)
-                    .width(Length::Fill)
-                    .height(Length::Fixed(120.))
-                    .content_fit(iced::ContentFit::Contain)
-            )
-            .align_x(Alignment::Center)
-            .apply(widget::container)
-            .class(cosmic::theme::Container::Card)
-            .padding(20)
-        };
-
-        let header = self.preview.as_ref().map(|handle| {
-            widget::Row::new()
-                .spacing(space_s)
-                .push(view_card(fl!("view"), handle))
-                .push_maybe(
-                    self.results
-                        .last()
-                        .map(|x| view_card(fl!("current"), &x.preview)),
-                )
-        });
-
-        let scrollable_id = iced::id::Id::new("scrollable");
-        let scrollable_id_clone = scrollable_id.clone();
-
-        let jump_to_end = (self.scrollbar_jump_status == ScrollbarJumpStatus::DisplayButton)
-            .then_some(
-                widget::button::text(fl!("jump-to-latest"))
-                    .class(cosmic::theme::Button::Suggested)
-                    .on_press(Message::JumpToEnd { id: scrollable_id })
-                    .apply(iced::widget::bottom_right)
-                    .padding(spacing.space_m),
-            );
-
-        let results = result_rows
-            .apply(widget::container)
-            .padding(iced::Padding::ZERO.right(60))
-            .height(Length::Fill)
-            .apply(widget::scrollable)
-            .on_scroll(|viewport| {
-                let content_fits =
-                    viewport.content_bounds().height <= viewport.bounds().height + 1.0;
-                let at_end = content_fits || viewport.relative_offset().y >= 0.999;
-                Message::Scrolled {
-                    at_end,
-                    offset: viewport.absolute_offset().y,
-                    viewport_height: viewport.bounds().height,
-                }
-            })
-            .id(scrollable_id_clone)
-            .apply(Element::from);
-
-        widget::column![
-            header,
-            widget::row![status, undo_edit, to_post_prod]
-                .spacing(space_s)
-                .align_y(Alignment::Center),
-            iced::widget::stack![results, jump_to_end],
-        ]
-        .spacing(space_s)
-        .into()
+        .view()
     }
 
     pub fn subscription(&self, video_frame_rate: f64) -> Subscription<Message> {
@@ -551,7 +623,7 @@ impl Model {
                 modifiers: iced::keyboard::Modifiers::CTRL,
                 repeat,
                 ..
-            } if x == "z" && repeat => Message::UndoEdit,
+            } if x == "z" && !repeat => Message::UndoEdit,
             _ => Message::None,
         }));
         Subscription::batch(subscriptions)
@@ -565,36 +637,6 @@ pub fn to_srt(results: &[SubtitleResult]) -> String {
             .map(|result| result.subtitle.clone())
             .collect::<Vec<_>>(),
     )
-}
-
-fn visible_result_range(
-    scroll_offset: f32,
-    viewport_height: f32,
-    row_pitch: f32,
-    result_count: usize,
-) -> std::ops::Range<usize> {
-    if result_count == 0 || !row_pitch.is_finite() || row_pitch <= 0.0 {
-        return 0..0;
-    }
-
-    if !viewport_height.is_finite() || viewport_height <= 0.0 {
-        return 0..INITIAL_VISIBLE_RESULT_ROWS.min(result_count);
-    }
-
-    let scroll_offset = if scroll_offset.is_finite() {
-        scroll_offset.max(0.0)
-    } else {
-        0.0
-    };
-    let first_visible = ((scroll_offset / row_pitch).floor() as usize).min(result_count);
-    let visible_end = (((scroll_offset + viewport_height) / row_pitch).ceil() as usize)
-        .max(first_visible.saturating_add(1))
-        .min(result_count);
-
-    first_visible.saturating_sub(RESULT_ROW_OVERSCAN)
-        ..visible_end
-            .saturating_add(RESULT_ROW_OVERSCAN)
-            .min(result_count)
 }
 
 #[derive(Clone, Hash, PartialEq, Eq)]
@@ -716,33 +758,5 @@ mod tests {
         model.update(detection(2, 3, "same text", false), &config);
 
         assert_eq!(model.results.len(), 2);
-    }
-
-    #[test]
-    fn visible_range_only_contains_viewport_and_overscan() {
-        let row_pitch = 176.0;
-
-        assert_eq!(
-            visible_result_range(5.0 * row_pitch, 2.0 * row_pitch, row_pitch, 20),
-            2..10
-        );
-        assert_eq!(
-            visible_result_range(0.0, 2.0 * row_pitch, row_pitch, 20),
-            0..5
-        );
-        assert_eq!(
-            visible_result_range(18.0 * row_pitch, 2.0 * row_pitch, row_pitch, 20),
-            15..20
-        );
-    }
-
-    #[test]
-    fn visible_range_has_an_initial_window_before_viewport_is_known() {
-        assert_eq!(
-            visible_result_range(0.0, 0.0, RESULT_ROW_HEIGHT, 20),
-            0..INITIAL_VISIBLE_RESULT_ROWS
-        );
-        assert_eq!(visible_result_range(0.0, 0.0, RESULT_ROW_HEIGHT, 2), 0..2);
-        assert_eq!(visible_result_range(0.0, 0.0, RESULT_ROW_HEIGHT, 0), 0..0);
     }
 }
