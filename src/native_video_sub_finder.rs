@@ -26,8 +26,8 @@ unsafe extern "C" {
         height: i32,
         params: *const NativeSearchParamsFfi,
         context: *mut c_context,
-        next_frame: unsafe extern "C" fn(*mut c_context, *mut u8, usize, *mut i64) -> i32,
-        segment: unsafe extern "C" fn(
+        send_next_frame: unsafe extern "C" fn(*mut c_context, *mut u8, usize, *mut i64) -> i32,
+        received_segment: unsafe extern "C" fn(
             *mut c_context,
             i64,
             i64,
@@ -178,7 +178,7 @@ impl<I, F> SearchContext<I, F> {
     }
 }
 
-unsafe extern "C" fn next_frame<I, F>(
+unsafe extern "C" fn get_next_frame<I, F>(
     context: *mut c_void,
     destination: *mut u8,
     destination_len: usize,
@@ -242,7 +242,7 @@ where
     }
 }
 
-unsafe extern "C" fn detected_segment<I, F>(
+unsafe extern "C" fn receive_detected_segment<I, F>(
     context: *mut c_void,
     start_ms: i64,
     end_ms: i64,
@@ -360,8 +360,8 @@ where
             height,
             ptr::from_ref(&ffi_params),
             ptr::from_ref(&context).cast_mut().cast(),
-            next_frame::<I, F>,
-            detected_segment::<I, F>,
+            get_next_frame::<I, F>,
+            receive_detected_segment::<I, F>,
         )
     };
 
