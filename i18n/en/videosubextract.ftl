@@ -84,3 +84,11 @@ internationalization = Internationalization
 language = Language
 language-english = English
 language-zh-tw = 繁體中文（台灣）
+
+eta-seconds = about { $seconds } seconds
+
+eta-minutes =
+    { $minutes ->
+        [one] about one minute
+       *[other] about { $minutes } minutes
+    }

@@ -295,6 +295,19 @@ struct SubtitleView<'a> {
 }
 
 impl<'a> SubtitleView<'a> {
+    fn format_eta(duration: Duration) -> String {
+        let seconds = duration.as_secs();
+
+        if seconds < 60 {
+            fl!("eta-seconds", seconds = seconds)
+        } else {
+            // Round the seconds to the nearest minute.
+            let minutes = ((seconds + 30) / 60).max(1);
+
+            fl!("eta-minutes", minutes = minutes)
+        }
+    }
+
     fn status(&self) -> Element<'a, Message> {
         self.model
             .progress_bar
@@ -312,7 +325,7 @@ impl<'a> SubtitleView<'a> {
                 "elapsed-status",
                 elapsed = self.model.progress_bar.elapsed().apply(format_duration),
                 igt = self.model.current_timestamp.apply(format_duration),
-                eta = self.model.progress_bar.eta().apply(format_duration)
+                eta = self.model.progress_bar.eta().apply(Self::format_eta)
             ))
             .class(cosmic::theme::Text::Accent);
 

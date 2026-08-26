@@ -84,3 +84,7 @@ internationalization = 國際化
 language = 語言
 language-english = English
 language-zh-tw = 繁體中文（台灣）
+
+eta-seconds = 約莫 { $seconds } 秒
+
+eta-minutes = 約莫 { $minutes } 分鐘
