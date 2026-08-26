@@ -38,6 +38,10 @@
             -fuse-ld=mold \
             "$@"
         '';
+        videosubfinderHelixLanguages = pkgs.writeText "videosubfinder-languages.toml" ''
+          [language-server.clangd]
+          args = ["--query-driver=${pkgs.stdenv.cc}/bin/g++"]
+        '';
       in
       {
         packages.default = pkgs.rustPlatform.buildRustPackage {
@@ -106,6 +110,11 @@
           RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
           LIBCLANG_PATH = "${pkgs.libclang.lib}/lib";
           LD_LIBRARY_PATH = "$LD_LIBRARY_PATH:${pkgs.lib.makeLibraryPath buildInputs}";
+
+          shellHook = ''
+            mkdir -p third_party/videosubfinder-src/.helix
+            ln -sfn ${videosubfinderHelixLanguages} third_party/videosubfinder-src/.helix/languages.toml
+          '';
         };
       }
     );

@@ -2,11 +2,10 @@ use std::{env, path::PathBuf, process::Command};
 
 fn main() {
     let source = PathBuf::from("third_party/videosubfinder-src/Components/Headless");
-    if !source.join("CMakeLists.txt").is_file() {
-        panic!(
-            "VideoSubFinder submodule is missing; run `git submodule update --init --recursive`"
-        );
-    }
+    assert!(
+        source.join("CMakeLists.txt").is_file(),
+        "VideoSubFinder submodule is missing; run `git submodule update --init --recursive`"
+    );
 
     println!("cargo:rerun-if-changed={}", source.display());
 
@@ -34,7 +33,7 @@ fn main() {
     // compile the archive, and this mirrors its library flags for Rust's final
     // executable link.
     let output = Command::new("wx-config")
-        .args(["--libs", "base"])
+        .arg("--libs")
         .output()
         .expect("VideoSubFinder requires wx-config");
     assert!(
