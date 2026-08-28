@@ -1,4 +1,4 @@
-use std::{env, path::PathBuf, process::Command};
+use std::{env, path::PathBuf};
 
 fn main() {
     let source = PathBuf::from("third_party/videosubfinder-src/Components/Headless");
@@ -28,29 +28,6 @@ fn main() {
     pkg_config::Config::new()
         .probe("tbb")
         .expect("VideoSubFinder requires oneTBB");
-
-    // wxWidgets does not provide pkg-config metadata. CMake uses wx-config to
-    // compile the archive, and this mirrors its library flags for Rust's final
-    // executable link.
-    let output = Command::new("wx-config")
-        .arg("--libs")
-        .output()
-        .expect("VideoSubFinder requires wx-config");
-    assert!(
-        output.status.success(),
-        "wx-config failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    for flag in String::from_utf8(output.stdout)
-        .expect("wx-config emitted non-UTF-8 output")
-        .split_whitespace()
-    {
-        if let Some(path) = flag.strip_prefix("-L") {
-            println!("cargo:rustc-link-search=native={path}");
-        } else if let Some(library) = flag.strip_prefix("-l") {
-            println!("cargo:rustc-link-lib=dylib={library}");
-        }
-    }
 
     println!("cargo:rustc-link-lib=dylib=stdc++");
 }
