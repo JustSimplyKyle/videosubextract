@@ -23,8 +23,10 @@ rust-embed = "8.8.0"
 ocr-rs = "2.3.1"
 serde = { version = "1", features = ["derive"] }
 
-tokio = { version = "1.48.0", features = ["full"] }
+async-channel = "2.5.0"
+smol = "2.0.2"
 image = "0.25.10"
+manganis = { version = "0.7.10", features = ["dioxus"] }
 rfd = "0.17.2"
 opencc = "0.3.0"
 ffmpeg-sidecar = "2.5.2"
@@ -32,6 +34,7 @@ indicatif = "0.18.6"
 rayon = "1.12.0"
 libloading = "0.9.0"
 derive_more = { version = "2.1.1", features = ["debug"] }
+dioxus-asset-resolver = { version = "0.7.9", features = ["native"] }
 
 [build-dependencies]
 cmake = "0.1.54"
@@ -78,6 +81,7 @@ features = [
     "svg",
     "web-colors",
     "tiny-skia",
+    "smol",
 ]
  
 # [patch.'https://github.com/pop-os/libcosmic']

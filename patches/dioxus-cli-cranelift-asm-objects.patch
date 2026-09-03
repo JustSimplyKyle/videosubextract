@@ -1,0 +1,13 @@
+diff --git a/src/build/link.rs b/src/build/link.rs
+index 2a1ff75b3..9f2c58a96 100644
+--- a/src/build/link.rs
++++ b/src/build/link.rs
+@@ -188,7 +188,7 @@ impl BuildRequest {
+             .workspace_rustc
+             .link_args
+             .iter()
+-            .filter(|arg| arg.ends_with(".rcgu.o"))
++            .filter(|arg| arg.ends_with(".rcgu.o") || arg.ends_with(".rcgu.asm.o"))
+             .sorted()
+             .map(PathBuf::from)
+             .collect();

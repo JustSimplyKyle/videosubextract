@@ -520,7 +520,7 @@ impl Model {
                 } else if matches!(self.scrollbar_jump_status, ScrollbarJumpStatus::NoShow) {
                     self.scrollbar_jump_status = ScrollbarJumpStatus::TimeoutRunning;
 
-                    Event::Run(Task::perform(tokio::time::sleep(JUMP_TO_END_DELAY), |()| {
+                    Event::Run(Task::perform(smol::Timer::after(JUMP_TO_END_DELAY), |_| {
                         Message::ShowJumpToEnd
                     }))
                 } else {

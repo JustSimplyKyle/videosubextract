@@ -30,10 +30,7 @@ fn main() -> eyre::Result<()> {
 
     if let Some(input) = args.input {
         let output = args.output.unwrap_or_else(|| input.with_extension("srt"));
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()?;
-        return runtime.block_on(cli::run(input, output, args.crop));
+        return smol::block_on(cli::run(input, output, args.crop));
     }
 
     run_gui()?;

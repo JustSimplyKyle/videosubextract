@@ -101,18 +101,18 @@ pub enum Event {
 }
 
 pub fn stream(request: Request) -> impl Stream<Item = Event> + Send {
-    let (event_tx, event_rx) = tokio::sync::mpsc::channel(OCR_PARALLELISM);
-    tokio::spawn(run(request, event_tx));
+    let (event_tx, event_rx) = async_channel::bounded(OCR_PARALLELISM);
+    smol::spawn(run(request, event_tx)).detach();
 
-    futures::stream::unfold(event_rx, |mut receiver| async move {
-        receiver.recv().await.map(|event| (event, receiver))
+    futures::stream::unfold(event_rx, |receiver| async move {
+        receiver.recv().await.ok().map(|event| (event, receiver))
     })
 }
 
-async fn run(request: Request, event_tx: tokio::sync::mpsc::Sender<Event>) {
+async fn run(request: Request, event_tx: async_channel::Sender<Event>) {
     let (subtitle_tx, subtitle_rx) =
-        tokio::sync::mpsc::channel::<NativeSubtitleEvent>(OCR_PARALLELISM);
-    let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+        async_channel::bounded::<NativeSubtitleEvent>(OCR_PARALLELISM);
+    let (completion_tx, completion_rx) = futures::channel::oneshot::channel();
     let blocking_event_tx = event_tx.clone();
     let input = request.input;
     let crop = request.crop;
@@ -122,7 +122,7 @@ async fn run(request: Request, event_tx: tokio::sync::mpsc::Sender<Event>) {
     let progress_interval = request.progress_interval.max(1);
     let include_progress_preview = request.include_progress_preview;
 
-    tokio::task::spawn_blocking(move || {
+    smol::spawn(smol::unblock(move || {
         let result = (|| {
             let input = ffmpeg_the_third::format::input(&input)
                 .wrap_err("opening the video with FFmpeg")?;
@@ -142,7 +142,7 @@ async fn run(request: Request, event_tx: tokio::sync::mpsc::Sender<Event>) {
                 SubtitleDetector::OriginalCpp => {
                     find_subtitles_with(frame_iter, &native_search_params, |event| {
                         subtitle_tx
-                            .blocking_send(event)
+                            .send_blocking(event)
                             .map_err(|_| eyre::eyre!("subtitle OCR receiver closed"))
                     })
                 }
@@ -154,7 +154,7 @@ async fn run(request: Request, event_tx: tokio::sync::mpsc::Sender<Event>) {
                             ocr_image: event.sample_bgr,
                         };
                         subtitle_tx
-                            .blocking_send(event)
+                            .send_blocking(event)
                             .map_err(|_| eyre::eyre!("subtitle OCR receiver closed"))?;
                     }
                     Ok(())
@@ -163,15 +163,16 @@ async fn run(request: Request, event_tx: tokio::sync::mpsc::Sender<Event>) {
         })();
 
         completion_tx.send(result).ok();
-    });
+    }))
+    .detach();
 
     let ocr = request.ocr;
-    let jobs = futures::stream::unfold(subtitle_rx, |mut receiver| async move {
-        receiver.recv().await.map(|event| (event, receiver))
+    let jobs = futures::stream::unfold(subtitle_rx, |receiver| async move {
+        receiver.recv().await.ok().map(|event| (event, receiver))
     })
     .map(move |event| {
         let ocr = ocr.clone();
-        tokio::task::spawn_blocking(move || {
+        smol::unblock(move || {
             let preview = mat_to_rgba(&event.ocr_image)?;
             let image = DynamicImage::ImageRgba8(preview.clone());
             let text = ocr
@@ -195,13 +196,9 @@ async fn run(request: Request, event_tx: tokio::sync::mpsc::Sender<Event>) {
 
     while let Some(result) = jobs.next().await {
         let (mut subtitle, preview) = match result {
-            Ok(Ok(result)) => result,
-            Ok(Err(error)) => {
-                event_tx.send(Event::Error(format!("{error:#}"))).await.ok();
-                return;
-            }
+            Ok(result) => result,
             Err(error) => {
-                event_tx.send(Event::Error(error.to_string())).await.ok();
+                event_tx.send(Event::Error(format!("{error:#}"))).await.ok();
                 return;
             }
         };
@@ -261,7 +258,7 @@ fn should_replace_previous(previous: &Subtitle, current: &Subtitle, enabled: boo
 
 struct ProgressIter<I> {
     inner: I,
-    event_tx: tokio::sync::mpsc::Sender<Event>,
+    event_tx: async_channel::Sender<Event>,
     count: usize,
     interval: usize,
     include_preview: bool,
@@ -280,7 +277,7 @@ impl<I: Iterator<Item = VideoFrame>> Iterator for ProgressIter<I> {
                 .then(|| mat_to_rgba(&frame.mat).ok())
                 .flatten();
             self.event_tx
-                .blocking_send(Event::Progress {
+                .send_blocking(Event::Progress {
                     timestamp: frame.timestamp,
                     preview,
                 })

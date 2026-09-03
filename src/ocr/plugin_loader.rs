@@ -1,12 +1,12 @@
+use eyre::bail;
 use eyre::Context;
 use eyre::Result;
-use eyre::bail;
 use image::DynamicImage;
 use libloading::Library;
 use serde::Deserialize;
 use serde::Serialize;
 use std::{
-    ffi::{CStr, CString, c_char},
+    ffi::{c_char, CStr, CString},
     io::Cursor,
     path::{Path, PathBuf},
     sync::{Arc, OnceLock},

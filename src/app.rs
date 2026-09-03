@@ -137,7 +137,7 @@ impl menu::action::MenuAction for MenuAction {
 }
 
 impl cosmic::Application for AppModel {
-    type Executor = cosmic::executor::multi::Executor;
+    type Executor = iced::runtime::futures::backend::native::smol::Executor;
     type Flags = ();
     type Message = Message;
 
@@ -313,9 +313,8 @@ impl cosmic::Application for AppModel {
                     1,
                     |mut emitter: futures::channel::mpsc::Sender<_>| async move {
                         let mut time = 1;
-                        let mut interval = tokio::time::interval(Duration::from_secs(1));
                         loop {
-                            interval.tick().await;
+                            smol::Timer::after(Duration::from_secs(1)).await;
                             emitter.send(Message::WatchTick(time)).await.ok();
                             time += 1;
                         }

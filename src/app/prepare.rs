@@ -393,9 +393,9 @@ fn video_frame_stream(
     iced::stream::channel(
         2,
         async move |mut tx: futures::channel::mpsc::Sender<Message>| {
-            let (btx, mut brx) = tokio::sync::mpsc::channel::<Message>(2);
+            let (btx, brx) = async_channel::bounded::<Message>(2);
 
-            tokio::task::spawn_blocking(move || {
+            smol::spawn(smol::unblock(move || {
                 let mut iter = video_player::VideoPlayerIterator::<false> {
                     inner,
                     current_generation: 0,
@@ -406,7 +406,7 @@ fn video_frame_stream(
                         Some(Ok(mat)) => match video_player::mat_to_rgba(&mat.mat) {
                             Ok(handle) => {
                                 if btx
-                                    .blocking_send(Message::VideoFrame {
+                                    .send_blocking(Message::VideoFrame {
                                         image: handle,
                                         timestamp: mat.timestamp,
                                     })
@@ -416,12 +416,12 @@ fn video_frame_stream(
                                 }
                             }
                             Err(e) => {
-                                btx.blocking_send(Message::VideoError(e.to_string())).ok();
+                                btx.send_blocking(Message::VideoError(e.to_string())).ok();
                                 break;
                             }
                         },
                         Some(Err(e)) => {
-                            btx.blocking_send(Message::VideoError(e.to_string())).ok();
+                            btx.send_blocking(Message::VideoError(e.to_string())).ok();
                             break;
                         }
                         None => break,
@@ -430,9 +430,10 @@ fn video_frame_stream(
                         std::thread::sleep(rem);
                     }
                 }
-            });
+            }))
+            .detach();
 
-            while let Some(msg) = brx.recv().await {
+            while let Ok(msg) = brx.recv().await {
                 if tx.send(msg).await.is_err() {
                     break;
                 }

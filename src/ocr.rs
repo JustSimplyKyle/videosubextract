@@ -1,6 +1,7 @@
 use cosmic::Apply;
 use eyre::Result;
 use image::DynamicImage;
+use manganis::{asset, Asset};
 use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
 
@@ -11,6 +12,13 @@ use crate::fl;
 
 static PADDLE_OCR_V6_MEDIUM: OnceLock<Result<ocr_rs::OcrEngine>> = OnceLock::new();
 static PADDLE_OCR_V5_MOBILE: OnceLock<Result<ocr_rs::OcrEngine>> = OnceLock::new();
+
+const PADDLE_OCR_V6_MEDIUM_DET: Asset = asset!("/models/PP-OCRv6_medium_det.mnn");
+const PADDLE_OCR_V6_MEDIUM_REC: Asset = asset!("/models/PP-OCRv6_medium_rec.mnn");
+const PADDLE_OCR_V6_MEDIUM_KEYS: Asset = asset!("/models/ppocr_keys_v6_medium.txt");
+const PADDLE_OCR_V5_MOBILE_DET: Asset = asset!("/models/PP-OCRv5_mobile_det.mnn");
+const PADDLE_OCR_V5_MOBILE_REC: Asset = asset!("/models/PP-OCRv5_mobile_rec.mnn");
+const PADDLE_OCR_V5_MOBILE_KEYS: Asset = asset!("/models/ppocr_keys_v5.txt");
 
 #[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
 pub enum OcrModel {
@@ -58,11 +66,17 @@ pub enum PaddleOcr {
 
 impl PaddleOcr {
     fn engine(self) -> Result<&'static ocr_rs::OcrEngine> {
-        let create_engine = |detection_model, recognition_model, charset| {
-            ocr_rs::OcrEngine::from_bytes(
-                detection_model,
-                recognition_model,
-                charset,
+        let create_engine = |detection_model: Asset, recognition_model: Asset, charset: Asset| {
+            let detection_model =
+                std::fs::read(dioxus_asset_resolver::asset_path(detection_model)?)?;
+            let recognition_model =
+                std::fs::read(dioxus_asset_resolver::asset_path(recognition_model)?)?;
+            let charset = std::fs::read(dioxus_asset_resolver::asset_path(charset)?)?;
+
+            Ok(ocr_rs::OcrEngine::from_bytes(
+                &detection_model,
+                &recognition_model,
+                &charset,
                 Some(ocr_rs::OcrEngineConfig {
                     det_options: ocr_rs::DetOptions::default(),
                     rec_options: ocr_rs::RecOptions::default(),
@@ -70,23 +84,22 @@ impl PaddleOcr {
                     backend: ocr_rs::Backend::CPU,
                     ..Default::default()
                 }),
-            )
-            .map_err(Into::into)
+            )?)
         };
 
         let engine = match self {
             Self::V6Medium => PADDLE_OCR_V6_MEDIUM.get_or_init(|| {
                 create_engine(
-                    include_bytes!("../models/PP-OCRv6_medium_det.mnn"),
-                    include_bytes!("../models/PP-OCRv6_medium_rec.mnn"),
-                    include_bytes!("../models/ppocr_keys_v6_medium.txt"),
+                    PADDLE_OCR_V6_MEDIUM_DET,
+                    PADDLE_OCR_V6_MEDIUM_REC,
+                    PADDLE_OCR_V6_MEDIUM_KEYS,
                 )
             }),
             Self::V5Mobile => PADDLE_OCR_V5_MOBILE.get_or_init(|| {
                 create_engine(
-                    include_bytes!("../models/PP-OCRv5_mobile_det.mnn"),
-                    include_bytes!("../models/PP-OCRv5_mobile_rec.mnn"),
-                    include_bytes!("../models/ppocr_keys_v5.txt"),
+                    PADDLE_OCR_V5_MOBILE_DET,
+                    PADDLE_OCR_V5_MOBILE_REC,
+                    PADDLE_OCR_V5_MOBILE_KEYS,
                 )
             }),
         };

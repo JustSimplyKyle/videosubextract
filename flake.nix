@@ -38,6 +38,14 @@
             -fuse-ld=mold \
             "$@"
         '';
+        # Cranelift writes inline assembly to sibling `*.rcgu.asm.o` files.
+        # Dioxus ThinLink otherwise ignores them and produces patches with
+        # unresolved symbols from crates such as rustix and event-listener.
+        dioxusCli = pkgs.dioxus-cli.overrideAttrs (old: {
+          patches = (old.patches or [ ]) ++ [
+            ./patches/dioxus-cli-cranelift-asm-objects.patch
+          ];
+        });
         videosubfinderHelixLanguages = pkgs.writeText "videosubfinder-languages.toml" ''
           [language-server.clangd]
           args = ["--query-driver=${pkgs.stdenv.cc}/bin/g++"]
@@ -78,7 +86,7 @@
               samply
               vulkan-loader
               tbb
-              dioxus-cli
+              dioxusCli
               linuxdeploy
             ]
             # opencv
