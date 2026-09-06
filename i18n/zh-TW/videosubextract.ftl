@@ -48,6 +48,7 @@ no-active-search = 沒有進行中的搜尋。請載入影片，並在「準備�
 post-production = 後製
 view = 預覽
 current = 目前
+subtitle-preview = 字幕預覽
 jump-to-latest = 跳至最新 ↓
 convert-to-srt = 轉換為 SRT
 merge-video = 合併影片

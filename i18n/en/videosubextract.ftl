@@ -48,6 +48,7 @@ no-active-search = No active search. Load a video and select a subtitle region o
 post-production = Post Production
 view = View
 current = Current
+subtitle-preview = Subtitle preview
 jump-to-latest = Jump to latest ↓
 convert-to-srt = Convert to SRT
 merge-video = Merge Video

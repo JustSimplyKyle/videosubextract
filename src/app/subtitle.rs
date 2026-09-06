@@ -12,8 +12,9 @@ use std::time::Duration;
 
 const JUMP_TO_END_DELAY: Duration = Duration::from_secs(3);
 
-const TOOLBAR_SIZE: f32 = 48.0;
 const RESULT_ROW_HEIGHT: f32 = 120.0;
+const RESULT_PREVIEW_WIDTH: f32 = 180.0;
+const RESULT_TIMING_WIDTH: f32 = 132.0;
 const RESULT_ROW_OVERSCAN: usize = 3;
 
 #[derive(Debug, Clone)]
@@ -62,6 +63,7 @@ pub struct Model {
     next_result_id: u64,
     result_scroll_offset: f32,
     result_viewport_height: f32,
+    zoomed_result_id: Option<u64>,
     edit_history: Vec<SubtitleEdit>,
 }
 
@@ -134,6 +136,10 @@ pub enum Message {
         id: usize,
         action: text_editor::Action,
     },
+    ZoomIntoSubtitle {
+        id: u64,
+    },
+    CloseSubtitlePreview,
     None,
 }
 
@@ -158,11 +164,8 @@ struct SubtitleTable<'a> {
 }
 
 impl<'a> SubtitleTable<'a> {
-    fn row_spacing() -> f32 {
-        f32::from(cosmic::theme::spacing().space_m)
-    }
     fn row_pitch() -> f32 {
-        RESULT_ROW_HEIGHT + Self::row_spacing()
+        RESULT_ROW_HEIGHT
     }
     fn visible_result_range(&self, result_count: usize) -> std::ops::Range<usize> {
         let first_visible =
@@ -185,64 +188,74 @@ impl<'a> SubtitleTable<'a> {
     }
 
     fn wrap_row(item: Element<'a, Message>) -> Element<'a, Message> {
-        item.apply(widget::container)
+        widget::column![item, widget::divider::horizontal::light()]
             .height(Length::Fixed(Self::row_pitch()))
-            .padding(iced::Padding::ZERO.bottom(Self::row_spacing()))
             .into()
     }
 
     fn active_subtitles(
-        results: &'a [SubtitleResult],
+        &self,
         active_range: std::ops::Range<usize>,
     ) -> impl Iterator<Item = (VirtualRowKey, Element<'a, Message>)> {
-        results[active_range.clone()]
+        self.results[active_range.clone()]
             .iter()
             .enumerate()
             .map(move |(relative_id, result)| {
                 let id = active_range.start + relative_id;
                 (
                     VirtualRowKey::Row { id },
-                    Self::subtitle_row(id, result).apply(Self::wrap_row),
+                    self.subtitle_row(id, result).apply(Self::wrap_row),
                 )
             })
     }
     fn timestamp(result: &SubtitleResult) -> Element<'_, Message> {
-        let t_start = result.subtitle.start_timestamp.as_secs_f64();
-        let t_end = result.subtitle.end_timestamp.as_secs_f64();
-        widget::text(format!("{t_start:.1}s – {t_end:.1}s")).into()
+        fn precise_timestamp(timestamp: Duration) -> String {
+            let total_seconds = timestamp.as_secs();
+            let hours = total_seconds / 3_600;
+            let minutes = (total_seconds % 3_600) / 60;
+            let seconds = total_seconds % 60;
+            let milliseconds = timestamp.subsec_millis();
+
+            format!("{hours:02}:{minutes:02}:{seconds:02}.{milliseconds:03}")
+        }
+
+        widget::column![
+            widget::text::monotext(precise_timestamp(result.subtitle.start_timestamp)),
+            widget::text::caption("↓"),
+            widget::text::monotext(precise_timestamp(result.subtitle.end_timestamp)),
+        ]
+        .align_x(Alignment::Center)
+        .width(Length::Fixed(RESULT_TIMING_WIDTH))
+        .into()
     }
-    fn subtitle_row(id: usize, result: &'a SubtitleResult) -> Element<'a, Message> {
+    fn subtitle_row(&self, id: usize, result: &'a SubtitleResult) -> Element<'a, Message> {
         let toolbar = Self::toolbar(id);
-        let space_s = cosmic::theme::spacing().space_s;
+        let spacing = cosmic::theme::spacing();
 
         widget::row!(
-            toolbar,
             widget::image(result.preview.clone())
                 .content_fit(iced::ContentFit::Contain)
-                .width(Length::FillPortion(65))
-                .height(Length::Fill),
-            widget::column![
-                Self::timestamp(result),
-                Self::text_editor(id, &result.editor_content)
-            ]
-            .spacing(space_s / 2)
-            .width(Length::FillPortion(35))
-            .height(Length::Fill)
-            .align_x(Alignment::Start),
+                .width(Length::Fixed(RESULT_PREVIEW_WIDTH))
+                .height(Length::Fill)
+                .apply(widget::mouse_area)
+                .on_press(Message::ZoomIntoSubtitle { id: result.id })
+                .interaction(iced::mouse::Interaction::Pointer),
+            Self::timestamp(result),
+            Self::text_editor(id, &result.editor_content),
+            toolbar,
         )
-        .spacing(space_s)
-        .padding([0, 40])
-        .height(Length::Fixed(RESULT_ROW_HEIGHT))
+        .spacing(spacing.space_m)
+        .padding([spacing.space_s, spacing.space_m])
+        .height(Length::Fill)
         .align_y(Alignment::Center)
         .into()
     }
     fn toolbar(id: usize) -> Element<'static, Message> {
-        widget::column::with_capacity(2)
-            .push(Self::delete(id))
-            .width(TOOLBAR_SIZE)
-            .spacing(cosmic::theme::spacing().space_s)
-            .align_x(Alignment::Center)
+        widget::row::with_capacity(2)
             .push_maybe((id != 0).then_some(Self::merge_with_previous(id)))
+            .push(Self::delete(id))
+            .spacing(cosmic::theme::spacing().space_s)
+            .align_y(Alignment::Center)
             .into()
     }
     fn text_editor(id: usize, content: &'a widget::text_editor::Content) -> Element<'a, Message> {
@@ -272,7 +285,7 @@ impl<'a> SubtitleTable<'a> {
     }
     fn view(self) -> Element<'a, Message> {
         let visible_range = self.visible_result_range(self.results.len());
-        let active_subtitles = Self::active_subtitles(self.results, visible_range.clone());
+        let active_subtitles = self.active_subtitles(visible_range.clone());
 
         let top_spacer = Self::spacer(visible_range.start);
         let bottom_spacer = Self::spacer(self.results.len().saturating_sub(visible_range.end));
@@ -283,8 +296,6 @@ impl<'a> SubtitleTable<'a> {
             .extend(active_subtitles)
             .push(VirtualRowKey::BottomSpacer, bottom_spacer)
             .width(Length::Fill)
-            // .apply(widget::container)
-            // .class(theme::Container::List)
             .into()
     }
 }
@@ -412,7 +423,7 @@ impl<'a> SubtitleView<'a> {
                     .padding(cosmic::theme::spacing().space_m),
             );
 
-        SubtitleTable {
+        let results = SubtitleTable {
             scroll_offset: self.model.result_scroll_offset,
             viewport_height: self.model.result_viewport_height,
             results: &self.model.results,
@@ -424,14 +435,52 @@ impl<'a> SubtitleView<'a> {
         .apply(widget::scrollable)
         .on_scroll(Self::scrolled)
         .id(scrollable_id)
-        .apply(Element::from)
-        .apply(|results| iced::widget::stack![results, jump_to_end].into())
+        .apply(Element::from);
+
+        iced::widget::stack![results, jump_to_end]
+            .apply(widget::container)
+            .class(theme::Container::List)
+            .height(Length::Fill)
+            .into()
+    }
+
+    fn zoomed_preview(result: &'a SubtitleResult) -> Element<'a, Message> {
+        widget::dialog()
+            .title(fl!("subtitle-preview"))
+            .control(
+                widget::image(result.preview.clone())
+                    .expand(true)
+                    .content_fit(iced::ContentFit::Contain),
+            )
+            .primary_action(
+                widget::button::icon(icon::from_name("window-close-symbolic"))
+                    .class(theme::Button::Icon)
+                    .on_press(Message::CloseSubtitlePreview),
+            )
+            .width(Length::Fill)
+            .max_width(1000.0)
+            .apply(widget::container)
+            .center(Length::Fill)
+            .style(|_| widget::container::background(iced::Color::from_rgba(0., 0., 0., 0.45)))
+            .into()
     }
 
     fn view(&self) -> Element<'a, Message> {
-        widget::column![self.header(), self.controls(), self.results()]
-            .spacing(cosmic::theme::spacing().space_s)
-            .into()
+        let content: Element<'a, Message> =
+            widget::column![self.header(), self.controls(), self.results()]
+                .spacing(cosmic::theme::spacing().space_s)
+                .into();
+
+        let zoomed_result = self
+            .model
+            .zoomed_result_id
+            .and_then(|id| self.model.results.iter().find(|result| result.id == id));
+
+        if let Some(result) = zoomed_result {
+            iced::widget::stack![content, Self::zoomed_preview(result)].into()
+        } else {
+            content
+        }
     }
 }
 
@@ -458,6 +507,7 @@ impl Model {
         self.edit_history.clear();
         self.progress_bar.set_elapsed(Duration::ZERO);
         self.scrollbar_jump_status = ScrollbarJumpStatus::NoShow;
+        self.zoomed_result_id = None;
         self.next_result_id = 0;
         self.result_scroll_offset = 0.0;
         self.result_viewport_height = 0.0;
@@ -588,6 +638,14 @@ impl Model {
                     result.editor_content.perform(action);
                     result.subtitle.text = result.editor_content.text();
                 }
+                Event::None
+            }
+            Message::ZoomIntoSubtitle { id } => {
+                self.zoomed_result_id = Some(id);
+                Event::None
+            }
+            Message::CloseSubtitlePreview => {
+                self.zoomed_result_id = None;
                 Event::None
             }
             Message::None => Event::None,
