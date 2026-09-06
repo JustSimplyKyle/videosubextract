@@ -517,6 +517,8 @@ impl cosmic::Application for AppModel {
                 match event {
                     subtitle::Event::GoToPostProduction => {
                         self.post_production.feedback = None; // clear UI feedback internally
+                        self.post_production
+                            .set_video_path(self.prepare.video_path.as_ref());
                         self.nav.activate(self.post_production_page_id);
                         self.update_title()
                     }
@@ -527,12 +529,17 @@ impl cosmic::Application for AppModel {
             }
             Message::PostProduction(msg) => match self.post_production.update(
                 msg,
-                &mut self.subtitle.results,
+                &mut self.subtitle,
+                &self.config,
                 self.prepare.video_path.as_ref(),
             ) {
                 post_production::Event::Run(task) => {
                     task.map(Message::PostProduction).map(Into::into)
                 }
+                post_production::Event::Toast(message) => self
+                    .toasts
+                    .push(widget::Toast::new(message))
+                    .map(Into::into),
                 post_production::Event::Error(error) => log!(error),
             },
             Message::CloseToast(id) => {
@@ -572,7 +579,7 @@ impl AppModel {
             }
             Page::PostProduction => self
                 .post_production
-                .view(self.subtitle.search_active)
+                .view(&self.subtitle, self.prepare.video_path.as_ref())
                 .map(Message::PostProduction),
         };
 

@@ -12,21 +12,41 @@ use std::time::Duration;
 
 const JUMP_TO_END_DELAY: Duration = Duration::from_secs(3);
 
-const RESULT_ROW_HEIGHT: f32 = 120.0;
-const RESULT_PREVIEW_WIDTH: f32 = 180.0;
+const RESULT_ROW_HEIGHT: f32 = 160.0;
+const RESULT_PREVIEW_WIDTH: f32 = 320.0;
 const RESULT_TIMING_WIDTH: f32 = 132.0;
 const RESULT_ROW_OVERSCAN: usize = 3;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SubtitleId(u64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SubtitleIndex(usize);
+
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct SubtitleTableConfig {
+    /// Use a compact, one-based cue number instead of the extracted frame preview.
+    pub show_id_instead_of_preview: bool,
+    /// Put the cue's time range above its text to preserve horizontal space.
+    pub timestamp_above_text: bool,
+    /// Render subtitle text without editing controls.
+    pub read_only: bool,
+    /// Apply this OpenCC configuration to text in read-only mode.
+    pub opencc_config: Option<&'static str>,
+    /// Retain line breaks when rendering read-only text.
+    pub preserve_line_breaks: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct SubtitleResult {
-    id: u64,
+    id: SubtitleId,
     pub subtitle: Subtitle,
     pub preview: widget::image::Handle,
     editor_content: text_editor::Content,
 }
 
 impl SubtitleResult {
-    fn new(id: u64, subtitle: Subtitle, preview: widget::image::Handle) -> Self {
+    fn new(id: SubtitleId, subtitle: Subtitle, preview: widget::image::Handle) -> Self {
         let editor_content = text_editor::Content::with_text(&subtitle.text);
 
         Self {
@@ -63,7 +83,7 @@ pub struct Model {
     next_result_id: u64,
     result_scroll_offset: f32,
     result_viewport_height: f32,
-    zoomed_result_id: Option<u64>,
+    zoomed_result_id: Option<SubtitleId>,
     edit_history: Vec<SubtitleEdit>,
 }
 
@@ -117,8 +137,8 @@ pub enum Message {
         #[debug("{}x{}", preview.width(), preview.height())]
         preview: RgbaImage,
     },
-    Delete(usize),
-    MergeWithPrevious(usize),
+    Delete(SubtitleId),
+    MergeWithPrevious(SubtitleId),
     UndoEdit,
     Scrolled {
         at_end: bool,
@@ -133,11 +153,11 @@ pub enum Message {
     SearchError(String),
     GoToPostProduction,
     SubtitleContentEdit {
-        id: usize,
+        id: SubtitleId,
         action: text_editor::Action,
     },
     ZoomIntoSubtitle {
-        id: u64,
+        id: SubtitleId,
     },
     CloseSubtitlePreview,
     None,
@@ -153,7 +173,7 @@ pub enum Event {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum VirtualRowKey {
     TopSpacer,
-    Row { id: usize },
+    Row { id: SubtitleId },
     BottomSpacer,
 }
 
@@ -161,6 +181,8 @@ struct SubtitleTable<'a> {
     scroll_offset: f32,
     viewport_height: f32,
     results: &'a [SubtitleResult],
+    config: SubtitleTableConfig,
+    converter: Option<opencc::OpenCC>,
 }
 
 impl<'a> SubtitleTable<'a> {
@@ -197,16 +219,15 @@ impl<'a> SubtitleTable<'a> {
         &self,
         active_range: std::ops::Range<usize>,
     ) -> impl Iterator<Item = (VirtualRowKey, Element<'a, Message>)> {
-        self.results[active_range.clone()]
-            .iter()
-            .enumerate()
-            .map(move |(relative_id, result)| {
-                let id = active_range.start + relative_id;
+        self.results[active_range.clone()].iter().enumerate().map(
+            move |(relative_index, result)| {
+                let index = SubtitleIndex(active_range.start + relative_index);
                 (
-                    VirtualRowKey::Row { id },
-                    self.subtitle_row(id, result).apply(Self::wrap_row),
+                    VirtualRowKey::Row { id: result.id },
+                    self.subtitle_row(index, result).apply(Self::wrap_row),
                 )
-            })
+            },
+        )
     }
     fn timestamp(result: &SubtitleResult) -> Element<'_, Message> {
         fn precise_timestamp(timestamp: Duration) -> String {
@@ -228,37 +249,110 @@ impl<'a> SubtitleTable<'a> {
         .width(Length::Fixed(RESULT_TIMING_WIDTH))
         .into()
     }
-    fn subtitle_row(&self, id: usize, result: &'a SubtitleResult) -> Element<'a, Message> {
-        let toolbar = Self::toolbar(id);
+    fn timestamp_range(result: &SubtitleResult) -> Element<'_, Message> {
+        fn precise_timestamp(timestamp: Duration) -> String {
+            let total_seconds = timestamp.as_secs();
+            let hours = total_seconds / 3_600;
+            let minutes = (total_seconds % 3_600) / 60;
+            let seconds = total_seconds % 60;
+            let milliseconds = timestamp.subsec_millis();
+
+            format!("{hours:02}:{minutes:02}:{seconds:02}.{milliseconds:03}")
+        }
+
+        widget::text::monotext(format!(
+            "{} → {}",
+            precise_timestamp(result.subtitle.start_timestamp),
+            precise_timestamp(result.subtitle.end_timestamp)
+        ))
+        .into()
+    }
+    fn subtitle_row(
+        &self,
+        index: SubtitleIndex,
+        result: &'a SubtitleResult,
+    ) -> Element<'a, Message> {
         let spacing = cosmic::theme::spacing();
 
-        widget::row!(
+        let leading: Element<'a, Message> = if self.config.show_id_instead_of_preview {
+            widget::text::title3((index.0 + 1).to_string())
+                .apply(widget::container)
+                .width(Length::Fixed(24.0))
+                .center_y(Length::Fill)
+                .class(theme::Container::Card)
+                .into()
+        } else {
             widget::image(result.preview.clone())
                 .content_fit(iced::ContentFit::Contain)
                 .width(Length::Fixed(RESULT_PREVIEW_WIDTH))
                 .height(Length::Fill)
                 .apply(widget::mouse_area)
                 .on_press(Message::ZoomIntoSubtitle { id: result.id })
-                .interaction(iced::mouse::Interaction::Pointer),
-            Self::timestamp(result),
-            Self::text_editor(id, &result.editor_content),
-            toolbar,
-        )
-        .spacing(spacing.space_m)
-        .padding([spacing.space_s, spacing.space_m])
-        .height(Length::Fill)
-        .align_y(Alignment::Center)
-        .into()
+                .interaction(iced::mouse::Interaction::Pointer)
+                .into()
+        };
+
+        let subtitle_text: Element<'a, Message> = if self.config.read_only {
+            let mut text = self.converter.as_ref().map_or_else(
+                || result.subtitle.text.clone(),
+                |converter| converter.convert(&result.subtitle.text),
+            );
+            if !self.config.preserve_line_breaks {
+                text = text.lines().collect::<Vec<_>>().join(" ");
+            }
+            widget::text(text)
+                .selectable()
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_y(iced::alignment::Vertical::Center)
+                .apply(widget::scrollable)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .apply(widget::container)
+                .class(theme::Container::Dropdown)
+                .padding([spacing.space_s, spacing.space_m])
+                .center_y(Length::Fill)
+                .height(Length::Fill)
+                .into()
+        } else {
+            Self::text_editor(result.id, &result.editor_content)
+        };
+
+        let timing_and_text: Element<'a, Message> = if self.config.timestamp_above_text {
+            widget::column![Self::timestamp_range(result), subtitle_text]
+                .spacing(spacing.space_xxs)
+                .height(Length::Fill)
+                .width(Length::Fill)
+                .into()
+        } else {
+            widget::row![Self::timestamp(result), subtitle_text]
+                .spacing(spacing.space_m)
+                .height(Length::Fill)
+                .width(Length::Fill)
+                .align_y(Alignment::Center)
+                .into()
+        };
+
+        widget::row!(leading, timing_and_text)
+            .push_maybe((!self.config.read_only).then(|| Self::toolbar(index, result.id)))
+            .spacing(spacing.space_m)
+            .padding([spacing.space_s, spacing.space_m])
+            .height(Length::Fill)
+            .align_y(Alignment::Center)
+            .into()
     }
-    fn toolbar(id: usize) -> Element<'static, Message> {
+    fn toolbar(index: SubtitleIndex, id: SubtitleId) -> Element<'static, Message> {
         widget::row::with_capacity(2)
-            .push_maybe((id != 0).then_some(Self::merge_with_previous(id)))
+            .push_maybe((index.0 != 0).then_some(Self::merge_with_previous(id)))
             .push(Self::delete(id))
             .spacing(cosmic::theme::spacing().space_s)
             .align_y(Alignment::Center)
             .into()
     }
-    fn text_editor(id: usize, content: &'a widget::text_editor::Content) -> Element<'a, Message> {
+    fn text_editor(
+        id: SubtitleId,
+        content: &'a widget::text_editor::Content,
+    ) -> Element<'a, Message> {
         widget::text_editor::text_editor(content)
             .on_action(move |action| Message::SubtitleContentEdit { id, action })
             .height(Length::Fill)
@@ -271,13 +365,13 @@ impl<'a> SubtitleTable<'a> {
             })
             .apply(Element::from)
     }
-    fn delete(id: usize) -> Element<'static, Message> {
+    fn delete(id: SubtitleId) -> Element<'static, Message> {
         widget::button::icon(widget::icon::from_name("edit-delete-symbolic"))
             .on_press(Message::Delete(id))
             .class(cosmic::theme::Button::Destructive)
             .into()
     }
-    fn merge_with_previous(id: usize) -> Element<'static, Message> {
+    fn merge_with_previous(id: SubtitleId) -> Element<'static, Message> {
         widget::button::icon(widget::icon::from_name("go-up-symbolic"))
             .on_press(Message::MergeWithPrevious(id))
             .class(cosmic::theme::Button::Icon)
@@ -411,37 +505,11 @@ impl<'a> SubtitleView<'a> {
     }
 
     fn results(&self) -> Element<'a, Message> {
-        let scrollable_id = iced::id::Id::new("scrollable");
-        let jump_to_end = (self.model.scrollbar_jump_status == ScrollbarJumpStatus::DisplayButton)
-            .then_some(
-                widget::button::text(fl!("jump-to-latest"))
-                    .class(cosmic::theme::Button::Suggested)
-                    .on_press(Message::JumpToEnd {
-                        id: scrollable_id.clone(),
-                    })
-                    .apply(iced::widget::bottom_right)
-                    .padding(cosmic::theme::spacing().space_m),
-            );
-
-        let results = SubtitleTable {
-            scroll_offset: self.model.result_scroll_offset,
-            viewport_height: self.model.result_viewport_height,
-            results: &self.model.results,
-        }
-        .view()
-        .apply(widget::container)
-        .padding(iced::Padding::ZERO.right(20))
-        .height(Length::Fill)
-        .apply(widget::scrollable)
-        .on_scroll(Self::scrolled)
-        .id(scrollable_id)
-        .apply(Element::from);
-
-        iced::widget::stack![results, jump_to_end]
-            .apply(widget::container)
-            .class(theme::Container::List)
-            .height(Length::Fill)
-            .into()
+        let config = SubtitleTableConfig {
+            timestamp_above_text: true,
+            ..Default::default()
+        };
+        self.model.results_table(config, true)
     }
 
     fn zoomed_preview(result: &'a SubtitleResult) -> Element<'a, Message> {
@@ -485,6 +553,53 @@ impl<'a> SubtitleView<'a> {
 }
 
 impl Model {
+    fn result_index(&self, id: SubtitleId) -> Option<SubtitleIndex> {
+        self.results
+            .iter()
+            .position(|result| result.id == id)
+            .map(SubtitleIndex)
+    }
+
+    pub(crate) fn results_table(
+        &self,
+        config: SubtitleTableConfig,
+        show_jump_to_end: bool,
+    ) -> Element<'_, Message> {
+        let scrollable_id = iced::id::Id::new("scrollable");
+        let jump_to_end = (show_jump_to_end
+            && self.scrollbar_jump_status == ScrollbarJumpStatus::DisplayButton)
+            .then_some(
+                widget::button::text(fl!("jump-to-latest"))
+                    .class(cosmic::theme::Button::Suggested)
+                    .on_press(Message::JumpToEnd {
+                        id: scrollable_id.clone(),
+                    })
+                    .apply(iced::widget::bottom_right)
+                    .padding(cosmic::theme::spacing().space_m),
+            );
+
+        let results = SubtitleTable {
+            scroll_offset: self.result_scroll_offset,
+            viewport_height: self.result_viewport_height,
+            results: &self.results,
+            config,
+            converter: config.opencc_config.map(opencc::OpenCC::new),
+        }
+        .view()
+        .apply(widget::container)
+        .padding(iced::Padding::ZERO.right(20))
+        .height(Length::Fill)
+        .apply(widget::scrollable)
+        .on_scroll(SubtitleView::scrolled)
+        .id(scrollable_id)
+        .apply(Element::from);
+
+        iced::widget::stack![results, jump_to_end]
+            .apply(widget::container)
+            .class(theme::Container::List)
+            .height(Length::Fill)
+            .into()
+    }
     pub fn start_search(
         &mut self,
         path: std::path::PathBuf,
@@ -540,7 +655,7 @@ impl Model {
                     *previous = SubtitleResult::new(previous.id, subtitle, preview);
                     return Event::None;
                 }
-                let id = self.next_result_id;
+                let id = SubtitleId(self.next_result_id);
                 self.next_result_id = self.next_result_id.wrapping_add(1);
                 self.results
                     .push(SubtitleResult::new(id, subtitle, preview));
@@ -587,23 +702,25 @@ impl Model {
                 }
                 Event::None
             }
-            Message::Delete(x) => {
-                if x < self.results.len() {
-                    let result = self.results.remove(x);
+            Message::Delete(id) => {
+                if let Some(SubtitleIndex(index)) = self.result_index(id) {
+                    let result = self.results.remove(index);
                     self.edit_history
-                        .push(SubtitleEdit::Delete { index: x, result });
+                        .push(SubtitleEdit::Delete { index, result });
                 }
                 Event::None
             }
-            Message::MergeWithPrevious(x) => {
-                if x > 0 && x < self.results.len() {
-                    let result = self.results.remove(x);
+            Message::MergeWithPrevious(id) => {
+                if let Some(SubtitleIndex(index)) = self.result_index(id)
+                    && index > 0
+                {
+                    let result = self.results.remove(index);
                     let previous_end_timestamp = std::mem::replace(
-                        &mut self.results[x - 1].subtitle.end_timestamp,
+                        &mut self.results[index - 1].subtitle.end_timestamp,
                         result.subtitle.end_timestamp,
                     );
                     self.edit_history.push(SubtitleEdit::MergeWithPrevious {
-                        index: x,
+                        index,
                         previous_end_timestamp,
                         result,
                     });
@@ -634,7 +751,7 @@ impl Model {
                 Event::None
             }
             Message::SubtitleContentEdit { id, action } => {
-                if let Some(result) = self.results.get_mut(id) {
+                if let Some(result) = self.results.iter_mut().find(|result| result.id == id) {
                     result.editor_content.perform(action);
                     result.subtitle.text = result.editor_content.text();
                 }
@@ -829,5 +946,118 @@ mod tests {
         model.update(detection(2, 3, "same text", false), &config);
 
         assert_eq!(model.results.len(), 2);
+    }
+
+    fn model_with_three_results() -> (Model, Config, [SubtitleId; 3]) {
+        let mut model = Model::default();
+        let config = Config::default();
+
+        model.update(detection(0, 1, "first", false), &config);
+        model.update(detection(2, 3, "second", false), &config);
+        model.update(detection(4, 5, "third", false), &config);
+
+        let ids = [
+            model.results[0].id,
+            model.results[1].id,
+            model.results[2].id,
+        ];
+        (model, config, ids)
+    }
+
+    #[test]
+    fn deletion_resolves_stable_id_after_indices_shift() {
+        let (mut model, config, [first_id, second_id, third_id]) = model_with_three_results();
+
+        model.update(Message::Delete(first_id), &config);
+        model.update(Message::Delete(third_id), &config);
+
+        assert_eq!(model.results.len(), 1);
+        assert_eq!(model.results[0].id, second_id);
+        assert_eq!(model.results[0].subtitle.text, "second");
+    }
+
+    #[test]
+    fn edit_targets_stable_id_after_indices_shift() {
+        let (mut model, config, [first_id, second_id, third_id]) = model_with_three_results();
+
+        model.update(Message::Delete(first_id), &config);
+        model.update(
+            Message::SubtitleContentEdit {
+                id: second_id,
+                action: text_editor::Action::Edit(text_editor::Edit::Insert('!')),
+            },
+            &config,
+        );
+
+        let second = model
+            .results
+            .iter()
+            .find(|result| result.id == second_id)
+            .expect("the edited subtitle remains present");
+        let third = model
+            .results
+            .iter()
+            .find(|result| result.id == third_id)
+            .expect("the other subtitle remains present");
+        assert!(second.subtitle.text.contains('!'));
+        assert_eq!(third.subtitle.text, "third");
+    }
+
+    #[test]
+    fn stale_edit_event_does_not_edit_replacement_at_same_index() {
+        let (mut model, config, [_first_id, second_id, third_id]) = model_with_three_results();
+
+        model.update(Message::Delete(second_id), &config);
+        model.update(
+            Message::SubtitleContentEdit {
+                id: second_id,
+                action: text_editor::Action::Edit(text_editor::Edit::Insert('!')),
+            },
+            &config,
+        );
+
+        let third = model
+            .results
+            .iter()
+            .find(|result| result.id == third_id)
+            .expect("the following subtitle remains present");
+        assert_eq!(third.subtitle.text, "third");
+        assert!(!model.results.iter().any(|result| result.id == second_id));
+    }
+
+    #[test]
+    fn merge_resolves_stable_id_after_indices_shift() {
+        let (mut model, config, [first_id, second_id, third_id]) = model_with_three_results();
+
+        model.update(Message::Delete(first_id), &config);
+        model.update(Message::MergeWithPrevious(third_id), &config);
+
+        assert_eq!(model.results.len(), 1);
+        assert_eq!(model.results[0].id, second_id);
+        assert_eq!(
+            model.results[0].subtitle.end_timestamp,
+            Duration::from_secs(5)
+        );
+    }
+
+    #[test]
+    fn undo_merge_restores_stable_identity_and_order() {
+        let (mut model, config, [first_id, second_id, third_id]) = model_with_three_results();
+
+        model.update(Message::MergeWithPrevious(third_id), &config);
+        model.update(Message::UndoEdit, &config);
+
+        assert_eq!(
+            model
+                .results
+                .iter()
+                .map(|result| result.id)
+                .collect::<Vec<_>>(),
+            vec![first_id, second_id, third_id]
+        );
+        assert_eq!(
+            model.results[1].subtitle.end_timestamp,
+            Duration::from_secs(3)
+        );
     }
 }
