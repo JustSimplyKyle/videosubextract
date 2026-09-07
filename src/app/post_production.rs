@@ -4,16 +4,10 @@ use cosmic::{
     Apply, Element,
     widget::{self, segmented_button::SingleSelectModel},
 };
-use ffmpeg_sidecar::command::FfmpegCommand;
-use iced::{Alignment, Length, Task};
+use iced::futures::SinkExt;
+use iced::{Alignment, Length, Subscription, Task};
 use rfd::AsyncFileDialog;
-use std::{fmt::Write, path::PathBuf, time::Duration};
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Tab {
-    Export,
-    Burn,
-}
+use std::{fmt::Write, path::PathBuf, sync::Arc, time::Duration};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PreviewMode {
@@ -32,7 +26,7 @@ enum ExportFormat {
 impl ExportFormat {
     const ALL: [Self; 4] = [Self::Srt, Self::Vtt, Self::Ass, Self::Txt];
 
-    fn extension(self) -> &'static str {
+    const fn extension(self) -> &'static str {
         match self {
             Self::Srt => "srt",
             Self::Vtt => "vtt",
@@ -51,30 +45,34 @@ const OPENCC_MODES: [(&str, &str); 6] = [
     ("hk2s.json", "hk2s — Hong Kong → Simplified"),
 ];
 
+#[derive(Clone, Debug)]
+struct ConversionStream {
+    generation: u64,
+    config: Option<&'static str>,
+    preserve_line_breaks: bool,
+    texts: Arc<[String]>,
+}
+
+impl std::hash::Hash for ConversionStream {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.generation.hash(state);
+    }
+}
+
 pub struct Model {
-    pub tabs: SingleSelectModel,
     formats: SingleSelectModel,
     preview_modes: SingleSelectModel,
     filename: String,
     opencc_enabled: bool,
     opencc_mode: usize,
     preserve_line_breaks: bool,
-    pub feedback: Option<String>,
+    preview: subtitle::Model,
+    conversion_generation: u64,
+    conversion_texts: Arc<[String]>,
 }
 
 impl Default for Model {
     fn default() -> Self {
-        let mut tabs = SingleSelectModel::default();
-        let export_tab = tabs
-            .insert()
-            .text(fl!("export-subtitles"))
-            .data::<Tab>(Tab::Export)
-            .id();
-        tabs.insert()
-            .text(fl!("burn-into-video"))
-            .data::<Tab>(Tab::Burn);
-        tabs.activate(export_tab);
-
         let mut formats = SingleSelectModel::default();
         let mut first = None;
         for format in ExportFormat::ALL {
@@ -101,21 +99,21 @@ impl Default for Model {
         preview_modes.activate(original);
 
         Self {
-            tabs,
             formats,
             preview_modes,
             filename: "subtitles".into(),
             opencc_enabled: false,
             opencc_mode: 0,
             preserve_line_breaks: true,
-            feedback: None,
+            preview: subtitle::Model::default(),
+            conversion_generation: 0,
+            conversion_texts: Arc::default(),
         }
     }
 }
 
 #[derive(Debug, Clone)]
 pub enum Message {
-    SelectTab(widget::segmented_button::Entity),
     SelectFormat(widget::segmented_button::Entity),
     SelectPreviewMode(widget::segmented_button::Entity),
     FilenameChanged(String),
@@ -123,9 +121,17 @@ pub enum Message {
     SelectOpenCcMode(usize),
     TogglePreserveLineBreaks(bool),
     Export,
-    MergeWithVideo,
     Subtitle(subtitle::Message),
-    MuxFinished(Result<String, String>),
+    Request,
+    Transformed {
+        generation: u64,
+        index: usize,
+        text: Option<String>,
+    },
+    TransformationError {
+        generation: u64,
+        error: String,
+    },
     ExportSaved(Result<Option<PathBuf>, String>),
 }
 
@@ -136,21 +142,28 @@ pub enum Event {
 }
 
 impl Model {
-    pub fn set_video_path(&mut self, path: Option<&PathBuf>) {
+    pub fn sync(
+        &mut self,
+        path: Option<&PathBuf>,
+        results: &[subtitle::SubtitleResult],
+        config: &Config,
+    ) {
         if let Some(stem) = path.and_then(|path| path.file_stem()) {
             self.filename = stem.to_string_lossy().into_owned();
         }
+        self.preview.sync_read_only_results(results);
+        self.conversion_texts = self
+            .preview
+            .results
+            .iter()
+            .map(|result| result.original_text().to_owned())
+            .collect::<Vec<_>>()
+            .into();
+        let _ = self.update(Message::Request, config);
     }
 
     pub fn refresh_language(&mut self) {
-        let tabs: Vec<_> = self.tabs.iter().collect();
-        if let Some(id) = tabs.first() {
-            self.tabs.text_set(*id, fl!("export-subtitles"));
-        }
-        if let Some(id) = tabs.get(1) {
-            self.tabs.text_set(*id, fl!("burn-into-video"));
-        }
-        let preview_modes: Vec<_> = self.preview_modes.iter().collect();
+        let preview_modes = self.preview_modes.iter().collect::<Vec<_>>();
         if let Some(id) = preview_modes.first() {
             self.preview_modes.text_set(*id, fl!("original"));
         }
@@ -166,31 +179,6 @@ impl Model {
             .unwrap_or(ExportFormat::Srt)
     }
 
-    fn converted_results(
-        &self,
-        results: &[subtitle::SubtitleResult],
-    ) -> Vec<subtitle::SubtitleResult> {
-        let converter = self
-            .opencc_enabled
-            .then(|| opencc::OpenCC::new(OPENCC_MODES[self.opencc_mode].0));
-
-        results
-            .iter()
-            .cloned()
-            .map(|mut result| {
-                let mut text = converter.as_ref().map_or_else(
-                    || result.subtitle.text.clone(),
-                    |cc| cc.convert(&result.subtitle.text),
-                );
-                if !self.preserve_line_breaks {
-                    text = text.lines().collect::<Vec<_>>().join(" ");
-                }
-                result.set_text(text);
-                result
-            })
-            .collect()
-    }
-
     fn timestamp(duration: Duration, separator: char) -> String {
         let total_seconds = duration.as_secs();
         format!(
@@ -203,18 +191,17 @@ impl Model {
     }
 
     fn export_text(&self, results: &[subtitle::SubtitleResult]) -> String {
-        let results = self.converted_results(results);
         match self.selected_format() {
-            ExportFormat::Srt => subtitle::to_srt(&results),
+            ExportFormat::Srt => subtitle::to_srt(results),
             ExportFormat::Vtt => {
                 let mut output = String::from("WEBVTT\n\n");
-                for result in &results {
+                for result in results {
                     writeln!(
                         output,
                         "{} --> {}\n{}\n",
                         Self::timestamp(result.subtitle.start_timestamp, '.'),
                         Self::timestamp(result.subtitle.end_timestamp, '.'),
-                        result.subtitle.text
+                        result.text_for_display(true)
                     )
                     .ok();
                 }
@@ -224,7 +211,7 @@ impl Model {
                 let mut output = String::from(
                     "[Script Info]\nScriptType: v4.00+\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\nStyle: Default,Arial,24,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,2,0,2,10,10,10,1\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n",
                 );
-                for result in &results {
+                for result in results {
                     let start = Self::timestamp(result.subtitle.start_timestamp, '.');
                     let end = Self::timestamp(result.subtitle.end_timestamp, '.');
                     writeln!(
@@ -232,7 +219,7 @@ impl Model {
                         "Dialogue: 0,{}, {},Default,,0,0,0,,{}",
                         start.trim_start_matches('0'),
                         end.trim_start_matches('0'),
-                        result.subtitle.text.replace('\n', "\\N")
+                        result.text_for_display(true).replace('\n', "\\N")
                     )
                     .ok();
                 }
@@ -240,25 +227,14 @@ impl Model {
             }
             ExportFormat::Txt => results
                 .iter()
-                .map(|result| result.subtitle.text.as_str())
+                .map(|result| result.text_for_display(true))
                 .collect::<Vec<_>>()
                 .join("\n\n"),
         }
     }
 
-    pub fn update(
-        &mut self,
-        message: Message,
-        subtitles: &mut subtitle::Model,
-        config: &Config,
-        video_path: Option<&PathBuf>,
-    ) -> Event {
+    pub fn update(&mut self, message: Message, config: &Config) -> Event {
         match message {
-            Message::SelectTab(id) => {
-                self.tabs.activate(id);
-                self.feedback = None;
-                Event::Run(Task::none())
-            }
             Message::SelectFormat(id) => {
                 self.formats.activate(id);
                 Event::Run(Task::none())
@@ -273,26 +249,48 @@ impl Model {
             }
             Message::ToggleOpenCc(enabled) => {
                 self.opencc_enabled = enabled;
-                Event::Run(Task::none())
+                self.update(Message::Request, config)
             }
             Message::SelectOpenCcMode(mode) => {
                 self.opencc_mode = mode.min(OPENCC_MODES.len() - 1);
-                Event::Run(Task::none())
+                self.update(Message::Request, config)
             }
             Message::TogglePreserveLineBreaks(preserve) => {
                 self.preserve_line_breaks = preserve;
-                Event::Run(Task::none())
+                self.update(Message::Request, config)
             }
-            Message::Subtitle(message) => match subtitles.update(message, config) {
+            Message::Subtitle(message) => match self.preview.update(message, config) {
                 subtitle::Event::Run(task) => Event::Run(task.map(Message::Subtitle)),
                 subtitle::Event::Error(error) => Event::Error(error),
                 subtitle::Event::GoToPostProduction | subtitle::Event::None => {
                     Event::Run(Task::none())
                 }
+                subtitle::Event::SyncWithPostProduction => Event::Run(Task::none()),
             },
+            Message::Request => {
+                self.conversion_generation = self.conversion_generation.wrapping_add(1);
+                self.preview.clear_transformed_text();
+                Event::Run(Task::none())
+            }
+            Message::Transformed {
+                generation,
+                index,
+                text,
+            } => {
+                if generation == self.conversion_generation {
+                    self.preview.set_transformed_text(index, text);
+                }
+                Event::Run(Task::none())
+            }
+            Message::TransformationError { generation, error } => {
+                if generation == self.conversion_generation {
+                    Event::Error(eyre::eyre!(error))
+                } else {
+                    Event::Run(Task::none())
+                }
+            }
             Message::Export => {
-                self.feedback = None;
-                let contents = self.export_text(&subtitles.results);
+                let contents = self.export_text(&self.preview.results);
                 let extension = self.selected_format().extension();
                 let filename = format!("{}.{}", self.filename.trim(), extension);
                 Event::Run(Task::perform(
@@ -314,84 +312,20 @@ impl Model {
                     Message::ExportSaved,
                 ))
             }
-            Message::MergeWithVideo => {
-                let srt = subtitle::to_srt(&self.converted_results(&subtitles.results));
-                let temp_srt = std::env::temp_dir().join("videosubextract-temp-subs.srt");
-                if let Err(error) = std::fs::write(&temp_srt, srt) {
-                    self.feedback = Some(fl!("failed-create-temp-subtitle"));
-                    return Event::Error(
-                        eyre::eyre!(error).wrap_err("creating temporary subtitle file for merge"),
-                    );
-                }
-
-                let Some(video) = video_path.cloned() else {
-                    self.feedback = Some(fl!("no-video-loaded"));
-                    std::fs::remove_file(temp_srt).ok();
-                    return Event::Run(Task::none());
-                };
-                let stem = video.file_stem().unwrap_or_default().to_string_lossy();
-                let output = video.with_file_name(format!("{stem}_merged.mkv"));
-
-                Event::Run(Task::perform(
-                    async move {
-                        let mut command = FfmpegCommand::new();
-                        let ffmpeg = command
-                            .overwrite()
-                            .input(video.to_string_lossy())
-                            .format("srt")
-                            .input(temp_srt.to_string_lossy())
-                            .codec_audio("copy")
-                            .codec_video("copy")
-                            .codec_subtitle("srt")
-                            .output(output.to_string_lossy());
-                        let mut child = ffmpeg.spawn().map_err(|error| {
-                            fl!("ffmpeg-start-failed", error = error.to_string())
-                        })?;
-                        let mut log = String::new();
-                        let events = child.iter().map_err(|error| {
-                            fl!("ffmpeg-read-failed", error = error.to_string())
-                        })?;
-                        for event in events {
-                            writeln!(log, "{event:?}").ok();
-                        }
-                        std::fs::remove_file(temp_srt).ok();
-                        Ok(log)
-                    },
-                    Message::MuxFinished,
-                ))
-            }
             Message::ExportSaved(result) => match result {
-                Ok(Some(path)) => {
-                    self.feedback = None;
-                    Event::Toast(fl!(
-                        "successfully-saved-subtitles",
-                        path = path.display().to_string()
-                    ))
-                }
-                Ok(None) => {
-                    self.feedback = Some(fl!("file-save-cancelled"));
-                    Event::Run(Task::none())
-                }
+                Ok(Some(path)) => Event::Toast(fl!(
+                    "successfully-saved-subtitles",
+                    path = path.display().to_string()
+                )),
+                Ok(None) => Event::Run(Task::none()),
                 Err(error) => {
-                    self.feedback = Some(fl!("failed-save-subtitles"));
                     Event::Error(eyre::eyre!("writing the subtitle file failed: {error}"))
-                }
-            },
-            Message::MuxFinished(result) => match result {
-                Ok(_) => {
-                    self.feedback = None;
-                    Event::Toast(fl!("subtitles-embedded"))
-                }
-                Err(error) => {
-                    self.feedback = Some(error.clone());
-                    Event::Error(eyre::eyre!(error))
                 }
             },
         }
     }
 
     fn video_summary<'a>(
-        &'a self,
         subtitles: &'a subtitle::Model,
         video_path: Option<&'a PathBuf>,
     ) -> Element<'a, Message> {
@@ -525,15 +459,13 @@ impl Model {
             ]
             .align_y(Alignment::Center),
             widget::text(fl!("showing-cues", count = subtitles.results.len())),
-            subtitles
+            self.preview
                 .results_table(
                     SubtitleTableConfig {
                         show_id_instead_of_preview: true,
                         timestamp_above_text: true,
                         read_only: true,
-                        opencc_config: (show_converted && self.opencc_enabled)
-                            .then_some(OPENCC_MODES[self.opencc_mode].0),
-                        preserve_line_breaks: !show_converted || self.preserve_line_breaks,
+                        show_transformed: show_converted && self.opencc_enabled,
                     },
                     false,
                 )
@@ -547,27 +479,11 @@ impl Model {
         .width(Length::FillPortion(3));
 
         widget::row![
-            self.export_settings(search_active || subtitles.results.is_empty()),
+            self.export_settings(search_active || self.preview.results.is_empty()),
             preview
         ]
         .spacing(cosmic::theme::spacing().space_s)
         .height(Length::Fill)
-        .into()
-    }
-
-    fn burn_view(&self, disabled: bool) -> Element<'_, Message> {
-        widget::column![
-            widget::text::title3(fl!("burn-into-video")),
-            widget::text(fl!("burn-description")),
-            widget::button::text(fl!("merge-subtitles-with-video"))
-                .class(cosmic::theme::Button::Suggested)
-                .on_press_maybe((!disabled).then_some(Message::MergeWithVideo)),
-        ]
-        .spacing(cosmic::theme::spacing().space_s)
-        .padding(cosmic::theme::spacing().space_m)
-        .apply(widget::container)
-        .class(cosmic::theme::Container::Card)
-        .width(Length::Fill)
         .into()
     }
 
@@ -577,29 +493,156 @@ impl Model {
         video_path: Option<&'a PathBuf>,
     ) -> Element<'a, Message> {
         let spacing = cosmic::theme::spacing();
-        let tabs = widget::tab_bar::horizontal(&self.tabs).on_activate(Message::SelectTab);
-        let disabled = subtitles.search_active || subtitles.results.is_empty();
-        let content = match self.tabs.active_data::<Tab>() {
-            Some(Tab::Export) => self.export_view(subtitles, subtitles.search_active),
-            Some(Tab::Burn) => self.burn_view(disabled),
-            None => widget::text(fl!("select-tab")).into(),
+        let content = self.export_view(subtitles, subtitles.search_active);
+
+        widget::column![Self::video_summary(subtitles, video_path), content]
+            .spacing(spacing.space_s)
+            .height(Length::Fill)
+            .into()
+    }
+
+    pub fn subscription(&self) -> Subscription<Message> {
+        if self.conversion_texts.is_empty() {
+            return Subscription::none();
+        }
+        Subscription::run_with(
+            ConversionStream {
+                generation: self.conversion_generation,
+                config: self
+                    .opencc_enabled
+                    .then_some(OPENCC_MODES[self.opencc_mode].0),
+                preserve_line_breaks: self.preserve_line_breaks,
+                texts: Arc::clone(&self.conversion_texts),
+            },
+            conversion_stream,
+        )
+    }
+}
+
+fn conversion_stream(
+    source: &ConversionStream,
+) -> impl futures::Stream<Item = Message> + Send + use<> {
+    let source = source.clone();
+    iced::stream::channel(32, async move |mut output| {
+        let generation = source.generation;
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(32);
+        let worker = tokio::task::spawn_blocking(move || {
+            let converter = source.config.map(opencc::OpenCC::new);
+            for (index, original) in source.texts.iter().enumerate() {
+                let text = if converter.is_none() && source.preserve_line_breaks {
+                    None
+                } else {
+                    let text = converter
+                        .as_ref()
+                        .map_or_else(|| original.clone(), |converter| converter.convert(original));
+                    Some(if source.preserve_line_breaks {
+                        text
+                    } else {
+                        text.lines().collect::<Vec<_>>().join(" ")
+                    })
+                };
+                if sender.blocking_send((index, text)).is_err() {
+                    break;
+                }
+            }
+        });
+
+        while let Some((index, text)) = receiver.recv().await {
+            if output
+                .send(Message::Transformed {
+                    generation,
+                    index,
+                    text,
+                })
+                .await
+                .is_err()
+            {
+                return;
+            }
+        }
+        if let Err(error) = worker.await {
+            output
+                .send(Message::TransformationError {
+                    generation,
+                    error: format!("OpenCC conversion task failed: {error}"),
+                })
+                .await
+                .ok();
+        }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::extraction::Subtitle;
+    use iced::futures::StreamExt;
+    use image::RgbaImage;
+
+    fn source_with_text(text: &str) -> subtitle::Model {
+        let mut source = subtitle::Model::default();
+        source.update(
+            subtitle::Message::EventFound {
+                subtitle: Subtitle::new(Duration::ZERO, Duration::from_secs(1), text.to_owned()),
+                replace_previous: false,
+                preview: RgbaImage::new(1, 1),
+            },
+            &Config::default(),
+        );
+        source
+    }
+
+    #[tokio::test]
+    async fn conversion_stream_emits_each_transformed_subtitle() {
+        let source = ConversionStream {
+            generation: 1,
+            config: Some("s2t.json"),
+            preserve_line_breaks: false,
+            texts: vec!["汉字\n测试".to_owned()].into(),
         };
 
-        widget::column![
-            self.video_summary(subtitles, video_path),
-            tabs,
-            content,
-            self.feedback.as_ref().map(|feedback| {
-                widget::text(feedback)
-                    .selectable()
-                    .apply(widget::container)
-                    .class(cosmic::theme::Container::Card)
-                    .padding(spacing.space_s)
-                    .width(Length::Fill)
-            }),
-        ]
-        .spacing(spacing.space_s)
-        .height(Length::Fill)
-        .into()
+        let messages = conversion_stream(&source).collect::<Vec<_>>().await;
+        assert!(matches!(
+            messages.as_slice(),
+            [Message::Transformed {
+                generation: 1,
+                index: 0,
+                text: Some(text),
+            }] if text == "漢字 測試"
+        ));
+    }
+
+    #[test]
+    fn request_restarts_the_stream_and_stale_items_are_ignored() {
+        let source = source_with_text("汉字");
+        let mut model = Model::default();
+        model.opencc_enabled = true;
+        let config = Config::default();
+        model.sync(None, &source.results, &config);
+        let generation = model.conversion_generation;
+
+        model.update(
+            Message::Transformed {
+                generation: generation.wrapping_sub(1),
+                index: 0,
+                text: Some("stale".to_owned()),
+            },
+            &config,
+        );
+        assert_eq!(model.preview.results[0].text_for_display(true), "汉字");
+
+        model.update(
+            Message::Transformed {
+                generation,
+                index: 0,
+                text: Some("漢字".to_owned()),
+            },
+            &config,
+        );
+        assert_eq!(model.preview.results[0].text_for_display(true), "漢字");
+
+        model.update(Message::Request, &config);
+        assert_eq!(model.conversion_generation, generation.wrapping_add(1));
+        assert_eq!(model.preview.results[0].text_for_display(true), "汉字");
     }
 }

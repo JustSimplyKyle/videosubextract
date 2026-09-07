@@ -31,10 +31,8 @@ pub(crate) struct SubtitleTableConfig {
     pub timestamp_above_text: bool,
     /// Render subtitle text without editing controls.
     pub read_only: bool,
-    /// Apply this OpenCC configuration to text in read-only mode.
-    pub opencc_config: Option<&'static str>,
-    /// Retain line breaks when rendering read-only text.
-    pub preserve_line_breaks: bool,
+    /// Show cached transformed text in read-only mode.
+    pub show_transformed: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -42,24 +40,78 @@ pub struct SubtitleResult {
     id: SubtitleId,
     pub subtitle: Subtitle,
     pub preview: widget::image::Handle,
-    editor_content: text_editor::Content,
+    display: SubtitleDisplay,
+}
+
+#[derive(Debug, Clone)]
+enum SubtitleDisplay {
+    Editor(text_editor::Content),
+    DisplayOnly {
+        original: String,
+        transformed: Option<String>,
+    },
 }
 
 impl SubtitleResult {
-    fn new(id: SubtitleId, subtitle: Subtitle, preview: widget::image::Handle) -> Self {
-        let editor_content = text_editor::Content::with_text(&subtitle.text);
+    fn new_with_editor(id: SubtitleId, subtitle: Subtitle, preview: widget::image::Handle) -> Self {
+        let editor_content = text_editor::Content::with_text(subtitle.text());
 
         Self {
             id,
             subtitle,
             preview,
-            editor_content,
+            display: SubtitleDisplay::Editor(editor_content),
         }
     }
 
-    pub(crate) fn set_text(&mut self, text: String) {
-        self.editor_content = text_editor::Content::with_text(&text);
-        self.subtitle.text = text;
+    fn new_with_readonly(
+        id: SubtitleId,
+        subtitle: Subtitle,
+        preview: widget::image::Handle,
+    ) -> Self {
+        let original = subtitle.text().to_string();
+        Self {
+            id,
+            subtitle,
+            preview,
+            display: SubtitleDisplay::DisplayOnly {
+                original,
+                transformed: None,
+            },
+        }
+    }
+
+    fn read_only_copy(&self) -> Self {
+        Self::new_with_readonly(self.id, self.subtitle.clone(), self.preview.clone())
+    }
+
+    pub(crate) fn text_for_display(&self, show_transformed: bool) -> &str {
+        match &self.display {
+            SubtitleDisplay::Editor(_) => self.subtitle.text(),
+            SubtitleDisplay::DisplayOnly {
+                original,
+                transformed,
+            } => {
+                if show_transformed {
+                    transformed.as_deref().unwrap_or(original)
+                } else {
+                    original
+                }
+            }
+        }
+    }
+
+    pub(crate) fn original_text(&self) -> &str {
+        match &self.display {
+            SubtitleDisplay::Editor(_) => self.subtitle.text(),
+            SubtitleDisplay::DisplayOnly { original, .. } => original,
+        }
+    }
+
+    fn set_transformed_text(&mut self, text: Option<String>) {
+        if let SubtitleDisplay::DisplayOnly { transformed, .. } = &mut self.display {
+            *transformed = text;
+        }
     }
 }
 
@@ -165,6 +217,7 @@ pub enum Message {
 
 pub enum Event {
     GoToPostProduction,
+    SyncWithPostProduction,
     Run(Task<Message>),
     Error(eyre::Report),
     None,
@@ -182,7 +235,6 @@ struct SubtitleTable<'a> {
     viewport_height: f32,
     results: &'a [SubtitleResult],
     config: SubtitleTableConfig,
-    converter: Option<opencc::OpenCC>,
 }
 
 impl<'a> SubtitleTable<'a> {
@@ -229,7 +281,8 @@ impl<'a> SubtitleTable<'a> {
             },
         )
     }
-    fn timestamp(result: &SubtitleResult) -> Element<'_, Message> {
+
+    fn timestamp(result: &SubtitleResult, render_atop: bool) -> Element<'_, Message> {
         fn precise_timestamp(timestamp: Duration) -> String {
             let total_seconds = timestamp.as_secs();
             let hours = total_seconds / 3_600;
@@ -239,33 +292,23 @@ impl<'a> SubtitleTable<'a> {
 
             format!("{hours:02}:{minutes:02}:{seconds:02}.{milliseconds:03}")
         }
-
-        widget::column![
-            widget::text::monotext(precise_timestamp(result.subtitle.start_timestamp)),
-            widget::text::caption("↓"),
-            widget::text::monotext(precise_timestamp(result.subtitle.end_timestamp)),
-        ]
-        .align_x(Alignment::Center)
-        .width(Length::Fixed(RESULT_TIMING_WIDTH))
-        .into()
-    }
-    fn timestamp_range(result: &SubtitleResult) -> Element<'_, Message> {
-        fn precise_timestamp(timestamp: Duration) -> String {
-            let total_seconds = timestamp.as_secs();
-            let hours = total_seconds / 3_600;
-            let minutes = (total_seconds % 3_600) / 60;
-            let seconds = total_seconds % 60;
-            let milliseconds = timestamp.subsec_millis();
-
-            format!("{hours:02}:{minutes:02}:{seconds:02}.{milliseconds:03}")
+        if render_atop {
+            widget::text::monotext(format!(
+                "{} → {}",
+                precise_timestamp(result.subtitle.start_timestamp),
+                precise_timestamp(result.subtitle.end_timestamp)
+            ))
+            .into()
+        } else {
+            widget::column![
+                widget::text::monotext(precise_timestamp(result.subtitle.start_timestamp)),
+                widget::text::caption("↓"),
+                widget::text::monotext(precise_timestamp(result.subtitle.end_timestamp)),
+            ]
+            .align_x(Alignment::Center)
+            .width(Length::Fixed(RESULT_TIMING_WIDTH))
+            .into()
         }
-
-        widget::text::monotext(format!(
-            "{} → {}",
-            precise_timestamp(result.subtitle.start_timestamp),
-            precise_timestamp(result.subtitle.end_timestamp)
-        ))
-        .into()
     }
     fn subtitle_row(
         &self,
@@ -293,14 +336,7 @@ impl<'a> SubtitleTable<'a> {
         };
 
         let subtitle_text: Element<'a, Message> = if self.config.read_only {
-            let mut text = self.converter.as_ref().map_or_else(
-                || result.subtitle.text.clone(),
-                |converter| converter.convert(&result.subtitle.text),
-            );
-            if !self.config.preserve_line_breaks {
-                text = text.lines().collect::<Vec<_>>().join(" ");
-            }
-            widget::text(text)
+            widget::text(result.text_for_display(self.config.show_transformed))
                 .selectable()
                 .width(Length::Fill)
                 .height(Length::Fill)
@@ -309,23 +345,26 @@ impl<'a> SubtitleTable<'a> {
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .apply(widget::container)
-                .class(theme::Container::Dropdown)
+                .class(theme::Container::Secondary)
                 .padding([spacing.space_s, spacing.space_m])
                 .center_y(Length::Fill)
                 .height(Length::Fill)
                 .into()
         } else {
-            Self::text_editor(result.id, &result.editor_content)
+            let SubtitleDisplay::Editor(content) = &result.display else {
+                return widget::text(result.subtitle.text()).into();
+            };
+            Self::text_editor(result.id, content)
         };
 
         let timing_and_text: Element<'a, Message> = if self.config.timestamp_above_text {
-            widget::column![Self::timestamp_range(result), subtitle_text]
+            widget::column![Self::timestamp(result, true), subtitle_text]
                 .spacing(spacing.space_xxs)
                 .height(Length::Fill)
                 .width(Length::Fill)
                 .into()
         } else {
-            widget::row![Self::timestamp(result), subtitle_text]
+            widget::row![Self::timestamp(result, false), subtitle_text]
                 .spacing(spacing.space_m)
                 .height(Length::Fill)
                 .width(Length::Fill)
@@ -583,7 +622,6 @@ impl Model {
             viewport_height: self.result_viewport_height,
             results: &self.results,
             config,
-            converter: config.opencc_config.map(opencc::OpenCC::new),
         }
         .view()
         .apply(widget::container)
@@ -620,7 +658,7 @@ impl Model {
         self.current_timestamp = Duration::ZERO;
         self.done = false;
         self.edit_history.clear();
-        self.progress_bar.set_elapsed(Duration::ZERO);
+        self.progress_bar.reset();
         self.scrollbar_jump_status = ScrollbarJumpStatus::NoShow;
         self.zoomed_result_id = None;
         self.next_result_id = 0;
@@ -652,14 +690,14 @@ impl Model {
                     preview.into_raw(),
                 );
                 if replace_previous && let Some(previous) = self.results.last_mut() {
-                    *previous = SubtitleResult::new(previous.id, subtitle, preview);
+                    *previous = SubtitleResult::new_with_editor(previous.id, subtitle, preview);
                     return Event::None;
                 }
                 let id = SubtitleId(self.next_result_id);
                 self.next_result_id = self.next_result_id.wrapping_add(1);
                 self.results
-                    .push(SubtitleResult::new(id, subtitle, preview));
-                Event::None
+                    .push(SubtitleResult::new_with_editor(id, subtitle, preview));
+                Event::SyncWithPostProduction
             }
             Message::SearchDone => {
                 self.search_active = false;
@@ -752,8 +790,11 @@ impl Model {
             }
             Message::SubtitleContentEdit { id, action } => {
                 if let Some(result) = self.results.iter_mut().find(|result| result.id == id) {
-                    result.editor_content.perform(action);
-                    result.subtitle.text = result.editor_content.text();
+                    let SubtitleDisplay::Editor(content) = &mut result.display else {
+                        return Event::None;
+                    };
+                    content.perform(action);
+                    result.subtitle.set_text(content.text());
                 }
                 Event::None
             }
@@ -772,6 +813,27 @@ impl Model {
     pub fn set_ocr_model(&self, ocr: OcrModel) {
         if let Some(search_ocr) = &self.search_ocr {
             search_ocr.set(ocr);
+        }
+    }
+
+    pub(crate) fn sync_read_only_results(&mut self, source: &[SubtitleResult]) {
+        self.results = source.iter().map(SubtitleResult::read_only_copy).collect();
+        self.result_scroll_offset = 0.0;
+        self.result_viewport_height = 0.0;
+        self.scrollbar_jump_status = ScrollbarJumpStatus::NoShow;
+    }
+
+    pub(crate) fn set_transformed_text(&mut self, index: usize, text: Option<String>) -> bool {
+        let Some(result) = self.results.get_mut(index) else {
+            return false;
+        };
+        result.set_transformed_text(text);
+        true
+    }
+
+    pub(crate) fn clear_transformed_text(&mut self) {
+        for result in &mut self.results {
+            result.set_transformed_text(None);
         }
     }
 
@@ -822,7 +884,11 @@ pub fn to_srt(results: &[SubtitleResult]) -> String {
     extraction::to_srt(
         &results
             .iter()
-            .map(|result| result.subtitle.clone())
+            .map(|result| {
+                let mut subtitle = result.subtitle.clone();
+                subtitle.set_text(result.text_for_display(true).to_owned());
+                subtitle
+            })
             .collect::<Vec<_>>(),
     )
 }
@@ -909,11 +975,11 @@ mod tests {
 
     fn detection(start: u64, end: u64, text: &str, replace_previous: bool) -> Message {
         Message::EventFound {
-            subtitle: Subtitle {
-                start_timestamp: Duration::from_secs(start),
-                end_timestamp: Duration::from_secs(end),
-                text: text.to_owned(),
-            },
+            subtitle: Subtitle::new(
+                Duration::from_secs(start),
+                Duration::from_secs(end),
+                text.to_owned(),
+            ),
             replace_previous,
             preview: RgbaImage::new(1, 1),
         }
@@ -973,7 +1039,7 @@ mod tests {
 
         assert_eq!(model.results.len(), 1);
         assert_eq!(model.results[0].id, second_id);
-        assert_eq!(model.results[0].subtitle.text, "second");
+        assert_eq!(model.results[0].subtitle.text(), "second");
     }
 
     #[test]
@@ -999,8 +1065,8 @@ mod tests {
             .iter()
             .find(|result| result.id == third_id)
             .expect("the other subtitle remains present");
-        assert!(second.subtitle.text.contains('!'));
-        assert_eq!(third.subtitle.text, "third");
+        assert!(second.subtitle.text().contains('!'));
+        assert_eq!(third.subtitle.text(), "third");
     }
 
     #[test]
@@ -1021,7 +1087,7 @@ mod tests {
             .iter()
             .find(|result| result.id == third_id)
             .expect("the following subtitle remains present");
-        assert_eq!(third.subtitle.text, "third");
+        assert_eq!(third.subtitle.text(), "third");
         assert!(!model.results.iter().any(|result| result.id == second_id));
     }
 
