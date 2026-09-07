@@ -50,7 +50,7 @@ struct ConversionStream {
     generation: u64,
     config: Option<&'static str>,
     preserve_line_breaks: bool,
-    texts: Arc<[String]>,
+    inputs: Arc<[(subtitle::SubtitleId, String)]>,
 }
 
 impl std::hash::Hash for ConversionStream {
@@ -68,7 +68,7 @@ pub struct Model {
     preserve_line_breaks: bool,
     preview: subtitle::Model,
     conversion_generation: u64,
-    conversion_texts: Arc<[String]>,
+    transformation_inputs: Arc<[(subtitle::SubtitleId, String)]>,
 }
 
 impl Default for Model {
@@ -107,7 +107,7 @@ impl Default for Model {
             preserve_line_breaks: true,
             preview: subtitle::Model::default(),
             conversion_generation: 0,
-            conversion_texts: Arc::default(),
+            transformation_inputs: Arc::default(),
         }
     }
 }
@@ -125,7 +125,7 @@ pub enum Message {
     Request,
     Transformed {
         generation: u64,
-        index: usize,
+        id: subtitle::SubtitleId,
         text: Option<String>,
     },
     TransformationError {
@@ -146,20 +146,39 @@ impl Model {
         &mut self,
         path: Option<&PathBuf>,
         results: &[subtitle::SubtitleResult],
+        changed: subtitle::ResultsChanged,
         config: &Config,
     ) {
         if let Some(stem) = path.and_then(|path| path.file_stem()) {
             self.filename = stem.to_string_lossy().into_owned();
         }
-        self.preview.sync_read_only_results(results);
-        self.conversion_texts = self
-            .preview
-            .results
-            .iter()
-            .map(|result| result.original_text().to_owned())
-            .collect::<Vec<_>>()
-            .into();
+        let changed = self.preview.sync_read_only_results(results, changed);
+        self.transformation_inputs = match changed {
+            subtitle::ResultsChanged::Full => self.all_transformation_inputs(),
+            subtitle::ResultsChanged::Targeted(_) | subtitle::ResultsChanged::Append(_) => {
+                self.missing_transformation_inputs()
+            }
+        };
         let _ = self.update(Message::Request, config);
+    }
+
+    fn all_transformation_inputs(&self) -> Arc<[(subtitle::SubtitleId, String)]> {
+        self.preview
+            .results()
+            .iter()
+            .map(|result| (result.id(), result.original_text().to_owned()))
+            .collect::<Vec<_>>()
+            .into()
+    }
+
+    fn missing_transformation_inputs(&self) -> Arc<[(subtitle::SubtitleId, String)]> {
+        self.preview
+            .results()
+            .iter()
+            .filter(|result| result.needs_transformation())
+            .map(|result| (result.id(), result.original_text().to_owned()))
+            .collect::<Vec<_>>()
+            .into()
     }
 
     pub fn refresh_language(&mut self) {
@@ -249,14 +268,20 @@ impl Model {
             }
             Message::ToggleOpenCc(enabled) => {
                 self.opencc_enabled = enabled;
+                self.preview.clear_transformed_text();
+                self.transformation_inputs = self.all_transformation_inputs();
                 self.update(Message::Request, config)
             }
             Message::SelectOpenCcMode(mode) => {
                 self.opencc_mode = mode.min(OPENCC_MODES.len() - 1);
+                self.preview.clear_transformed_text();
+                self.transformation_inputs = self.all_transformation_inputs();
                 self.update(Message::Request, config)
             }
             Message::TogglePreserveLineBreaks(preserve) => {
                 self.preserve_line_breaks = preserve;
+                self.preview.clear_transformed_text();
+                self.transformation_inputs = self.all_transformation_inputs();
                 self.update(Message::Request, config)
             }
             Message::Subtitle(message) => match self.preview.update(message, config) {
@@ -265,20 +290,19 @@ impl Model {
                 subtitle::Event::GoToPostProduction | subtitle::Event::None => {
                     Event::Run(Task::none())
                 }
-                subtitle::Event::SyncWithPostProduction => Event::Run(Task::none()),
+                subtitle::Event::SyncWithPostProduction(_) => Event::Run(Task::none()),
             },
             Message::Request => {
                 self.conversion_generation = self.conversion_generation.wrapping_add(1);
-                self.preview.clear_transformed_text();
                 Event::Run(Task::none())
             }
             Message::Transformed {
                 generation,
-                index,
+                id,
                 text,
             } => {
                 if generation == self.conversion_generation {
-                    self.preview.set_transformed_text(index, text);
+                    self.preview.set_transformed_text(id, text);
                 }
                 Event::Run(Task::none())
             }
@@ -290,7 +314,7 @@ impl Model {
                 }
             }
             Message::Export => {
-                let contents = self.export_text(&self.preview.results);
+                let contents = self.export_text(self.preview.results());
                 let extension = self.selected_format().extension();
                 let filename = format!("{}.{}", self.filename.trim(), extension);
                 Event::Run(Task::perform(
@@ -333,11 +357,11 @@ impl Model {
             || fl!("no-video-loaded"),
             |name| name.to_string_lossy().into_owned(),
         );
-        let details = fl!("subtitle-count", count = subtitles.results.len());
+        let details = fl!("subtitle-count", count = subtitles.results().len());
         let (status, state) = if subtitles.search_active {
             (fl!("processing"), fl!("subtitle-extraction-in-progress"))
         } else if subtitles.done {
-            let state = if subtitles.results.is_empty() {
+            let state = if subtitles.results().is_empty() {
                 fl!("no-subtitles-ready")
             } else {
                 fl!("subtitles-ready-for-export")
@@ -458,7 +482,7 @@ impl Model {
                 preview_toggle
             ]
             .align_y(Alignment::Center),
-            widget::text(fl!("showing-cues", count = subtitles.results.len())),
+            widget::text(fl!("showing-cues", count = subtitles.results().len())),
             self.preview
                 .results_table(
                     SubtitleTableConfig {
@@ -479,7 +503,7 @@ impl Model {
         .width(Length::FillPortion(3));
 
         widget::row![
-            self.export_settings(search_active || self.preview.results.is_empty()),
+            self.export_settings(search_active || self.preview.results().is_empty()),
             preview
         ]
         .spacing(cosmic::theme::spacing().space_s)
@@ -502,7 +526,7 @@ impl Model {
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
-        if self.conversion_texts.is_empty() {
+        if self.transformation_inputs.is_empty() {
             return Subscription::none();
         }
         Subscription::run_with(
@@ -512,7 +536,7 @@ impl Model {
                     .opencc_enabled
                     .then_some(OPENCC_MODES[self.opencc_mode].0),
                 preserve_line_breaks: self.preserve_line_breaks,
-                texts: Arc::clone(&self.conversion_texts),
+                inputs: Arc::clone(&self.transformation_inputs),
             },
             conversion_stream,
         )
@@ -528,7 +552,7 @@ fn conversion_stream(
         let (sender, mut receiver) = tokio::sync::mpsc::channel(32);
         let worker = tokio::task::spawn_blocking(move || {
             let converter = source.config.map(opencc::OpenCC::new);
-            for (index, original) in source.texts.iter().enumerate() {
+            for (id, original) in source.inputs.iter() {
                 let text = if converter.is_none() && source.preserve_line_breaks {
                     None
                 } else {
@@ -541,17 +565,17 @@ fn conversion_stream(
                         text.lines().collect::<Vec<_>>().join(" ")
                     })
                 };
-                if sender.blocking_send((index, text)).is_err() {
+                if sender.blocking_send((*id, text)).is_err() {
                     break;
                 }
             }
         });
 
-        while let Some((index, text)) = receiver.recv().await {
+        while let Some((id, text)) = receiver.recv().await {
             if output
                 .send(Message::Transformed {
                     generation,
-                    index,
+                    id,
                     text,
                 })
                 .await
@@ -594,11 +618,12 @@ mod tests {
 
     #[tokio::test]
     async fn conversion_stream_emits_each_transformed_subtitle() {
+        let id = subtitle::SubtitleId(7);
         let source = ConversionStream {
             generation: 1,
             config: Some("s2t.json"),
             preserve_line_breaks: false,
-            texts: vec!["汉字\n测试".to_owned()].into(),
+            inputs: vec![(id, "汉字\n测试".to_owned())].into(),
         };
 
         let messages = conversion_stream(&source).collect::<Vec<_>>().await;
@@ -606,9 +631,9 @@ mod tests {
             messages.as_slice(),
             [Message::Transformed {
                 generation: 1,
-                index: 0,
+                id: transformed_id,
                 text: Some(text),
-            }] if text == "漢字 測試"
+            }] if *transformed_id == id && text == "漢字 測試"
         ));
     }
 
@@ -618,31 +643,79 @@ mod tests {
         let mut model = Model::default();
         model.opencc_enabled = true;
         let config = Config::default();
-        model.sync(None, &source.results, &config);
+        let id = source.results()[0].id();
+        model.sync(
+            None,
+            source.results(),
+            subtitle::ResultsChanged::Full,
+            &config,
+        );
         let generation = model.conversion_generation;
 
         model.update(
             Message::Transformed {
                 generation: generation.wrapping_sub(1),
-                index: 0,
+                id,
                 text: Some("stale".to_owned()),
             },
             &config,
         );
-        assert_eq!(model.preview.results[0].text_for_display(true), "汉字");
+        assert_eq!(model.preview.results()[0].text_for_display(true), "汉字");
 
         model.update(
             Message::Transformed {
                 generation,
-                index: 0,
+                id,
                 text: Some("漢字".to_owned()),
             },
             &config,
         );
-        assert_eq!(model.preview.results[0].text_for_display(true), "漢字");
+        assert_eq!(model.preview.results()[0].text_for_display(true), "漢字");
 
         model.update(Message::Request, &config);
         assert_eq!(model.conversion_generation, generation.wrapping_add(1));
-        assert_eq!(model.preview.results[0].text_for_display(true), "汉字");
+        assert_eq!(model.preview.results()[0].text_for_display(true), "漢字");
+    }
+
+    #[test]
+    fn append_sync_preserves_existing_transformed_text() {
+        let mut source = source_with_text("first");
+        let config = Config::default();
+        let first_id = source.results()[0].id();
+        let mut model = Model::default();
+        model.sync(
+            None,
+            source.results(),
+            subtitle::ResultsChanged::Full,
+            &config,
+        );
+        model
+            .preview
+            .set_transformed_text(first_id, Some("transformed first".to_owned()));
+
+        let event = source.update(
+            subtitle::Message::EventFound {
+                subtitle: Subtitle::new(
+                    Duration::from_secs(2),
+                    Duration::from_secs(3),
+                    "second".to_owned(),
+                ),
+                replace_previous: false,
+                preview: RgbaImage::new(1, 1),
+            },
+            &config,
+        );
+        let subtitle::Event::SyncWithPostProduction(changed) = event else {
+            panic!("append should request synchronization");
+        };
+        model.sync(None, source.results(), changed, &config);
+
+        assert_eq!(
+            model.preview.results()[0].text_for_display(true),
+            "transformed first"
+        );
+        assert_eq!(model.preview.results()[1].text_for_display(true), "second");
+        assert_eq!(model.transformation_inputs.len(), 1);
+        assert_eq!(model.transformation_inputs[0].0, source.results()[1].id());
     }
 }

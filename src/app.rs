@@ -524,16 +524,18 @@ impl cosmic::Application for AppModel {
                     subtitle::Event::GoToPostProduction => {
                         self.post_production.sync(
                             self.prepare.video_path.as_ref(),
-                            &self.subtitle.results,
+                            self.subtitle.results(),
+                            subtitle::ResultsChanged::Full,
                             &self.config,
                         );
                         self.nav.activate(self.post_production_page_id);
                         self.update_title()
                     }
-                    subtitle::Event::SyncWithPostProduction => {
+                    subtitle::Event::SyncWithPostProduction(changed) => {
                         self.post_production.sync(
                             self.prepare.video_path.as_ref(),
-                            &self.subtitle.results,
+                            self.subtitle.results(),
+                            changed,
                             &self.config,
                         );
                         Task::none()
@@ -570,7 +572,8 @@ impl cosmic::Application for AppModel {
         if id == self.post_production_page_id {
             self.post_production.sync(
                 self.prepare.video_path.as_ref(),
-                &self.subtitle.results,
+                self.subtitle.results(),
+                subtitle::ResultsChanged::Full,
                 &self.config,
             );
         }

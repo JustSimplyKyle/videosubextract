@@ -17,8 +17,16 @@ const RESULT_PREVIEW_WIDTH: f32 = 320.0;
 const RESULT_TIMING_WIDTH: f32 = 132.0;
 const RESULT_ROW_OVERSCAN: usize = 3;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct SubtitleId(u64);
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SubtitleId(pub(crate) u64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use]
+pub enum ResultsChanged {
+    Full,
+    Targeted(SubtitleId),
+    Append(SubtitleId),
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SubtitleIndex(usize);
@@ -85,6 +93,10 @@ impl SubtitleResult {
         Self::new_with_readonly(self.id, self.subtitle.clone(), self.preview.clone())
     }
 
+    pub(crate) const fn id(&self) -> SubtitleId {
+        self.id
+    }
+
     pub(crate) fn text_for_display(&self, show_transformed: bool) -> &str {
         match &self.display {
             SubtitleDisplay::Editor(_) => self.subtitle.text(),
@@ -108,10 +120,57 @@ impl SubtitleResult {
         }
     }
 
+    pub(crate) fn needs_transformation(&self) -> bool {
+        matches!(
+            &self.display,
+            SubtitleDisplay::DisplayOnly {
+                transformed: None,
+                ..
+            }
+        )
+    }
+
     fn set_transformed_text(&mut self, text: Option<String>) {
         if let SubtitleDisplay::DisplayOnly { transformed, .. } = &mut self.display {
             *transformed = text;
         }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct SubtitleResults(Vec<SubtitleResult>);
+
+impl std::ops::Deref for SubtitleResults {
+    type Target = [SubtitleResult];
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl SubtitleResults {
+    fn with_mut<R>(
+        &mut self,
+        f: impl FnOnce(&mut Vec<SubtitleResult>) -> R,
+    ) -> (R, ResultsChanged) {
+        (f(&mut self.0), ResultsChanged::Full)
+    }
+
+    fn with_mut_entry<R>(
+        &mut self,
+        id: SubtitleId,
+        f: impl FnOnce(&mut SubtitleResult) -> R,
+    ) -> Option<(R, ResultsChanged)> {
+        self.0
+            .iter_mut()
+            .find(|result| result.id == id)
+            .map(|result| (f(result), ResultsChanged::Targeted(id)))
+    }
+
+    fn push(&mut self, result: SubtitleResult) -> ResultsChanged {
+        let id = result.id;
+        self.0.push(result);
+        ResultsChanged::Append(id)
     }
 }
 
@@ -126,7 +185,7 @@ pub struct Model {
     native_search_params: NativeSearchParams,
     post_ocr_processing: bool,
     processing_resolution: ProcessingResolution,
-    pub results: Vec<SubtitleResult>,
+    results: SubtitleResults,
     pub preview: Option<widget::image::Handle>,
     pub current_timestamp: Duration,
     pub done: bool,
@@ -217,7 +276,7 @@ pub enum Message {
 
 pub enum Event {
     GoToPostProduction,
-    SyncWithPostProduction,
+    SyncWithPostProduction(ResultsChanged),
     Run(Task<Message>),
     Error(eyre::Report),
     None,
@@ -592,6 +651,10 @@ impl<'a> SubtitleView<'a> {
 }
 
 impl Model {
+    pub fn results(&self) -> &[SubtitleResult] {
+        &self.results
+    }
+
     fn result_index(&self, id: SubtitleId) -> Option<SubtitleIndex> {
         self.results
             .iter()
@@ -653,7 +716,7 @@ impl Model {
         self.native_search_params = config.native_search_params;
         self.post_ocr_processing = config.post_ocr_processing;
         self.processing_resolution = config.processing_resolution;
-        self.results.clear();
+        let _ = self.results.with_mut(Vec::clear);
         self.preview = None;
         self.current_timestamp = Duration::ZERO;
         self.done = false;
@@ -689,15 +752,19 @@ impl Model {
                     preview.height(),
                     preview.into_raw(),
                 );
-                if replace_previous && let Some(previous) = self.results.last_mut() {
-                    *previous = SubtitleResult::new_with_editor(previous.id, subtitle, preview);
-                    return Event::None;
+                if replace_previous && let Some(previous_id) = self.results.last().map(|x| x.id) {
+                    let (_, changed) = self.results.with_mut(|results| {
+                        let previous = results.last_mut().unwrap();
+                        *previous = SubtitleResult::new_with_editor(previous_id, subtitle, preview);
+                    });
+                    return Event::SyncWithPostProduction(changed);
                 }
                 let id = SubtitleId(self.next_result_id);
                 self.next_result_id = self.next_result_id.wrapping_add(1);
-                self.results
+                let changed = self
+                    .results
                     .push(SubtitleResult::new_with_editor(id, subtitle, preview));
-                Event::SyncWithPostProduction
+                Event::SyncWithPostProduction(changed)
             }
             Message::SearchDone => {
                 self.search_active = false;
@@ -742,9 +809,10 @@ impl Model {
             }
             Message::Delete(id) => {
                 if let Some(SubtitleIndex(index)) = self.result_index(id) {
-                    let result = self.results.remove(index);
+                    let (result, changed) = self.results.with_mut(|results| results.remove(index));
                     self.edit_history
                         .push(SubtitleEdit::Delete { index, result });
+                    return Event::SyncWithPostProduction(changed);
                 }
                 Event::None
             }
@@ -752,24 +820,29 @@ impl Model {
                 if let Some(SubtitleIndex(index)) = self.result_index(id)
                     && index > 0
                 {
-                    let result = self.results.remove(index);
-                    let previous_end_timestamp = std::mem::replace(
-                        &mut self.results[index - 1].subtitle.end_timestamp,
-                        result.subtitle.end_timestamp,
-                    );
+                    let ((result, previous_end_timestamp), changed) =
+                        self.results.with_mut(|results| {
+                            let result = results.remove(index);
+                            let previous_end_timestamp = std::mem::replace(
+                                &mut results[index - 1].subtitle.end_timestamp,
+                                result.subtitle.end_timestamp,
+                            );
+                            (result, previous_end_timestamp)
+                        });
                     self.edit_history.push(SubtitleEdit::MergeWithPrevious {
                         index,
                         previous_end_timestamp,
                         result,
                     });
+                    return Event::SyncWithPostProduction(changed);
                 }
                 Event::None
             }
             Message::UndoEdit => {
                 if let Some(edit) = self.edit_history.pop() {
-                    match edit {
+                    let (_, changed) = self.results.with_mut(|results| match edit {
                         SubtitleEdit::Delete { index, result } => {
-                            self.results.insert(index.min(self.results.len()), result);
+                            results.insert(index.min(results.len()), result);
                         }
                         SubtitleEdit::MergeWithPrevious {
                             index,
@@ -778,23 +851,25 @@ impl Model {
                         } => {
                             if let Some(previous) = index
                                 .checked_sub(1)
-                                .and_then(|index| self.results.get_mut(index))
+                                .and_then(|index| results.get_mut(index))
                             {
                                 previous.subtitle.end_timestamp = previous_end_timestamp;
-                                self.results.insert(index.min(self.results.len()), result);
+                                results.insert(index.min(results.len()), result);
                             }
                         }
-                    }
+                    });
+                    return Event::SyncWithPostProduction(changed);
                 }
                 Event::None
             }
             Message::SubtitleContentEdit { id, action } => {
-                if let Some(result) = self.results.iter_mut().find(|result| result.id == id) {
-                    let SubtitleDisplay::Editor(content) = &mut result.display else {
-                        return Event::None;
-                    };
-                    content.perform(action);
-                    result.subtitle.set_text(content.text());
+                if let Some(((), changed)) = self.results.with_mut_entry(id, |result| {
+                    if let SubtitleDisplay::Editor(content) = &mut result.display {
+                        content.perform(action);
+                        result.subtitle.set_text(content.text());
+                    }
+                }) {
+                    return Event::SyncWithPostProduction(changed);
                 }
                 Event::None
             }
@@ -816,15 +891,57 @@ impl Model {
         }
     }
 
-    pub(crate) fn sync_read_only_results(&mut self, source: &[SubtitleResult]) {
-        self.results = source.iter().map(SubtitleResult::read_only_copy).collect();
+    pub(crate) fn sync_read_only_results(
+        &mut self,
+        source: &[SubtitleResult],
+        changed: ResultsChanged,
+    ) -> ResultsChanged {
+        let applied = match changed {
+            ResultsChanged::Full => {
+                self.results =
+                    SubtitleResults(source.iter().map(SubtitleResult::read_only_copy).collect());
+                ResultsChanged::Full
+            }
+            ResultsChanged::Targeted(id) => {
+                let source_result = source.iter().find(|result| result.id == id);
+                let target = self.results.0.iter_mut().find(|result| result.id == id);
+                match (source_result, target) {
+                    (Some(source_result), Some(target)) => {
+                        *target = source_result.read_only_copy();
+                        ResultsChanged::Targeted(id)
+                    }
+                    _ => {
+                        self.results = SubtitleResults(
+                            source.iter().map(SubtitleResult::read_only_copy).collect(),
+                        );
+                        ResultsChanged::Full
+                    }
+                }
+            }
+            ResultsChanged::Append(id) => {
+                let source_result = source.iter().find(|result| result.id == id);
+                if self.results.len() + 1 == source.len()
+                    && let Some(source_result) = source_result
+                    && !self.results.iter().any(|result| result.id == id)
+                {
+                    self.results.0.push(source_result.read_only_copy());
+                    ResultsChanged::Append(id)
+                } else {
+                    self.results = SubtitleResults(
+                        source.iter().map(SubtitleResult::read_only_copy).collect(),
+                    );
+                    ResultsChanged::Full
+                }
+            }
+        };
         self.result_scroll_offset = 0.0;
         self.result_viewport_height = 0.0;
         self.scrollbar_jump_status = ScrollbarJumpStatus::NoShow;
+        applied
     }
 
-    pub(crate) fn set_transformed_text(&mut self, index: usize, text: Option<String>) -> bool {
-        let Some(result) = self.results.get_mut(index) else {
+    pub(crate) fn set_transformed_text(&mut self, id: SubtitleId, text: Option<String>) -> bool {
+        let Some(result) = self.results.0.iter_mut().find(|result| result.id == id) else {
             return false;
         };
         result.set_transformed_text(text);
@@ -832,7 +949,7 @@ impl Model {
     }
 
     pub(crate) fn clear_transformed_text(&mut self) {
-        for result in &mut self.results {
+        for result in &mut self.results.0 {
             result.set_transformed_text(None);
         }
     }
