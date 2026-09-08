@@ -18,7 +18,24 @@ const OCR_PARALLELISM: usize = 4;
 pub struct Subtitle {
     pub start_timestamp: Duration,
     pub end_timestamp: Duration,
-    pub text: String,
+    text: String,
+}
+impl Subtitle {
+    pub fn new(start_timestamp: Duration, end_timestamp: Duration, text: String) -> Self {
+        Self {
+            start_timestamp,
+            end_timestamp,
+            text,
+        }
+    }
+
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    pub fn set_text(&mut self, text: String) {
+        self.text = text;
+    }
 }
 
 pub fn to_srt(results: &[Subtitle]) -> String {
@@ -126,7 +143,7 @@ async fn run(request: Request, event_tx: tokio::sync::mpsc::Sender<Event>) {
         let result = (|| {
             let input = ffmpeg_the_third::format::input(&input)
                 .wrap_err("opening the video with FFmpeg")?;
-            let (controller, iter) =
+            let (_controller, iter) =
                 create_video_player::<false>(input, crop, processing_resolution)
                     .wrap_err("initializing the video decoder")?;
 
@@ -180,11 +197,7 @@ async fn run(request: Request, event_tx: tokio::sync::mpsc::Sender<Event>) {
                 .wrap_err("recognizing subtitle text")?;
 
             eyre::Ok((
-                Subtitle {
-                    start_timestamp: event.start_timestamp,
-                    end_timestamp: event.end_timestamp,
-                    text,
-                },
+                Subtitle::new(event.start_timestamp, event.end_timestamp, text),
                 preview,
             ))
         })

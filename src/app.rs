@@ -18,7 +18,6 @@ use cosmic::prelude::*;
 use cosmic::widget::{self, about::About, icon, menu, nav_bar};
 use iced::futures::SinkExt;
 use rfd::AsyncFileDialog;
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -330,7 +329,14 @@ impl cosmic::Application for AppModel {
                 subscriptions.push(self.prepare.subscription().map(Message::Prepare));
             }
             Some(Page::Subtitle) => {}
-            None | Some(Page::PostProduction) => {}
+            Some(Page::PostProduction) => {
+                subscriptions.push(
+                    self.post_production
+                        .subscription()
+                        .map(Message::PostProduction),
+                );
+            }
+            None => {}
         }
 
         subscriptions.push(
@@ -516,23 +522,37 @@ impl cosmic::Application for AppModel {
 
                 match event {
                     subtitle::Event::GoToPostProduction => {
-                        self.post_production.feedback = None; // clear UI feedback internally
+                        self.post_production.sync(
+                            self.prepare.video_path.as_ref(),
+                            self.subtitle.results(),
+                            subtitle::ResultsChanged::Full,
+                            &self.config,
+                        );
                         self.nav.activate(self.post_production_page_id);
                         self.update_title()
+                    }
+                    subtitle::Event::SyncWithPostProduction(changed) => {
+                        self.post_production.sync(
+                            self.prepare.video_path.as_ref(),
+                            self.subtitle.results(),
+                            changed,
+                            &self.config,
+                        );
+                        Task::none()
                     }
                     subtitle::Event::Run(task) => task.map(Message::Subtitle).map(Into::into),
                     subtitle::Event::Error(error) => log!(error),
                     subtitle::Event::None => Task::none(),
                 }
             }
-            Message::PostProduction(msg) => match self.post_production.update(
-                msg,
-                &mut self.subtitle.results,
-                self.prepare.video_path.as_ref(),
-            ) {
+            Message::PostProduction(msg) => match self.post_production.update(msg, &self.config) {
                 post_production::Event::Run(task) => {
                     task.map(Message::PostProduction).map(Into::into)
                 }
+                post_production::Event::Toast(message) => self
+                    .toasts
+                    .push(widget::Toast::new(message))
+                    .map(Into::into),
                 post_production::Event::Error(error) => log!(error),
             },
             Message::CloseToast(id) => {
@@ -549,6 +569,14 @@ impl cosmic::Application for AppModel {
     }
 
     fn on_nav_select(&mut self, id: nav_bar::Id) -> Task<cosmic::Action<Self::Message>> {
+        if id == self.post_production_page_id {
+            self.post_production.sync(
+                self.prepare.video_path.as_ref(),
+                self.subtitle.results(),
+                subtitle::ResultsChanged::Full,
+                &self.config,
+            );
+        }
         self.nav.activate(id);
         self.update_title()
     }
@@ -572,7 +600,7 @@ impl AppModel {
             }
             Page::PostProduction => self
                 .post_production
-                .view(self.subtitle.search_active)
+                .view(&self.subtitle, self.prepare.video_path.as_ref())
                 .map(Message::PostProduction),
         };
 
