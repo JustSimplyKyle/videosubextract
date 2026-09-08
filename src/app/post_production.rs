@@ -145,7 +145,7 @@ impl Model {
     pub fn sync(
         &mut self,
         path: Option<&PathBuf>,
-        results: &[subtitle::SubtitleResult],
+        results: &subtitle::SubtitleResults,
         changed: subtitle::ResultsChanged,
         config: &Config,
     ) {
@@ -209,12 +209,12 @@ impl Model {
         )
     }
 
-    fn export_text(&self, results: &[subtitle::SubtitleResult]) -> String {
+    fn export_text(&self, results: &subtitle::SubtitleResults) -> String {
         match self.selected_format() {
             ExportFormat::Srt => subtitle::to_srt(results),
             ExportFormat::Vtt => {
                 let mut output = String::from("WEBVTT\n\n");
-                for result in results {
+                for result in results.iter() {
                     writeln!(
                         output,
                         "{} --> {}\n{}\n",
@@ -230,7 +230,7 @@ impl Model {
                 let mut output = String::from(
                     "[Script Info]\nScriptType: v4.00+\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\nStyle: Default,Arial,24,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,2,0,2,10,10,10,1\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n",
                 );
-                for result in results {
+                for result in results.iter() {
                     let start = Self::timestamp(result.subtitle.start_timestamp, '.');
                     let end = Self::timestamp(result.subtitle.end_timestamp, '.');
                     writeln!(

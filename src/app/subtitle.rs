@@ -6,6 +6,7 @@ use cosmic::theme;
 use cosmic::widget::text_editor;
 use iced::futures::StreamExt;
 use image::RgbaImage;
+use indexmap::IndexMap;
 
 use super::*;
 use std::time::Duration;
@@ -138,20 +139,36 @@ impl SubtitleResult {
 }
 
 #[derive(Debug, Clone, Default)]
-struct SubtitleResults(Vec<SubtitleResult>);
-
-impl std::ops::Deref for SubtitleResults {
-    type Target = [SubtitleResult];
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
+pub(crate) struct SubtitleResults(IndexMap<SubtitleId, SubtitleResult>);
 
 impl SubtitleResults {
+    pub(crate) fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub(crate) fn iter(&self) -> indexmap::map::Values<'_, SubtitleId, SubtitleResult> {
+        self.0.values()
+    }
+
+    fn get_index(&self, index: usize) -> Option<&SubtitleResult> {
+        self.0.get_index(index).map(|(_, result)| result)
+    }
+
+    fn get(&self, id: SubtitleId) -> Option<&SubtitleResult> {
+        self.0.get(&id)
+    }
+
+    fn last(&self) -> Option<&SubtitleResult> {
+        self.0.last().map(|(_, result)| result)
+    }
+
     fn with_mut<R>(
         &mut self,
-        f: impl FnOnce(&mut Vec<SubtitleResult>) -> R,
+        f: impl FnOnce(&mut IndexMap<SubtitleId, SubtitleResult>) -> R,
     ) -> (R, ResultsChanged) {
         (f(&mut self.0), ResultsChanged::Full)
     }
@@ -162,15 +179,22 @@ impl SubtitleResults {
         f: impl FnOnce(&mut SubtitleResult) -> R,
     ) -> Option<(R, ResultsChanged)> {
         self.0
-            .iter_mut()
-            .find(|result| result.id == id)
+            .get_mut(&id)
             .map(|result| (f(result), ResultsChanged::Targeted(id)))
     }
 
     fn push(&mut self, result: SubtitleResult) -> ResultsChanged {
         let id = result.id;
-        self.0.push(result);
+        assert!(self.0.insert(id, result).is_none(), "subtitle ID is unique");
         ResultsChanged::Append(id)
+    }
+}
+
+impl std::ops::Index<usize> for SubtitleResults {
+    type Output = SubtitleResult;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        self.get_index(index).expect("subtitle index is in bounds")
     }
 }
 
@@ -292,7 +316,7 @@ enum VirtualRowKey {
 struct SubtitleTable<'a> {
     scroll_offset: f32,
     viewport_height: f32,
-    results: &'a [SubtitleResult],
+    results: &'a SubtitleResults,
     config: SubtitleTableConfig,
 }
 
@@ -330,15 +354,18 @@ impl<'a> SubtitleTable<'a> {
         &self,
         active_range: std::ops::Range<usize>,
     ) -> impl Iterator<Item = (VirtualRowKey, Element<'a, Message>)> {
-        self.results[active_range.clone()].iter().enumerate().map(
-            move |(relative_index, result)| {
+        self.results
+            .iter()
+            .skip(active_range.start)
+            .take(active_range.len())
+            .enumerate()
+            .map(move |(relative_index, result)| {
                 let index = SubtitleIndex(active_range.start + relative_index);
                 (
                     VirtualRowKey::Row { id: result.id },
                     self.subtitle_row(index, result).apply(Self::wrap_row),
                 )
-            },
-        )
+            })
     }
 
     fn timestamp(result: &SubtitleResult, render_atop: bool) -> Element<'_, Message> {
@@ -640,7 +667,7 @@ impl<'a> SubtitleView<'a> {
         let zoomed_result = self
             .model
             .zoomed_result_id
-            .and_then(|id| self.model.results.iter().find(|result| result.id == id));
+            .and_then(|id| self.model.results.get(id));
 
         if let Some(result) = zoomed_result {
             iced::widget::stack![content, Self::zoomed_preview(result)].into()
@@ -651,15 +678,12 @@ impl<'a> SubtitleView<'a> {
 }
 
 impl Model {
-    pub fn results(&self) -> &[SubtitleResult] {
+    pub(crate) fn results(&self) -> &SubtitleResults {
         &self.results
     }
 
     fn result_index(&self, id: SubtitleId) -> Option<SubtitleIndex> {
-        self.results
-            .iter()
-            .position(|result| result.id == id)
-            .map(SubtitleIndex)
+        self.results.0.get_index_of(&id).map(SubtitleIndex)
     }
 
     pub(crate) fn results_table(
@@ -716,7 +740,7 @@ impl Model {
         self.native_search_params = config.native_search_params;
         self.post_ocr_processing = config.post_ocr_processing;
         self.processing_resolution = config.processing_resolution;
-        let _ = self.results.with_mut(Vec::clear);
+        let _ = self.results.with_mut(IndexMap::clear);
         self.preview = None;
         self.current_timestamp = Duration::ZERO;
         self.done = false;
@@ -754,7 +778,7 @@ impl Model {
                 );
                 if replace_previous && let Some(previous_id) = self.results.last().map(|x| x.id) {
                     let (_, changed) = self.results.with_mut(|results| {
-                        let previous = results.last_mut().unwrap();
+                        let previous = results.last_mut().unwrap().1;
                         *previous = SubtitleResult::new_with_editor(previous_id, subtitle, preview);
                     });
                     return Event::SyncWithPostProduction(changed);
@@ -809,7 +833,9 @@ impl Model {
             }
             Message::Delete(id) => {
                 if let Some(SubtitleIndex(index)) = self.result_index(id) {
-                    let (result, changed) = self.results.with_mut(|results| results.remove(index));
+                    let (result, changed) = self
+                        .results
+                        .with_mut(|results| results.shift_remove_index(index).unwrap().1);
                     self.edit_history
                         .push(SubtitleEdit::Delete { index, result });
                     return Event::SyncWithPostProduction(changed);
@@ -822,9 +848,14 @@ impl Model {
                 {
                     let ((result, previous_end_timestamp), changed) =
                         self.results.with_mut(|results| {
-                            let result = results.remove(index);
+                            let result = results.shift_remove_index(index).unwrap().1;
                             let previous_end_timestamp = std::mem::replace(
-                                &mut results[index - 1].subtitle.end_timestamp,
+                                &mut results
+                                    .get_index_mut(index - 1)
+                                    .unwrap()
+                                    .1
+                                    .subtitle
+                                    .end_timestamp,
                                 result.subtitle.end_timestamp,
                             );
                             (result, previous_end_timestamp)
@@ -842,7 +873,8 @@ impl Model {
                 if let Some(edit) = self.edit_history.pop() {
                     let (_, changed) = self.results.with_mut(|results| match edit {
                         SubtitleEdit::Delete { index, result } => {
-                            results.insert(index.min(results.len()), result);
+                            let index = index.min(results.len());
+                            results.shift_insert(index, result.id, result);
                         }
                         SubtitleEdit::MergeWithPrevious {
                             index,
@@ -851,10 +883,12 @@ impl Model {
                         } => {
                             if let Some(previous) = index
                                 .checked_sub(1)
-                                .and_then(|index| results.get_mut(index))
+                                .and_then(|index| results.get_index_mut(index))
+                                .map(|(_, result)| result)
                             {
                                 previous.subtitle.end_timestamp = previous_end_timestamp;
-                                results.insert(index.min(results.len()), result);
+                                let index = index.min(results.len());
+                                results.shift_insert(index, result.id, result);
                             }
                         }
                     });
@@ -893,18 +927,22 @@ impl Model {
 
     pub(crate) fn sync_read_only_results(
         &mut self,
-        source: &[SubtitleResult],
+        source: &SubtitleResults,
         changed: ResultsChanged,
     ) -> ResultsChanged {
         let applied = match changed {
             ResultsChanged::Full => {
-                self.results =
-                    SubtitleResults(source.iter().map(SubtitleResult::read_only_copy).collect());
+                self.results = SubtitleResults(
+                    source
+                        .iter()
+                        .map(|result| (result.id, result.read_only_copy()))
+                        .collect(),
+                );
                 ResultsChanged::Full
             }
             ResultsChanged::Targeted(id) => {
-                let source_result = source.iter().find(|result| result.id == id);
-                let target = self.results.0.iter_mut().find(|result| result.id == id);
+                let source_result = source.get(id);
+                let target = self.results.0.get_mut(&id);
                 match (source_result, target) {
                     (Some(source_result), Some(target)) => {
                         *target = source_result.read_only_copy();
@@ -912,23 +950,29 @@ impl Model {
                     }
                     _ => {
                         self.results = SubtitleResults(
-                            source.iter().map(SubtitleResult::read_only_copy).collect(),
+                            source
+                                .iter()
+                                .map(|result| (result.id, result.read_only_copy()))
+                                .collect(),
                         );
                         ResultsChanged::Full
                     }
                 }
             }
             ResultsChanged::Append(id) => {
-                let source_result = source.iter().find(|result| result.id == id);
+                let source_result = source.get(id);
                 if self.results.len() + 1 == source.len()
                     && let Some(source_result) = source_result
                     && !self.results.iter().any(|result| result.id == id)
                 {
-                    self.results.0.push(source_result.read_only_copy());
+                    self.results.0.insert(id, source_result.read_only_copy());
                     ResultsChanged::Append(id)
                 } else {
                     self.results = SubtitleResults(
-                        source.iter().map(SubtitleResult::read_only_copy).collect(),
+                        source
+                            .iter()
+                            .map(|result| (result.id, result.read_only_copy()))
+                            .collect(),
                     );
                     ResultsChanged::Full
                 }
@@ -941,7 +985,7 @@ impl Model {
     }
 
     pub(crate) fn set_transformed_text(&mut self, id: SubtitleId, text: Option<String>) -> bool {
-        let Some(result) = self.results.0.iter_mut().find(|result| result.id == id) else {
+        let Some(result) = self.results.0.get_mut(&id) else {
             return false;
         };
         result.set_transformed_text(text);
@@ -949,7 +993,7 @@ impl Model {
     }
 
     pub(crate) fn clear_transformed_text(&mut self) {
-        for result in &mut self.results.0 {
+        for result in self.results.0.values_mut() {
             result.set_transformed_text(None);
         }
     }
@@ -997,7 +1041,7 @@ impl Model {
     }
 }
 
-pub fn to_srt(results: &[SubtitleResult]) -> String {
+pub(crate) fn to_srt(results: &SubtitleResults) -> String {
     extraction::to_srt(
         &results
             .iter()
