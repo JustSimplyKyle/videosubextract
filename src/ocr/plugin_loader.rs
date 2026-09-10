@@ -6,9 +6,9 @@ use libloading::Library;
 use serde::Deserialize;
 use serde::Serialize;
 use std::{
-    ffi::{CStr, CString, c_char},
+    ffi::CString,
     io::Cursor,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{Arc, OnceLock},
 };
 
@@ -57,28 +57,6 @@ pub struct VTable {
 }
 
 impl DynamicLibrary {
-    pub fn new(path: PathBuf) -> Result<DynamicLibrary> {
-        let name = Self::probe_name(&path)?;
-
-        Ok(DynamicLibrary {
-            path,
-            name,
-            loaded: Arc::default(),
-            generation: 0,
-        })
-    }
-
-    /// Re-probes the plugin metadata and returns an unloaded replacement.
-    /// Existing clones keep using their current loaded generation.
-    pub fn reload(&self) -> Result<Self> {
-        Ok(Self {
-            path: self.path.clone(),
-            name: Self::probe_name(&self.path)?,
-            generation: self.generation.wrapping_add(1),
-            loaded: Arc::default(),
-        })
-    }
-
     fn load(&self) -> Result<&LoadedDynamicLibrary> {
         if let Some(loaded) = self.loaded.get() {
             return Ok(loaded);
@@ -172,34 +150,5 @@ impl DynamicLibrary {
                 self.path.display()
             )
         })
-    }
-
-    fn probe_name(path: &Path) -> Result<String> {
-        pub const NAME_SYMBOL: &[u8] = b"ocr_name\0";
-
-        let library = unsafe { Library::new(path) }
-            .with_context(|| format!("failed to load {}", path.display()))?;
-
-        let name = unsafe {
-            let name = library
-                .get::<*const c_char>(NAME_SYMBOL)
-                .context("missing ocr_name symbol")?;
-
-            if name.is_null() {
-                bail!("ocr_name from {} is null", path.display());
-            }
-
-            CStr::from_ptr(*name)
-        };
-
-        let name = name
-            .to_str()
-            .with_context(|| format!("ocr_name from {} is not UTF-8", path.display()))?;
-
-        if name.trim().is_empty() {
-            bail!("ocr_name from {} is empty", path.display());
-        }
-
-        Ok(name.to_owned())
     }
 }

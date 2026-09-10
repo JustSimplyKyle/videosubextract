@@ -21,7 +21,7 @@ use std::{
     time::Duration,
 };
 
-pub struct PlayerState {
+pub(crate) struct PlayerState {
     pub input: ffmpeg::format::context::Input,
     pub decoder: codec::decoder::Video,
     pub filter_graph: Option<GraphWithInfo>,

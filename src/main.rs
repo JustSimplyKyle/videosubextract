@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use cosmic::iced_anim::Motion;
-
 mod app;
 pub mod apply_traits;
 mod cli;
@@ -40,23 +38,15 @@ fn main() -> eyre::Result<()> {
     Ok(())
 }
 
-fn run_gui() -> cosmic::iced::Result {
-    let mut frosted_theme = cosmic::cosmic_theme::Theme::dark_default();
-    frosted_theme.frosted = cosmic::cosmic_theme::BlurStrength::VeryHigh2;
-
-    let mut theme = cosmic::Theme::custom(std::sync::Arc::new(frosted_theme));
-    theme.transparent = true;
-
-    let settings = cosmic::app::Settings::default()
-        .theme(theme)
-        .size_limits(
-            cosmic::iced::Limits::NONE
-                .min_width(360.0)
-                .min_height(180.0),
-        )
-        .animation(Motion::SMOOTH)
-        .nav_bar_content_transition(Motion::SMOOTH);
-
-    // Starts the application's event loop with `()` as the application's flags.
-    cosmic::app::run::<app::AppModel>(settings, ())
+fn run_gui() -> iced::Result {
+    iced::application(
+        app::AppModel::boot,
+        app::AppModel::update,
+        app::AppModel::view,
+    )
+    .title(app::AppModel::title)
+    .subscription(app::AppModel::subscription)
+    .theme(app::AppModel::theme)
+    .window_size((1100.0, 760.0))
+    .run()
 }

@@ -1,9 +1,9 @@
-use cosmic::iced;
-use cosmic::iced::Color;
-use cosmic::iced::Point;
-use cosmic::iced::core::mouse;
-use cosmic::widget::canvas;
+use iced;
+use iced::Color;
+use iced::Point;
 use iced::Rectangle;
+use iced::mouse;
+use iced::widget::canvas;
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum ClickState {
@@ -417,7 +417,7 @@ struct CanvasBackground {
 }
 
 impl CanvasBackground {
-    fn draw(self, frame: &mut canvas::Frame<cosmic::Renderer>) {
+    fn draw(self, frame: &mut canvas::Frame<iced::Renderer>) {
         frame.fill_rectangle(
             Point::ORIGIN,
             self.bounds.size(),
@@ -432,7 +432,7 @@ struct SelectionOverlay {
 }
 
 impl SelectionOverlay {
-    fn draw(self, frame: &mut canvas::Frame<cosmic::Renderer>) {
+    fn draw(self, frame: &mut canvas::Frame<iced::Renderer>) {
         let selection = self.selection;
         let bounds = self.bounds;
         let dim = Color::from_rgba(0.0, 0.0, 0.0, 0.35);
@@ -471,7 +471,7 @@ impl SelectionBorder {
         Color::from_rgb(1.0, 0.0, 0.0)
     }
 
-    fn draw(self, frame: &mut canvas::Frame<cosmic::Renderer>) {
+    fn draw(self, frame: &mut canvas::Frame<iced::Renderer>) {
         frame.stroke_rectangle(
             self.selection.position(),
             self.selection.size(),
@@ -488,7 +488,7 @@ struct KeyboardEdgeHighlight {
 }
 
 impl KeyboardEdgeHighlight {
-    fn draw(self, frame: &mut canvas::Frame<cosmic::Renderer>) {
+    fn draw(self, frame: &mut canvas::Frame<iced::Renderer>) {
         let edge = self.edge.get_edge_rectangle(self.selection, 0.0);
         frame.stroke_rectangle(
             edge.position(),
@@ -505,7 +505,7 @@ struct SelectionHandles {
 }
 
 impl SelectionHandles {
-    fn draw(self, frame: &mut canvas::Frame<cosmic::Renderer>) {
+    fn draw(self, frame: &mut canvas::Frame<iced::Renderer>) {
         let (top_left, bottom_right) = SelectionGeometry(self.selection).vertices();
         let handle_size = iced::Size::new(HANDLE_RADIUS * 2.0, HANDLE_RADIUS * 2.0);
 
@@ -524,7 +524,7 @@ impl SelectionHandles {
 }
 
 impl SelectionView<'_> {
-    fn draw(&self, renderer: &cosmic::Renderer) -> Vec<canvas::Geometry> {
+    fn draw(&self, renderer: &iced::Renderer) -> Vec<canvas::Geometry> {
         let geometry = self
             .state
             .cache
@@ -588,7 +588,7 @@ impl SelectionView<'_> {
     }
 }
 
-impl canvas::Program<Message, cosmic::Theme, cosmic::Renderer> for SelectionProgram {
+impl canvas::Program<Message> for SelectionProgram {
     type State = SelectionCanvas;
 
     fn update(
@@ -604,8 +604,8 @@ impl canvas::Program<Message, cosmic::Theme, cosmic::Renderer> for SelectionProg
     fn draw(
         &self,
         state: &Self::State,
-        renderer: &cosmic::Renderer,
-        _theme: &cosmic::Theme,
+        renderer: &iced::Renderer,
+        _theme: &iced::Theme,
         bounds: Rectangle,
         _cursor: mouse::Cursor,
     ) -> Vec<canvas::Geometry> {

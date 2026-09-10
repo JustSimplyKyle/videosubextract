@@ -1,8 +1,8 @@
-use cosmic::Apply;
 use eyre::Result;
 use image::DynamicImage;
 use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
+use vse_ui::Apply;
 
 pub mod plugin_loader;
 

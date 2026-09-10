@@ -8,6 +8,7 @@ use iced::futures::SinkExt;
 use iced::{Alignment, Length, Subscription, Task};
 use rfd::AsyncFileDialog;
 use std::{fmt::Write, path::PathBuf, sync::Arc, time::Duration};
+use vse_ui as cosmic;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PreviewMode {
@@ -380,16 +381,14 @@ impl Model {
                     .font(cosmic::font::semibold())
                     .width(Length::Fill)
                     .wrapping(iced::widget::text::Wrapping::None)
-                    .ellipsize(iced::widget::text::Ellipsize::End(
-                        iced::advanced::text::EllipsizeHeightLimit::Lines(1)
-                    )),
+                    .ellipsis(iced::widget::text::Ellipsis::End),
                 widget::text::caption(details)
             ]
             .width(Length::Fill)
             .spacing(cosmic::theme::spacing().space_xxs),
             widget::column![
                 widget::text(status)
-                    .class(cosmic::theme::Text::Accent)
+                    .style(cosmic::theme::Text::Accent::style)
                     .align_x(iced::widget::text::Alignment::Right)
                     .width(Length::Fill),
                 widget::text::caption(state)
@@ -402,7 +401,7 @@ impl Model {
         .align_y(Alignment::Center)
         .padding(cosmic::theme::spacing().space_m)
         .apply(widget::container)
-        .class(cosmic::theme::Container::Card)
+        .style(cosmic::theme::Container::Card::style)
         .width(Length::Fill)
         .into()
     }
@@ -434,28 +433,28 @@ impl Model {
         let conversion_section = widget::settings::section()
             .title(fl!("chinese-conversion"))
             .add(
-                widget::settings::item::builder(fl!("apply-opencc-conversion"))
+                widget::settings::togglable(fl!("apply-opencc-conversion"))
                     .description(fl!("conversion-export-note"))
                     .toggler(self.opencc_enabled, Message::ToggleOpenCc),
             )
             .add(widget::settings::item(fl!("conversion-mode"), conversion))
             .add(
-                widget::settings::item::builder(fl!("preserve-line-breaks"))
-                    .checkbox(self.preserve_line_breaks, Message::TogglePreserveLineBreaks),
+                widget::settings::togglable(fl!("preserve-line-breaks"))
+                    .toggler(self.preserve_line_breaks, Message::TogglePreserveLineBreaks),
             );
 
         widget::settings::view_column(vec![
             format_section.into(),
             file_section.into(),
             conversion_section.into(),
-            widget::button::text(format!(
+            widget::button(widget::text(format!(
                 "{} .{}",
                 fl!("export"),
                 self.selected_format().extension().to_uppercase()
-            ))
-            .class(cosmic::theme::Button::Suggested)
+            )))
+            .style(cosmic::theme::Button::Suggested::style)
             .on_press_maybe((!disabled).then_some(Message::Export))
-            .width(Length::Fill)
+            .width(Length::Shrink)
             .into(),
         ])
         .spacing(spacing.space_m)
@@ -499,7 +498,7 @@ impl Model {
         .padding(cosmic::theme::spacing().space_m)
         .height(Length::Fill)
         .apply(widget::container)
-        .class(cosmic::theme::Container::Card)
+        .style(cosmic::theme::Container::Card::style)
         .width(Length::FillPortion(3));
 
         widget::row![

@@ -2,11 +2,12 @@ use crate::config::{ProcessingResolution, SubtitleDetector};
 use crate::extraction::{self, OcrHandle, Request as ExtractionRequest, Subtitle};
 use crate::native_video_sub_finder::NativeSearchParams;
 use crate::video_player::CropRect;
-use cosmic::theme;
 use cosmic::widget::text_editor;
+use cosmic::{Apply, Element};
 use iced::futures::StreamExt;
 use image::RgbaImage;
 use indexmap::IndexMap;
+use vse_ui as cosmic;
 
 use super::*;
 use std::time::Duration;
@@ -281,7 +282,7 @@ pub enum Message {
         viewport_height: f32,
     },
     JumpToEnd {
-        id: iced::id::Id,
+        id: iced::widget::Id,
     },
     ShowJumpToEnd,
     SearchDone,
@@ -345,7 +346,7 @@ impl<'a> SubtitleTable<'a> {
     }
 
     fn wrap_row(item: Element<'a, Message>) -> Element<'a, Message> {
-        widget::column![item, widget::divider::horizontal::light()]
+        widget::column![item, widget::rule::horizontal(1)]
             .height(Length::Fixed(Self::row_pitch()))
             .into()
     }
@@ -408,7 +409,7 @@ impl<'a> SubtitleTable<'a> {
                 .apply(widget::container)
                 .width(Length::Fixed(24.0))
                 .center_y(Length::Fill)
-                .class(theme::Container::Card)
+                .style(cosmic::theme::Container::Card::style)
                 .into()
         } else {
             widget::image(result.preview.clone())
@@ -423,15 +424,15 @@ impl<'a> SubtitleTable<'a> {
 
         let subtitle_text: Element<'a, Message> = if self.config.read_only {
             widget::text(result.text_for_display(self.config.show_transformed))
-                .selectable()
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .align_y(iced::alignment::Vertical::Center)
                 .apply(widget::scrollable)
+                .horizontal()
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .apply(widget::container)
-                .class(theme::Container::Secondary)
+                .style(cosmic::theme::Container::Secondary::style)
                 .padding([spacing.space_s, spacing.space_m])
                 .center_y(Length::Fill)
                 .height(Length::Fill)
@@ -458,18 +459,22 @@ impl<'a> SubtitleTable<'a> {
                 .into()
         };
 
-        widget::row!(leading, timing_and_text)
-            .push_maybe((!self.config.read_only).then(|| Self::toolbar(index, result.id)))
-            .spacing(spacing.space_m)
+        let mut row = widget::row!(leading, timing_and_text);
+        if !self.config.read_only {
+            row = row.push(Self::toolbar(index, result.id));
+        }
+        row.spacing(spacing.space_m)
             .padding([spacing.space_s, spacing.space_m])
             .height(Length::Fill)
             .align_y(Alignment::Center)
             .into()
     }
     fn toolbar(index: SubtitleIndex, id: SubtitleId) -> Element<'static, Message> {
-        widget::row::with_capacity(2)
-            .push_maybe((index.0 != 0).then_some(Self::merge_with_previous(id)))
-            .push(Self::delete(id))
+        let mut row = widget::Row::with_capacity(2);
+        if index.0 != 0 {
+            row = row.push(Self::merge_with_previous(id));
+        }
+        row.push(Self::delete(id))
             .spacing(cosmic::theme::spacing().space_s)
             .align_y(Alignment::Center)
             .into()
@@ -478,28 +483,26 @@ impl<'a> SubtitleTable<'a> {
         id: SubtitleId,
         content: &'a widget::text_editor::Content,
     ) -> Element<'a, Message> {
-        widget::text_editor::text_editor(content)
+        widget::text_editor(content)
             .on_action(move |action| Message::SubtitleContentEdit { id, action })
             .height(Length::Fill)
-            .min_height(48.0)
-            .style(|x, y| {
-                use iced::widget::text_editor::Catalog;
-                let mut style = x.style(&theme::iced::TextEditor::default(), y);
+            .style(|theme, status| {
+                let mut style = widget::text_editor::default(theme, status);
                 style.border.width = 2.0;
                 style
             })
             .apply(Element::from)
     }
     fn delete(id: SubtitleId) -> Element<'static, Message> {
-        widget::button::icon(widget::icon::from_name("edit-delete-symbolic"))
+        widget::button(widget::icon::from_name("edit-delete-symbolic"))
             .on_press(Message::Delete(id))
-            .class(cosmic::theme::Button::Destructive)
+            .style(cosmic::theme::Button::Destructive::style)
             .into()
     }
     fn merge_with_previous(id: SubtitleId) -> Element<'static, Message> {
-        widget::button::icon(widget::icon::from_name("go-up-symbolic"))
+        widget::button(widget::icon::from_name("go-up-symbolic"))
             .on_press(Message::MergeWithPrevious(id))
-            .class(cosmic::theme::Button::Icon)
+            .style(cosmic::theme::Button::Icon::style)
             .into()
     }
     fn view(self) -> Element<'a, Message> {
@@ -548,7 +551,7 @@ impl<'a> SubtitleView<'a> {
                 "complete-subtitles-found",
                 count = self.model.results.len()
             ))
-            .class(cosmic::theme::Text::Accent)
+            .style(cosmic::theme::Text::Accent::style)
             .into()
         } else if self.model.search_active {
             let status_text = widget::text(fl!(
@@ -557,12 +560,13 @@ impl<'a> SubtitleView<'a> {
                 igt = self.model.current_timestamp.apply(format_duration),
                 eta = self.model.progress_bar.eta().apply(Self::format_eta)
             ))
-            .class(cosmic::theme::Text::Accent);
+            .style(cosmic::theme::Text::Accent::style);
 
-            let progress_bar = widget::progress_bar::determinate_linear(
+            let progress_bar = widget::progress_bar(
+                0.0..=1.0,
                 self.model.current_timestamp.as_secs_f32() / self.video_duration.as_secs_f32(),
             )
-            .width(Length::Fill);
+            .length(Length::Fill);
 
             widget::row!(status_text, progress_bar)
                 .spacing(cosmic::theme::spacing().space_s)
@@ -571,16 +575,17 @@ impl<'a> SubtitleView<'a> {
                 .into()
         } else {
             widget::text(fl!("no-active-search"))
-                .class(cosmic::theme::Text::Accent)
+                .style(cosmic::theme::Text::Accent::style)
                 .into()
         }
     }
 
     fn controls(&self) -> Element<'a, Message> {
-        let to_post_prod = widget::button::text(fl!("post-production"))
-            .class(cosmic::theme::Button::Suggested)
+        let to_post_prod = widget::button(widget::text(fl!("post-production")))
+            .style(cosmic::theme::Button::Suggested::style)
             .on_press_maybe((!self.model.search_active).then_some(Message::GoToPostProduction));
-        let undo_edit = widget::button::icon(icon::from_name("edit-undo-symbolic"))
+        let undo_edit = widget::button(icon::from_name("edit-undo-symbolic"))
+            .style(cosmic::theme::Button::Icon::style)
             .on_press_maybe((!self.model.edit_history.is_empty()).then_some(Message::UndoEdit));
 
         widget::row![self.status(), undo_edit, to_post_prod]
@@ -599,23 +604,20 @@ impl<'a> SubtitleView<'a> {
         )
         .align_x(Alignment::Center)
         .apply(widget::container)
-        .class(cosmic::theme::Container::Card)
+        .style(cosmic::theme::Container::Card::style)
         .padding(20)
         .into()
     }
 
     fn header(&self) -> Option<Element<'a, Message>> {
         self.model.preview.as_ref().map(|handle| {
-            widget::Row::new()
+            let mut row = widget::Row::new()
                 .spacing(cosmic::theme::spacing().space_s)
-                .push(Self::preview_card(fl!("view"), handle))
-                .push_maybe(
-                    self.model
-                        .results
-                        .last()
-                        .map(|result| Self::preview_card(fl!("current"), &result.preview)),
-                )
-                .into()
+                .push(Self::preview_card(fl!("view"), handle));
+            if let Some(result) = self.model.results.last() {
+                row = row.push(Self::preview_card(fl!("current"), &result.preview));
+            }
+            row.into()
         })
     }
 
@@ -638,24 +640,21 @@ impl<'a> SubtitleView<'a> {
     }
 
     fn zoomed_preview(result: &'a SubtitleResult) -> Element<'a, Message> {
-        widget::dialog()
-            .title(fl!("subtitle-preview"))
-            .control(
-                widget::image(result.preview.clone())
-                    .expand(true)
-                    .content_fit(iced::ContentFit::Contain),
-            )
-            .primary_action(
-                widget::button::icon(icon::from_name("window-close-symbolic"))
-                    .class(theme::Button::Icon)
-                    .on_press(Message::CloseSubtitlePreview),
-            )
-            .width(Length::Fill)
-            .max_width(1000.0)
-            .apply(widget::container)
-            .center(Length::Fill)
-            .style(|_| widget::container::background(iced::Color::from_rgba(0., 0., 0., 0.45)))
-            .into()
+        cosmic::components::dialog(
+            fl!("subtitle-preview"),
+            widget::image(result.preview.clone())
+                .expand(true)
+                .content_fit(iced::ContentFit::Contain),
+            widget::button(icon::from_name("window-close-symbolic"))
+                .style(cosmic::theme::Button::Icon::style)
+                .on_press(Message::CloseSubtitlePreview),
+        )
+        .apply(widget::container)
+        .width(1000.0)
+        .apply(widget::container)
+        .center(Length::Fill)
+        .style(|_| widget::container::background(iced::Color::from_rgba(0., 0., 0., 0.45)))
+        .into()
     }
 
     fn view(&self) -> Element<'a, Message> {
@@ -691,12 +690,12 @@ impl Model {
         config: SubtitleTableConfig,
         show_jump_to_end: bool,
     ) -> Element<'_, Message> {
-        let scrollable_id = iced::id::Id::new("scrollable");
+        let scrollable_id = iced::widget::Id::new("scrollable");
         let jump_to_end = (show_jump_to_end
             && self.scrollbar_jump_status == ScrollbarJumpStatus::DisplayButton)
             .then_some(
-                widget::button::text(fl!("jump-to-latest"))
-                    .class(cosmic::theme::Button::Suggested)
+                widget::button(widget::text(fl!("jump-to-latest")))
+                    .style(cosmic::theme::Button::Suggested::style)
                     .on_press(Message::JumpToEnd {
                         id: scrollable_id.clone(),
                     })
@@ -721,7 +720,7 @@ impl Model {
 
         iced::widget::stack![results, jump_to_end]
             .apply(widget::container)
-            .class(theme::Container::List)
+            .style(cosmic::theme::Container::List::style)
             .height(Length::Fill)
             .into()
     }
