@@ -1,44 +1,72 @@
-# Videosubextract
+# VideoSubExtract
 
-An application that extracts hard-subs into srt files
+VideoSubExtract turns hard-coded video subtitles into editable SRT files. It provides a graphical workflow for selecting the subtitle region, detecting subtitle changes, running OCR, correcting the results, and exporting them.
 
-## Installation
+## Features
 
-A [justfile](./justfile) is included by default for the [casey/just][just] command runner.
+- Video seeking and a visual region picker, with keyboard adjustment of selection edges.
+- Live subtitle results with editing, merge, preview, and undo support.
+- Selectable built-in OCR models and dynamically loaded OCR plugins(WIP)
+- SRT exporting support.
+- OpenCC conversion in the export preview.
+- English and Traditional Chinese interfaces, localized with Fluent.
+- A command-line extraction mode for scripted use.
 
-- `just` builds the application with the default `just build-release` recipe
-- `just run` builds and runs the application
-- `just install` installs the project into the system
-- `just vendor` creates a vendored tarball
-- `just build-vendored` compiles with vendored dependencies from that tarball
-- `just check` runs clippy on the project to check for linter warnings
-- `just check-json` can be used by IDEs that support LSP
+![Selecting a subtitle region](a.png)
 
-## Translators
+![Reviewing extracted subtitles](b.png)
 
-[Fluent][fluent] is used for localization of the software. Fluent's translation files are found in the [i18n directory](./i18n). New translations may copy the [English (en) localization](./i18n/en) of the project, rename `en` to the desired [ISO 639-1 language code][iso-codes], and then translations can be provided for each [message identifier][fluent-guide]. If no translation is necessary, the message may be omitted.
+![Previewing and exporting subtitles](c.png)
 
-## Packaging
+## Development status
 
-If packaging for a Linux distribution, vendor dependencies locally with the `vendor` rule, and build with the vendored sources using the `build-vendored` rule. When installing files, use the `rootdir` and `prefix` variables to change installation paths.
+The application is under active development and currently targets Linux. There are no packaged releases yet; building requires several native libraries and local checkouts described below.
 
-```sh
-just vendor
-just build-vendored
-just rootdir=debian/videosubextract prefix=/usr install
+The default detector uses the original VideoSubFinder C++ algorithm. The alternative Rust detector is an early experiment with known correctness and performance problems and is not recommended for normal use.
+
+## Architecture and history
+
+The GUI was originally built with libcosmic. It is being migrated to an [Iced `0.15.0-dev` fork](https://github.com/JustSimplyKyle/iced/tree/dioxus-hot-reload) so it can use upstream Iced APIs while retaining the project's COSMIC-inspired interface. Reusable presentation components and styling live in the `vse-ui` workspace crate. `cosmic-config` and `cosmic-theme` are still used directly.
+
+Development hot-patching comes from the project's Iced fork: its `hot` feature integrates the Dioxus devtools protocol, while `dioxus-cli` runs the development build. The `just dev` and `just dev-release` recipes invoke `dx serve`; Cargo's older hot-reload command is not used.
+
+Video decoding is implemented in Rust with FFmpeg through `ffmpeg-the-third`. The decoder currently does not configure hardware acceleration. Frames are passed across a C ABI to a headless adapter in the VideoSubFinder submodule, which calls the original `FastSearchSubtitles` implementation. The headless native target does not depend on wxWidgets; a small internal shim supplies the legacy types it needs. It links against OpenCV and oneTBB.
+
+OCR is separate from subtitle detection. The detected regions are processed by `ocr-rs` or a compatible dynamic-library plugin, then presented for correction and post-processing before export.
+
+## Building
+
+The Nix development shell documents and supplies the native toolchain. The repository currently expects these sibling/local sources:
+
+```text
+../iced-dioxus       # Iced 0.15.0-dev fork, branch dioxus-hot-reload
+../libcosmic         # cosmic-config and cosmic-theme
+vendor/cosmic-text  # local cosmic-text patch
 ```
 
-It is recommended to build a source tarball with the vendored dependencies, which can typically be done by running `just vendor` on the host system before it enters the build environment.
+Clone the VideoSubFinder submodule, enter the development shell, and run the application:
 
-## Developers
+```sh
+git submodule update --init --recursive
+nix develop
+just dev
+```
 
-Developers should install [rustup][rustup] and configure their editor to use [rust-analyzer][rust-analyzer]. To improve compilation times, disable LTO in the release profile, install the [mold][mold] linker, and configure [sccache][sccache] for use with Rust. The [mold][mold] linker will only improve link times if LTO is disabled.
+Use `just dev-release` for a release-mode hot-patched build or `just release` for a regular release build.
 
-[fluent]: https://projectfluent.org/
-[fluent-guide]: https://projectfluent.org/fluent/guide/hello.html
-[iso-codes]: https://en.wikipedia.org/wiki/List_of_ISO_639-1_codes
-[just]: https://github.com/casey/just
-[rustup]: https://rustup.rs/
-[rust-analyzer]: https://rust-analyzer.github.io/
-[mold]: https://github.com/rui314/mold
-[sccache]: https://github.com/mozilla/sccache
+The CLI accepts a video and writes an SRT beside it by default:
+
+```sh
+cargo run --release -- video.mkv
+cargo run --release -- video.mkv --output subtitles.srt --crop 1920x280@0,800
+```
+
+## Contributing
+
+Keep extraction logic independent of the GUI where practical. In UI code, `.apply()` is used to keep builder expressions shallow, and Iced's component API is preferred for reusable controls that own local state. Add user-visible strings to the Fluent files under `i18n/`.
+
+Please treat the Rust subtitle detector as experimental and compare changes against the default C++ detector with representative videos.
+
+## License
+
+VideoSubExtract is licensed under the Mozilla Public License 2.0. The VideoSubFinder submodule and other dependencies retain their own licenses.
