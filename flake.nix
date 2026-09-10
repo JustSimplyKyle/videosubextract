@@ -76,7 +76,6 @@
               clangMold
               sccache
               samply
-              wxwidgets_3_2
               vulkan-loader
               tbb
               dioxus-cli
