@@ -42,6 +42,7 @@ pub struct AppModel {
     prepare: prepare::Model,
     subtitle: subtitle::Model,
     post_production: post_production::Model,
+    post_text_revision: u64,
     errors: Vec<Arc<eyre::Report>>,
 }
 
@@ -167,6 +168,7 @@ impl AppModel {
                 prepare: prepare::Model::default(),
                 subtitle: subtitle::Model::default(),
                 post_production: post_production::Model::default(),
+                post_text_revision: 0,
                 errors: Vec::new(),
             },
             Task::none(),
@@ -199,15 +201,37 @@ impl AppModel {
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        // Rearm before recording a page with newly introduced text. Ordinary
+        // navigation and viewport updates keep the already prepared page ready.
+        if matches!(
+            &message,
+            Message::Prepare(
+                prepare::Message::LoadVideo(_)
+                    | prepare::Message::VideoFilePicked(Some(_))
+                    | prepare::Message::StartSubtitleDisplay
+            ) | Message::Subtitle(
+                subtitle::Message::SearchDone | subtitle::Message::SearchError(_)
+            ) | Message::PostProduction(
+                post_production::Message::SelectPreviewMode(_)
+                    | post_production::Message::ToggleOpenCc(_)
+                    | post_production::Message::SelectOpenCcMode(_)
+                    | post_production::Message::TogglePreserveLineBreaks(_)
+            )
+        ) {
+            self.post_text_revision = self.post_text_revision.wrapping_add(1);
+        }
         match message {
             Message::SelectPage(page) => {
                 if page == Page::PostProduction {
-                    self.post_production.sync(
+                    let filename_changed = self.post_production.sync(
                         self.prepare.video_path.as_ref(),
                         self.subtitle.results(),
                         subtitle::ResultsChanged::Full,
                         &self.config,
                     );
+                    if filename_changed {
+                        self.post_text_revision = self.post_text_revision.wrapping_add(1);
+                    }
                 }
                 self.active_page = page;
                 Task::none()
@@ -225,6 +249,7 @@ impl AppModel {
                 Task::none()
             }
             Message::SetLanguage(value) => {
+                self.post_text_revision = self.post_text_revision.wrapping_add(1);
                 let _ = i18n::select(value.code());
                 let _ = self.config.set_language(&self.config_handler, value);
                 self.post_production.refresh_language();
@@ -267,16 +292,20 @@ impl AppModel {
             },
             Message::Subtitle(message) => match self.subtitle.update(message, &self.config) {
                 subtitle::Event::GoToPostProduction => {
-                    self.post_production.sync(
+                    let filename_changed = self.post_production.sync(
                         self.prepare.video_path.as_ref(),
                         self.subtitle.results(),
                         subtitle::ResultsChanged::Full,
                         &self.config,
                     );
+                    if filename_changed {
+                        self.post_text_revision = self.post_text_revision.wrapping_add(1);
+                    }
                     self.active_page = Page::PostProduction;
                     Task::none()
                 }
                 subtitle::Event::SyncWithPostProduction(changed) => {
+                    self.post_text_revision = self.post_text_revision.wrapping_add(1);
                     self.post_production.sync(
                         self.prepare.video_path.as_ref(),
                         self.subtitle.results(),
@@ -364,6 +393,7 @@ impl AppModel {
         });
 
         shell::Shell::new(active.label(), active.details(), content)
+            .defer_text_preparation(active == Page::PostProduction, self.post_text_revision)
             .navigation(navigation)
             .header_controls(Message::ToggleNavigation, Message::ToggleSettings)
             .toasts(

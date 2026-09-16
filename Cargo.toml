@@ -11,7 +11,7 @@ members = ["crates/vse-ui"]
 resolver = "3"
 
 [workspace.dependencies]
-iced = { path = "../iced-dioxus", default-features = false, features = [
+iced = { git = "https://github.com/JustSimplyKyle/iced.git", rev = "3ea61bed9f5fd7b1791ee7f8443fe2882ae4477a", default-features = false, features = [
     "advanced",
     "canvas",
     "image-without-codecs",
@@ -24,8 +24,7 @@ iced = { path = "../iced-dioxus", default-features = false, features = [
 ] }
 
 [patch.crates-io]
-# Experiment: avoid cosmic-text repeatedly discarding its font-match cache when
-# a mix of UI and subtitle text produces more than 256 matching configurations.
+# Share family-independent font matching work between UI fonts.
 cosmic-text = { path = "vendor/cosmic-text" }
 
 [dependencies]

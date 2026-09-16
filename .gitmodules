@@ -3,4 +3,4 @@
 	url = https://github.com/JustSimplyKyle/videosubfinder-src.git
 [submodule "vendor/cosmic-text"]
 	path = vendor/cosmic-text
-	url = https://github.com/pop-os/cosmic-text.git
+	url = https://github.com/JustSimplyKyle/cosmic-text.git
