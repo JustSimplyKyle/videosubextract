@@ -1,3 +1,6 @@
 [submodule "third_party/videosubfinder-src"]
 	path = third_party/videosubfinder-src
 	url = https://github.com/JustSimplyKyle/videosubfinder-src.git
+[submodule "vendor/cosmic-text"]
+	path = vendor/cosmic-text
+	url = https://github.com/pop-os/cosmic-text.git
