@@ -143,16 +143,22 @@ pub enum Event {
 }
 
 impl Model {
+    /// Synchronizes source data and reports whether the displayed filename changed.
     pub fn sync(
         &mut self,
         path: Option<&PathBuf>,
         results: &subtitle::SubtitleResults,
         changed: subtitle::ResultsChanged,
         config: &Config,
-    ) {
-        if let Some(stem) = path.and_then(|path| path.file_stem()) {
-            self.filename = stem.to_string_lossy().into_owned();
-        }
+    ) -> bool {
+        let filename_changed = if let Some(stem) = path.and_then(|path| path.file_stem()) {
+            let filename = stem.to_string_lossy();
+            let changed = self.filename != filename;
+            self.filename = filename.into_owned();
+            changed
+        } else {
+            false
+        };
         let changed = self.preview.sync_read_only_results(results, changed);
         self.transformation_inputs = match changed {
             subtitle::ResultsChanged::Full => self.all_transformation_inputs(),
@@ -161,6 +167,7 @@ impl Model {
             }
         };
         let _ = self.update(Message::Request, config);
+        filename_changed
     }
 
     fn all_transformation_inputs(&self) -> Arc<[(subtitle::SubtitleId, String)]> {

@@ -3,6 +3,8 @@
 pub use iced::widget::*;
 pub use iced::widget::{canvas, image, text_editor};
 
+pub mod deferred;
+
 pub mod icon {
     use iced::{Element, Length};
 

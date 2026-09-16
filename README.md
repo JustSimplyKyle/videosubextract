@@ -36,15 +36,14 @@ OCR is separate from subtitle detection. The detected regions are processed by `
 
 ## Building
 
-The Nix development shell documents and supplies the native toolchain. The repository currently expects these sibling/local sources:
+The Nix development shell documents and supplies the native toolchain. Cargo pins the Iced fork and its Cryoglyph dependency to the text-preparation fixes in JustSimplyKyle’s repositories. The remaining sibling/local sources are:
 
 ```text
-../iced-dioxus       # Iced 0.15.0-dev fork, branch dioxus-hot-reload
 ../libcosmic         # cosmic-config and cosmic-theme
-vendor/cosmic-text  # local cosmic-text patch
+vendor/cosmic-text  # pinned JustSimplyKyle/cosmic-text submodule
 ```
 
-Clone the VideoSubFinder submodule, enter the development shell, and run the application:
+Initialize the submodules, enter the development shell, and run the application:
 
 ```sh
 git submodule update --init --recursive

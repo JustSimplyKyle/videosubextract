@@ -17,6 +17,8 @@ pub struct Shell<'a, Message> {
     controls: Option<(Message, Message)>,
     toasts: Vec<(String, Message)>,
     dialog: Option<Element<'a, Message>>,
+    deferred: bool,
+    text_revision: u64,
 }
 
 impl<'a, Message: Clone + 'a> Shell<'a, Message> {
@@ -33,11 +35,19 @@ impl<'a, Message: Clone + 'a> Shell<'a, Message> {
             controls: None,
             toasts: Vec::new(),
             dialog: None,
+            deferred: false,
+            text_revision: 0,
         }
     }
 
     pub fn navigation(mut self, items: Vec<NavigationItem<Message>>) -> Self {
         self.navigation = items;
+        self
+    }
+
+    pub fn defer_text_preparation(mut self, enabled: bool, revision: u64) -> Self {
+        self.deferred = enabled;
+        self.text_revision = revision;
         self
     }
 
@@ -97,6 +107,8 @@ impl<'a, Message: Clone + 'a> From<Shell<'a, Message>> for Element<'a, Message> 
             shell.content,
         ]
         .spacing(16);
+        let page =
+            crate::widget::deferred::Deferred::new(page, shell.deferred, shell.text_revision);
 
         let content: Element<'a, Message> = row![
             container(nav)
