@@ -1,3 +1,49 @@
+//! Subtitle editing and the ordered, stable-ID result collection.
+//!
+//! # Source data and presentation state
+//!
+//! `SubtitleResult::subtitle` holds the source cue, including its text and timing.
+//! Editor actions currently copy `Content::text()` back into that cue. Editor
+//! content also holds cursor/selection state; it is not an export representation.
+//! `DisplayOnly` holds an optional transformed-text cache and reads original
+//! text directly from the source cue in its snapshot.
+//! Transformations must never overwrite the source cue. A source replacement
+//! invalidates the affected snapshot's transformed text.
+//!
+//! # Change propagation
+//!
+//! Mutation helpers return a [`ResultsChanged`] describing an already-applied
+//! mutation. They do not notify listeners or synchronize another model. In
+//! [`Model::update`], forward that value as [`Event::SyncWithPostProduction`].
+//! The application handles the event by calling `post_production::Model::sync`
+//! with the latest source results. That method updates the export snapshot,
+//! selects conversion inputs, and advances the conversion generation so stale
+//! asynchronous replies are ignored. Do not call sync from the collection:
+//! coordinating the two models is the application's responsibility.
+//!
+//! A change is an invalidation hint, not a self-contained patch: it contains no
+//! cue data and must be paired with the source state it describes. Preserve event
+//! order. If batching multiple mutations, use `Full` unless all affected IDs are
+//! represented; forwarding only the final targeted change loses earlier changes.
+//! Full synchronization on entry to post-production also covers source resets
+//! that do not emit an event (currently `start_search`).
+//!
+//! # Refactoring direction and current limitations
+//!
+//! Source text lives in `Subtitle`, with editor content and transformed text as
+//! presentation caches. Sync borrows the source collection and copies only cue
+//! data and preview handles for affected IDs; editor content is never copied.
+//! A full rebuild copies every cue. The export snapshot owns its cue data so it
+//! can outlive the borrow of the editing model and keep separate conversion state.
+//!
+//! The current mutation helpers conservatively report changes even for no-op
+//! closures. In particular, cursor/selection actions currently copy text and
+//! invalidate conversions too. A more specific mutation API could report an
+//! optional change only when source text, timing, or membership actually changes.
+//! `Full` resets all transformed caches, and every snapshot sync resets scroll
+//! state; these are current implementation choices, not requirements of the
+//! notification protocol.
+
 use crate::config::{ProcessingResolution, SubtitleDetector};
 use crate::extraction::{self, OcrHandle, Request as ExtractionRequest, Subtitle};
 use crate::native_video_sub_finder::NativeSearchParams;
@@ -24,9 +70,20 @@ pub struct SubtitleId(pub(crate) u64);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[must_use]
+/// Invalidation scope for a source mutation that has already happened.
+///
+/// Consume this through [`Event::SyncWithPostProduction`] during normal model
+/// updates. Explicit `Full` values are appropriate when entering post-production
+/// or rebuilding its snapshot. Dropping a value does not undo the mutation.
 pub enum ResultsChanged {
+    /// Rebuild the entire snapshot, including membership and ordering.
+    /// Use for deletion, merge, undo, reset, or several changed cues.
     Full,
+    /// Replace one existing cue without changing membership or ordering.
+    /// Its transformed cache is invalidated; other cues retain theirs.
     Targeted(SubtitleId),
+    /// Add one new cue at the end, preserving existing transformed caches.
+    /// The ID must be new to the destination and present in the source.
     Append(SubtitleId),
 }
 
@@ -54,16 +111,17 @@ pub struct SubtitleResult {
 }
 
 #[derive(Debug, Clone)]
-enum SubtitleDisplay {
+pub enum SubtitleDisplay {
     Editor(text_editor::Content),
-    DisplayOnly {
-        original: String,
-        transformed: Option<String>,
-    },
+    DisplayOnly { transformed: Option<String> },
 }
 
 impl SubtitleResult {
-    fn new_with_editor(id: SubtitleId, subtitle: Subtitle, preview: widget::image::Handle) -> Self {
+    pub fn new_with_editor(
+        id: SubtitleId,
+        subtitle: Subtitle,
+        preview: widget::image::Handle,
+    ) -> Self {
         let editor_content = text_editor::Content::with_text(subtitle.text());
 
         Self {
@@ -74,25 +132,26 @@ impl SubtitleResult {
         }
     }
 
-    fn new_with_readonly(
+    pub fn new_with_display(
         id: SubtitleId,
         subtitle: Subtitle,
         preview: widget::image::Handle,
     ) -> Self {
-        let original = subtitle.text().to_string();
         Self {
             id,
             subtitle,
             preview,
-            display: SubtitleDisplay::DisplayOnly {
-                original,
-                transformed: None,
-            },
+            display: SubtitleDisplay::DisplayOnly { transformed: None },
         }
     }
 
-    fn read_only_copy(&self) -> Self {
-        Self::new_with_readonly(self.id, self.subtitle.clone(), self.preview.clone())
+    /// Replace presentation state with an untransformed source-text snapshot.
+    ///
+    /// This discards editor state and any previous transformation. Cloning an
+    /// editable result before calling this also clones the discarded editor.
+    pub fn into_readonly(mut self) -> Self {
+        self.display = SubtitleDisplay::DisplayOnly { transformed: None };
+        self
     }
 
     pub(crate) const fn id(&self) -> SubtitleId {
@@ -100,29 +159,26 @@ impl SubtitleResult {
     }
 
     pub(crate) fn text_for_display(&self, show_transformed: bool) -> &str {
-        match &self.display {
-            SubtitleDisplay::Editor(_) => self.subtitle.text(),
-            SubtitleDisplay::DisplayOnly {
-                original,
-                transformed,
-            } => {
-                if show_transformed {
-                    transformed.as_deref().unwrap_or(original)
-                } else {
-                    original
-                }
-            }
+        if show_transformed
+            && let SubtitleDisplay::DisplayOnly {
+                transformed: Some(text),
+            } = &self.display
+        {
+            return text;
         }
+        self.original_text()
     }
 
     pub(crate) fn original_text(&self) -> &str {
-        match &self.display {
-            SubtitleDisplay::Editor(_) => self.subtitle.text(),
-            SubtitleDisplay::DisplayOnly { original, .. } => original,
-        }
+        self.subtitle.text()
     }
 
-    pub(crate) fn needs_transformation(&self) -> bool {
+    /// Copy cue data into a read-only result without copying editor state.
+    fn readonly_snapshot(&self) -> Self {
+        Self::new_with_display(self.id, self.subtitle.clone(), self.preview.clone())
+    }
+
+    pub(crate) const fn needs_transformation(&self) -> bool {
         matches!(
             &self.display,
             SubtitleDisplay::DisplayOnly {
@@ -140,9 +196,19 @@ impl SubtitleResult {
 }
 
 #[derive(Debug, Clone, Default)]
-pub(crate) struct SubtitleResults(IndexMap<SubtitleId, SubtitleResult>);
+pub struct SubtitleResults(IndexMap<SubtitleId, SubtitleResult>);
 
 impl SubtitleResults {
+    /// Copy source cues into a read-only snapshot, preserving IDs and order.
+    /// Editor content is deliberately excluded from the copy.
+    pub(crate) fn readonly_snapshot(&self) -> Self {
+        Self(
+            self.iter()
+                .map(|result| (result.id, result.readonly_snapshot()))
+                .collect(),
+        )
+    }
+
     pub(crate) fn len(&self) -> usize {
         self.0.len()
     }
@@ -167,6 +233,8 @@ impl SubtitleResults {
         self.0.last().map(|(_, result)| result)
     }
 
+    /// Apply an unrestricted mutation and conservatively invalidate all cues.
+    /// The caller must forward the returned change; no notification is sent here.
     fn with_mut<R>(
         &mut self,
         f: impl FnOnce(&mut IndexMap<SubtitleId, SubtitleResult>) -> R,
@@ -174,6 +242,8 @@ impl SubtitleResults {
         (f(&mut self.0), ResultsChanged::Full)
     }
 
+    /// Mutate one existing cue and return its invalidation hint, even for a no-op.
+    /// Returns `None` for a stale ID. The closure must preserve the cue's ID.
     fn with_mut_entry<R>(
         &mut self,
         id: SubtitleId,
@@ -184,6 +254,7 @@ impl SubtitleResults {
             .map(|result| (f(result), ResultsChanged::Targeted(id)))
     }
 
+    /// Append a fresh ID and return the change for the caller to forward.
     fn push(&mut self, result: SubtitleResult) -> ResultsChanged {
         let id = result.id;
         assert!(self.0.insert(id, result).is_none(), "subtitle ID is unique");
@@ -301,6 +372,8 @@ pub enum Message {
 
 pub enum Event {
     GoToPostProduction,
+    /// Ask the application to synchronize the export preview from `results()`.
+    /// The source mutation is already committed; this event carries its scope.
     SyncWithPostProduction(ResultsChanged),
     Run(Task<Message>),
     Error(eyre::Report),
@@ -924,55 +997,47 @@ impl Model {
         }
     }
 
-    pub(crate) fn sync_read_only_results(
+    /// Apply a source snapshot using the supplied invalidation scope.
+    ///
+    /// `source` is borrowed from the editing model; only affected cues are copied
+    /// into read-only results, without cloning editor content.
+    /// Unaffected destination entries retain their transformed caches. If a
+    /// targeted ID cannot be resolved, this rebuilds from the supplied snapshot
+    /// and returns `Full`, so the caller can schedule conversion for every cue.
+    /// Append checks that the ID is new and is the last cue in the source, and
+    /// that the collection lengths differ by one; otherwise it rebuilds.
+    /// This updates local state only; it does not emit another source-change event.
+    pub(crate) fn sync_result_from_source(
         &mut self,
         source: &SubtitleResults,
         changed: ResultsChanged,
     ) -> ResultsChanged {
         let applied = match changed {
             ResultsChanged::Full => {
-                self.results = SubtitleResults(
-                    source
-                        .iter()
-                        .map(|result| (result.id, result.read_only_copy()))
-                        .collect(),
-                );
+                self.results = source.readonly_snapshot();
                 ResultsChanged::Full
             }
             ResultsChanged::Targeted(id) => {
                 let source_result = source.get(id);
                 let target = self.results.0.get_mut(&id);
-                match (source_result, target) {
-                    (Some(source_result), Some(target)) => {
-                        *target = source_result.read_only_copy();
-                        ResultsChanged::Targeted(id)
-                    }
-                    _ => {
-                        self.results = SubtitleResults(
-                            source
-                                .iter()
-                                .map(|result| (result.id, result.read_only_copy()))
-                                .collect(),
-                        );
-                        ResultsChanged::Full
-                    }
+                if let (Some(source_result), Some(target)) = (source_result, target) {
+                    *target = source_result.readonly_snapshot();
+                    ResultsChanged::Targeted(id)
+                } else {
+                    self.results = source.readonly_snapshot();
+                    ResultsChanged::Full
                 }
             }
             ResultsChanged::Append(id) => {
-                let source_result = source.get(id);
-                if self.results.len() + 1 == source.len()
-                    && let Some(source_result) = source_result
-                    && !self.results.iter().any(|result| result.id == id)
+                if let Some(source_result) = source.get(id)
+                    && !self.results.0.contains_key(&id)
+                    && source.len() == self.results.len() + 1
+                    && source.last().map(SubtitleResult::id) == Some(id)
                 {
-                    self.results.0.insert(id, source_result.read_only_copy());
+                    self.results.0.insert(id, source_result.readonly_snapshot());
                     ResultsChanged::Append(id)
                 } else {
-                    self.results = SubtitleResults(
-                        source
-                            .iter()
-                            .map(|result| (result.id, result.read_only_copy()))
-                            .collect(),
-                    );
+                    self.results = source.readonly_snapshot();
                     ResultsChanged::Full
                 }
             }

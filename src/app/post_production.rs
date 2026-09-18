@@ -67,7 +67,7 @@ pub struct Model {
     opencc_enabled: bool,
     opencc_mode: usize,
     preserve_line_breaks: bool,
-    preview: subtitle::Model,
+    export_preview: subtitle::Model,
     conversion_generation: u64,
     transformation_inputs: Arc<[(subtitle::SubtitleId, String)]>,
 }
@@ -106,7 +106,7 @@ impl Default for Model {
             opencc_enabled: false,
             opencc_mode: 0,
             preserve_line_breaks: true,
-            preview: subtitle::Model::default(),
+            export_preview: subtitle::Model::default(),
             conversion_generation: 0,
             transformation_inputs: Arc::default(),
         }
@@ -143,6 +143,18 @@ pub enum Event {
 }
 
 impl Model {
+    /// Synchronize the export snapshot after a source change or page entry.
+    ///
+    /// The application calls this with the latest subtitle results and the change
+    /// returned by their mutation. `changed` is an invalidation hint, not a patch:
+    /// use `Full` for initial entry or a complete rebuild. Partial changes retain
+    /// unaffected transformed text; a full rebuild invalidates every cue.
+    ///
+    /// Snapshot application may promote a partial change to `Full`. Conversion
+    /// inputs are selected from that applied scope, then `Message::Request`
+    /// advances the generation used by the conversion subscription. This method
+    /// does not itself run the conversion task; the subscription processes the
+    /// inputs and `update` rejects replies from older generations.
     pub fn sync(
         &mut self,
         path: Option<&PathBuf>,
@@ -153,7 +165,9 @@ impl Model {
         if let Some(stem) = path.and_then(|path| path.file_stem()) {
             self.filename = stem.to_string_lossy().into_owned();
         }
-        let changed = self.preview.sync_read_only_results(results, changed);
+        let changed = self
+            .export_preview
+            .sync_result_from_source(results, changed);
         self.transformation_inputs = match changed {
             subtitle::ResultsChanged::Full => self.all_transformation_inputs(),
             subtitle::ResultsChanged::Targeted(_) | subtitle::ResultsChanged::Append(_) => {
@@ -164,7 +178,7 @@ impl Model {
     }
 
     fn all_transformation_inputs(&self) -> Arc<[(subtitle::SubtitleId, String)]> {
-        self.preview
+        self.export_preview
             .results()
             .iter()
             .map(|result| (result.id(), result.original_text().to_owned()))
@@ -173,7 +187,7 @@ impl Model {
     }
 
     fn missing_transformation_inputs(&self) -> Arc<[(subtitle::SubtitleId, String)]> {
-        self.preview
+        self.export_preview
             .results()
             .iter()
             .filter(|result| result.needs_transformation())
@@ -269,23 +283,23 @@ impl Model {
             }
             Message::ToggleOpenCc(enabled) => {
                 self.opencc_enabled = enabled;
-                self.preview.clear_transformed_text();
+                self.export_preview.clear_transformed_text();
                 self.transformation_inputs = self.all_transformation_inputs();
                 self.update(Message::Request, config)
             }
             Message::SelectOpenCcMode(mode) => {
                 self.opencc_mode = mode.min(OPENCC_MODES.len() - 1);
-                self.preview.clear_transformed_text();
+                self.export_preview.clear_transformed_text();
                 self.transformation_inputs = self.all_transformation_inputs();
                 self.update(Message::Request, config)
             }
             Message::TogglePreserveLineBreaks(preserve) => {
                 self.preserve_line_breaks = preserve;
-                self.preview.clear_transformed_text();
+                self.export_preview.clear_transformed_text();
                 self.transformation_inputs = self.all_transformation_inputs();
                 self.update(Message::Request, config)
             }
-            Message::Subtitle(message) => match self.preview.update(message, config) {
+            Message::Subtitle(message) => match self.export_preview.update(message, config) {
                 subtitle::Event::Run(task) => Event::Run(task.map(Message::Subtitle)),
                 subtitle::Event::Error(error) => Event::Error(error),
                 subtitle::Event::GoToPostProduction | subtitle::Event::None => {
@@ -303,7 +317,7 @@ impl Model {
                 text,
             } => {
                 if generation == self.conversion_generation {
-                    self.preview.set_transformed_text(id, text);
+                    self.export_preview.set_transformed_text(id, text);
                 }
                 Event::Run(Task::none())
             }
@@ -315,7 +329,7 @@ impl Model {
                 }
             }
             Message::Export => {
-                let contents = self.export_text(self.preview.results());
+                let contents = self.export_text(self.export_preview.results());
                 let extension = self.selected_format().extension();
                 let filename = format!("{}.{}", self.filename.trim(), extension);
                 Event::Run(Task::perform(
@@ -482,7 +496,7 @@ impl Model {
             ]
             .align_y(Alignment::Center),
             widget::text(fl!("showing-cues", count = subtitles.results().len())),
-            self.preview
+            self.export_preview
                 .results_table(
                     SubtitleTableConfig {
                         show_id_instead_of_preview: true,
@@ -502,7 +516,7 @@ impl Model {
         .width(Length::FillPortion(3));
 
         widget::row![
-            self.export_settings(search_active || self.preview.results().is_empty()),
+            self.export_settings(search_active || self.export_preview.results().is_empty()),
             preview
         ]
         .spacing(cosmic::theme::spacing().space_s)
@@ -659,7 +673,10 @@ mod tests {
             },
             &config,
         );
-        assert_eq!(model.preview.results()[0].text_for_display(true), "汉字");
+        assert_eq!(
+            model.export_preview.results()[0].text_for_display(true),
+            "汉字"
+        );
 
         model.update(
             Message::Transformed {
@@ -669,11 +686,17 @@ mod tests {
             },
             &config,
         );
-        assert_eq!(model.preview.results()[0].text_for_display(true), "漢字");
+        assert_eq!(
+            model.export_preview.results()[0].text_for_display(true),
+            "漢字"
+        );
 
         model.update(Message::Request, &config);
         assert_eq!(model.conversion_generation, generation.wrapping_add(1));
-        assert_eq!(model.preview.results()[0].text_for_display(true), "漢字");
+        assert_eq!(
+            model.export_preview.results()[0].text_for_display(true),
+            "漢字"
+        );
     }
 
     #[test]
@@ -689,7 +712,7 @@ mod tests {
             &config,
         );
         model
-            .preview
+            .export_preview
             .set_transformed_text(first_id, Some("transformed first".to_owned()));
 
         let event = source.update(
@@ -710,10 +733,13 @@ mod tests {
         model.sync(None, source.results(), changed, &config);
 
         assert_eq!(
-            model.preview.results()[0].text_for_display(true),
+            model.export_preview.results()[0].text_for_display(true),
             "transformed first"
         );
-        assert_eq!(model.preview.results()[1].text_for_display(true), "second");
+        assert_eq!(
+            model.export_preview.results()[1].text_for_display(true),
+            "second"
+        );
         assert_eq!(model.transformation_inputs.len(), 1);
         assert_eq!(model.transformation_inputs[0].0, source.results()[1].id());
     }
