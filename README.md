@@ -2,7 +2,34 @@
 
 An application that extracts hard-subs into srt files
 
+## Usage
+
+Launch the graphical interface with no arguments:
+
+```sh
+videosubextract
+```
+
+To extract subtitles from the command line:
+
+```sh
+videosubextract "file.mp4" -o "file.srt"
+```
+
+The output option is optional. Without it, the input extension is replaced
+with `.srt`.
+
+To restrict detection to a rectangle, provide its size and top-left position
+in source-video pixels:
+
+```sh
+videosubextract "file.mp4" -o "file.srt" --crop 1920x280@0,0
+```
+
 ## Installation
+
+
+export PATH=$PATH:~/.cargo/bin for comet debugging
 
 A [justfile](./justfile) is included by default for the [casey/just][just] command runner.
 
