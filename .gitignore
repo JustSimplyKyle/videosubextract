@@ -1,10 +1,13 @@
-.cargo/
 *.pdb
 *.mkv
 *.srt
 *.mkv
 *.txt
 *.mp4
+*.part
+*.xml
+*.webm
+*.m4a
 **/*.rs.bk
 debug/
 target/

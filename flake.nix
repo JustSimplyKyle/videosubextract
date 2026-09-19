@@ -1,9 +1,11 @@
 {
-  description = "libcosmic";
+  description = "Extract hard-coded video subtitles with a Dioxus desktop UI";
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     utils.url = "github:numtide/flake-utils";
     rust-overlay.url = "github:oxalica/rust-overlay";
+    dioxus.url = "github:DioxusLabs/dioxus/main";
+    dioxus.inputs.nixpkgs.follows = "nixpkgs";
   };
   outputs =
     {
@@ -11,6 +13,7 @@
       nixpkgs,
       utils,
       rust-overlay,
+      dioxus,
     }:
     utils.lib.eachDefaultSystem (
       system:
@@ -41,7 +44,7 @@
         # Cranelift writes inline assembly to sibling `*.rcgu.asm.o` files.
         # Dioxus ThinLink otherwise ignores them and produces patches with
         # unresolved symbols from crates such as rustix and event-listener.
-        dioxusCli = pkgs.dioxus-cli.overrideAttrs (old: {
+        dioxusCli = dioxus.packages.${system}.dioxus-cli.overrideAttrs (old: {
           patches = (old.patches or [ ]) ++ [
             ./patches/dioxus-cli-cranelift-asm-objects.patch
           ];
@@ -56,9 +59,14 @@
           pname = cargoToml.package.name;
           version = cargoToml.package.version;
           src = ./.;
-          cargoHash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+          cargoHash = "sha256-Ek8V4obqKj2pYbPd3gQTq/ucx8PKTGGNnCTCiAgPLAM=";
           nativeBuildInputs = [ pkgs.pkg-config ];
-          buildInputs = [ pkgs.openssl ];
+          buildInputs = with pkgs; [
+            openssl
+            gtk3
+            webkitgtk_4_1
+            libsoup_3
+          ];
         };
         devShells.default = pkgs.mkShell rec {
           buildInputs =
@@ -71,6 +79,10 @@
               cmake
               pkg-config
               openssl
+              gtk3
+              webkitgtk_4_1
+              libsoup_3
+              xdotool
               libxkbcommon
               wayland
               libGL
@@ -96,21 +108,7 @@
               clang
               libclang
             ]
-            # icons
-            ++ [
-              cosmic-icons
-              adwaita-icon-theme
-              hicolor-icon-theme
-            ];
-
-          XDG_DATA_DIRS = pkgs.lib.concatStringsSep ":" [
-            "${pkgs.cosmic-icons}/share"
-            # "${pkgs.adwaita-icon-theme}/share"
-            # "${pkgs.hicolor-icon-theme}/share"
-            "$XDG_DATA_DIRS" # preserve any existing paths
-          ];
-
-          COSMIC_ICONS = "${pkgs.cosmic-icons}/share";
+            ;
 
           # RUSTC_WRAPPER = "${pkgs.sccache}/bin/sccache";
           FONT_PATH = "${pkgs.noto-fonts-cjk-sans}/share/fonts/opentype/noto-cjk/NotoSansCJK-VF.otf.ttc";
