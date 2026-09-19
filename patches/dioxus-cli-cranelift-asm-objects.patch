@@ -1,8 +1,8 @@
-diff --git a/src/build/link.rs b/src/build/link.rs
+diff --git a/packages/cli/src/build/link.rs b/packages/cli/src/build/link.rs
 index 2a1ff75b3..9f2c58a96 100644
---- a/src/build/link.rs
-+++ b/src/build/link.rs
-@@ -188,7 +188,7 @@ impl BuildRequest {
+--- a/packages/cli/src/build/link.rs
++++ b/packages/cli/src/build/link.rs
+@@ -193,7 +193,7 @@ impl BuildRequest {
              .workspace_rustc
              .link_args
              .iter()

@@ -2,16 +2,19 @@ use crate::apply_traits::ApplyConditional;
 
 use super::*;
 use cosmic::iced::widget::Stack;
+use cosmic::{Apply, Element};
+use iced::alignment::Horizontal;
 use iced::futures::SinkExt;
 use image::RgbaImage;
 use rfd::AsyncFileDialog;
 use std::{env::current_dir, time::Duration};
+use vse_ui as cosmic;
 
 #[derive(Default)]
 pub struct Model {
     pub video_path: Option<std::path::PathBuf>,
     pub video_controller: Option<VideoPlayerController>,
-    pub video_allocation: Option<(iced::advanced::image::Allocation, iced::Size)>,
+    pub video_allocation: Option<(widget::image::Allocation, iced::Size)>,
     pub is_allocating_frame: bool,
     pub screenshot_selection: Option<iced::Rectangle>,
     pub screenshot_selection_scaled: Option<iced::Rectangle>,
@@ -33,7 +36,7 @@ pub enum Message {
         image: RgbaImage,
         timestamp: Duration,
     },
-    VideoFrameAllocated(Result<(iced::advanced::image::Allocation, iced::Size), String>),
+    VideoFrameAllocated(Result<(widget::image::Allocation, iced::Size), String>),
     VideoSeekForward(Duration),
     VideoSeekBackward(Duration),
     VideoSeekAbsolute(Duration),
@@ -137,7 +140,7 @@ impl Model {
                     frame.height(),
                     frame.into_raw(),
                 );
-                iced::runtime::image::allocate(&handle)
+                widget::image::allocate(handle)
                     .map(move |result| {
                         Message::VideoFrameAllocated(
                             result
@@ -249,34 +252,34 @@ impl Model {
 
         let full_img = Stack::new().push(full_img).push(canvas_widget);
 
-        let reset_btn = widget::button::text(fl!("reset-selection"))
+        let reset_btn = widget::button(widget::text(fl!("reset-selection")))
             .on_press(Message::ResetSelection)
-            .class(cosmic::theme::Button::Destructive);
+            .style(cosmic::theme::Button::Destructive::style);
 
-        let load_video = widget::button::text(if self.video_path.is_none() {
+        let load_video = widget::button(widget::text(if self.video_path.is_none() {
             fl!("load-video")
         } else {
             fl!("change-video")
-        })
+        }))
         .on_press(Message::PickVideo);
 
         let load_video = if self.video_path.is_none() {
-            load_video.class(cosmic::theme::Button::Suggested)
+            load_video.style(cosmic::theme::Button::Suggested::style)
         } else {
-            load_video.class(cosmic::theme::Button::Standard)
+            load_video
         };
 
-        let skip_backward = widget::button::icon(icon::from_name("media-seek-backward-symbolic"))
+        let skip_backward = widget::button(icon::from_name("media-seek-backward-symbolic"))
             .on_press(Message::VideoSeekBackward(Duration::from_secs(5)))
-            .class(cosmic::theme::Button::NavToggle);
+            .style(cosmic::theme::Button::NavToggle::style);
 
-        let skip_forward = widget::button::icon(icon::from_name("media-seek-forward-symbolic"))
+        let skip_forward = widget::button(icon::from_name("media-seek-forward-symbolic"))
             .on_press(Message::VideoSeekForward(Duration::from_secs(5)))
-            .class(cosmic::theme::Button::NavToggle);
+            .style(cosmic::theme::Button::NavToggle::style);
         let selection_label: Element<'_, Message> = self.screenshot_selection_scaled.map_or_else(
             || {
                 widget::text(fl!("select-region"))
-                    .class(cosmic::theme::Text::Accent)
+                    .style(cosmic::theme::Text::Accent::style)
                     .into()
             },
             |rectangle| {
@@ -285,7 +288,7 @@ impl Model {
                     rectangle.width, rectangle.height, rectangle.x, rectangle.y
                 );
                 let label = widget::text(fl!("selection", dimensions = dimensions.clone()))
-                    .class(cosmic::theme::Text::Accent);
+                    .style(cosmic::theme::Text::Accent::style);
 
                 widget::mouse_area(label)
                     .on_press(Message::CopySelectionDimensions(dimensions))
@@ -294,11 +297,11 @@ impl Model {
             },
         );
 
-        let find_subs = widget::button::text(fl!("find-subtitles"));
+        let find_subs = widget::button(widget::text(fl!("find-subtitles")));
         let find_subs = if self.video_path.is_some() {
             find_subs
                 .on_press(Message::StartSubtitleDisplay)
-                .class(cosmic::theme::Button::Suggested)
+                .style(cosmic::theme::Button::Suggested::style)
         } else {
             find_subs
         };

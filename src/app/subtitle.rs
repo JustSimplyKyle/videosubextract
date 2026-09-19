@@ -1,44 +1,272 @@
+//! Subtitle editing and the ordered, stable-ID result collection.
+//!
+//! # Source data and presentation state
+//!
+//! `SubtitleResult::subtitle` holds the source cue, including its text and timing.
+//! Editor actions currently copy `Content::text()` back into that cue. Editor
+//! content also holds cursor/selection state; it is not an export representation.
+//! `DisplayOnly` holds an optional transformed-text cache and reads original
+//! text directly from the source cue in its snapshot.
+//! Transformations must never overwrite the source cue. A source replacement
+//! invalidates the affected snapshot's transformed text.
+//!
+//! # Change propagation
+//!
+//! Mutation helpers return a [`ResultsChanged`] describing an already-applied
+//! mutation. They do not notify listeners or synchronize another model. In
+//! [`Model::update`], forward that value as [`Event::SyncWithPostProduction`].
+//! The application handles the event by calling `post_production::Model::sync`
+//! with the latest source results. That method updates the export snapshot,
+//! selects conversion inputs, and advances the conversion generation so stale
+//! asynchronous replies are ignored. Do not call sync from the collection:
+//! coordinating the two models is the application's responsibility.
+//!
+//! A change is an invalidation hint, not a self-contained patch: it contains no
+//! cue data and must be paired with the source state it describes. Preserve event
+//! order. If batching multiple mutations, use `Full` unless all affected IDs are
+//! represented; forwarding only the final targeted change loses earlier changes.
+//! Full synchronization on entry to post-production also covers source resets
+//! that do not emit an event (currently `start_search`).
+//!
+//! # Refactoring direction and current limitations
+//!
+//! Source text lives in `Subtitle`, with editor content and transformed text as
+//! presentation caches. Sync borrows the source collection and copies only cue
+//! data and preview handles for affected IDs; editor content is never copied.
+//! A full rebuild copies every cue. The export snapshot owns its cue data so it
+//! can outlive the borrow of the editing model and keep separate conversion state.
+//!
+//! The current mutation helpers conservatively report changes even for no-op
+//! closures. In particular, cursor/selection actions currently copy text and
+//! invalidate conversions too. A more specific mutation API could report an
+//! optional change only when source text, timing, or membership actually changes.
+//! `Full` resets all transformed caches, and every snapshot sync resets scroll
+//! state; these are current implementation choices, not requirements of the
+//! notification protocol.
+
 use crate::config::{ProcessingResolution, SubtitleDetector};
 use crate::extraction::{self, OcrHandle, Request as ExtractionRequest, Subtitle};
 use crate::native_video_sub_finder::NativeSearchParams;
 use crate::video_player::CropRect;
-use cosmic::theme;
 use cosmic::widget::text_editor;
+use cosmic::{Apply, Element};
 use iced::futures::StreamExt;
 use image::RgbaImage;
+use indexmap::IndexMap;
+use vse_ui as cosmic;
 
 use super::*;
 use std::time::Duration;
 
 const JUMP_TO_END_DELAY: Duration = Duration::from_secs(3);
 
-const TOOLBAR_SIZE: f32 = 48.0;
-const RESULT_ROW_HEIGHT: f32 = 120.0;
+const RESULT_ROW_HEIGHT: f32 = 160.0;
+const RESULT_PREVIEW_WIDTH: f32 = 320.0;
+const RESULT_TIMING_WIDTH: f32 = 132.0;
 const RESULT_ROW_OVERSCAN: usize = 3;
+
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SubtitleId(pub(crate) u64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use]
+/// Invalidation scope for a source mutation that has already happened.
+///
+/// Consume this through [`Event::SyncWithPostProduction`] during normal model
+/// updates. Explicit `Full` values are appropriate when entering post-production
+/// or rebuilding its snapshot. Dropping a value does not undo the mutation.
+pub enum ResultsChanged {
+    /// Rebuild the entire snapshot, including membership and ordering.
+    /// Use for deletion, merge, undo, reset, or several changed cues.
+    Full,
+    /// Replace one existing cue without changing membership or ordering.
+    /// Its transformed cache is invalidated; other cues retain theirs.
+    Targeted(SubtitleId),
+    /// Add one new cue at the end, preserving existing transformed caches.
+    /// The ID must be new to the destination and present in the source.
+    Append(SubtitleId),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SubtitleIndex(usize);
+
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct SubtitleTableConfig {
+    /// Use a compact, one-based cue number instead of the extracted frame preview.
+    pub show_id_instead_of_preview: bool,
+    /// Put the cue's time range above its text to preserve horizontal space.
+    pub timestamp_above_text: bool,
+    /// Render subtitle text without editing controls.
+    pub read_only: bool,
+    /// Show cached transformed text in read-only mode.
+    pub show_transformed: bool,
+}
 
 #[derive(Debug, Clone)]
 pub struct SubtitleResult {
-    id: u64,
+    id: SubtitleId,
     pub subtitle: Subtitle,
     pub preview: widget::image::Handle,
-    editor_content: text_editor::Content,
+    display: SubtitleDisplay,
+}
+
+#[derive(Debug, Clone)]
+pub enum SubtitleDisplay {
+    Editor(text_editor::Content),
+    DisplayOnly { transformed: Option<String> },
 }
 
 impl SubtitleResult {
-    fn new(id: u64, subtitle: Subtitle, preview: widget::image::Handle) -> Self {
-        let editor_content = text_editor::Content::with_text(&subtitle.text);
+    pub fn new_with_editor(
+        id: SubtitleId,
+        subtitle: Subtitle,
+        preview: widget::image::Handle,
+    ) -> Self {
+        let editor_content = text_editor::Content::with_text(subtitle.text());
 
         Self {
             id,
             subtitle,
             preview,
-            editor_content,
+            display: SubtitleDisplay::Editor(editor_content),
         }
     }
 
-    pub(crate) fn set_text(&mut self, text: String) {
-        self.editor_content = text_editor::Content::with_text(&text);
-        self.subtitle.text = text;
+    pub fn new_with_display(
+        id: SubtitleId,
+        subtitle: Subtitle,
+        preview: widget::image::Handle,
+    ) -> Self {
+        Self {
+            id,
+            subtitle,
+            preview,
+            display: SubtitleDisplay::DisplayOnly { transformed: None },
+        }
+    }
+
+    /// Replace presentation state with an untransformed source-text snapshot.
+    ///
+    /// This discards editor state and any previous transformation. Cloning an
+    /// editable result before calling this also clones the discarded editor.
+    pub fn into_readonly(mut self) -> Self {
+        self.display = SubtitleDisplay::DisplayOnly { transformed: None };
+        self
+    }
+
+    pub(crate) const fn id(&self) -> SubtitleId {
+        self.id
+    }
+
+    pub(crate) fn text_for_display(&self, show_transformed: bool) -> &str {
+        if show_transformed
+            && let SubtitleDisplay::DisplayOnly {
+                transformed: Some(text),
+            } = &self.display
+        {
+            return text;
+        }
+        self.original_text()
+    }
+
+    pub(crate) fn original_text(&self) -> &str {
+        self.subtitle.text()
+    }
+
+    /// Copy cue data into a read-only result without copying editor state.
+    fn readonly_snapshot(&self) -> Self {
+        Self::new_with_display(self.id, self.subtitle.clone(), self.preview.clone())
+    }
+
+    pub(crate) const fn needs_transformation(&self) -> bool {
+        matches!(
+            &self.display,
+            SubtitleDisplay::DisplayOnly {
+                transformed: None,
+                ..
+            }
+        )
+    }
+
+    fn set_transformed_text(&mut self, text: Option<String>) {
+        if let SubtitleDisplay::DisplayOnly { transformed, .. } = &mut self.display {
+            *transformed = text;
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SubtitleResults(IndexMap<SubtitleId, SubtitleResult>);
+
+impl SubtitleResults {
+    /// Copy source cues into a read-only snapshot, preserving IDs and order.
+    /// Editor content is deliberately excluded from the copy.
+    pub(crate) fn readonly_snapshot(&self) -> Self {
+        Self(
+            self.iter()
+                .map(|result| (result.id, result.readonly_snapshot()))
+                .collect(),
+        )
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub(crate) fn iter(&self) -> indexmap::map::Values<'_, SubtitleId, SubtitleResult> {
+        self.0.values()
+    }
+
+    fn get_index(&self, index: usize) -> Option<&SubtitleResult> {
+        self.0.get_index(index).map(|(_, result)| result)
+    }
+
+    fn get(&self, id: SubtitleId) -> Option<&SubtitleResult> {
+        self.0.get(&id)
+    }
+
+    fn last(&self) -> Option<&SubtitleResult> {
+        self.0.last().map(|(_, result)| result)
+    }
+
+    /// Apply an unrestricted mutation and conservatively invalidate all cues.
+    /// The caller must forward the returned change; no notification is sent here.
+    fn with_mut<R>(
+        &mut self,
+        f: impl FnOnce(&mut IndexMap<SubtitleId, SubtitleResult>) -> R,
+    ) -> (R, ResultsChanged) {
+        (f(&mut self.0), ResultsChanged::Full)
+    }
+
+    /// Mutate one existing cue and return its invalidation hint, even for a no-op.
+    /// Returns `None` for a stale ID. The closure must preserve the cue's ID.
+    fn with_mut_entry<R>(
+        &mut self,
+        id: SubtitleId,
+        f: impl FnOnce(&mut SubtitleResult) -> R,
+    ) -> Option<(R, ResultsChanged)> {
+        self.0
+            .get_mut(&id)
+            .map(|result| (f(result), ResultsChanged::Targeted(id)))
+    }
+
+    /// Append a fresh ID and return the change for the caller to forward.
+    fn push(&mut self, result: SubtitleResult) -> ResultsChanged {
+        let id = result.id;
+        assert!(self.0.insert(id, result).is_none(), "subtitle ID is unique");
+        ResultsChanged::Append(id)
+    }
+}
+
+impl std::ops::Index<usize> for SubtitleResults {
+    type Output = SubtitleResult;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        self.get_index(index).expect("subtitle index is in bounds")
     }
 }
 
@@ -53,7 +281,7 @@ pub struct Model {
     native_search_params: NativeSearchParams,
     post_ocr_processing: bool,
     processing_resolution: ProcessingResolution,
-    pub results: Vec<SubtitleResult>,
+    results: SubtitleResults,
     pub preview: Option<widget::image::Handle>,
     pub current_timestamp: Duration,
     pub done: bool,
@@ -62,6 +290,7 @@ pub struct Model {
     next_result_id: u64,
     result_scroll_offset: f32,
     result_viewport_height: f32,
+    zoomed_result_id: Option<SubtitleId>,
     edit_history: Vec<SubtitleEdit>,
 }
 
@@ -115,8 +344,8 @@ pub enum Message {
         #[debug("{}x{}", preview.width(), preview.height())]
         preview: RgbaImage,
     },
-    Delete(usize),
-    MergeWithPrevious(usize),
+    Delete(SubtitleId),
+    MergeWithPrevious(SubtitleId),
     UndoEdit,
     Scrolled {
         at_end: bool,
@@ -124,21 +353,28 @@ pub enum Message {
         viewport_height: f32,
     },
     JumpToEnd {
-        id: iced::id::Id,
+        id: iced::widget::Id,
     },
     ShowJumpToEnd,
     SearchDone,
     SearchError(String),
     GoToPostProduction,
     SubtitleContentEdit {
-        id: usize,
+        id: SubtitleId,
         action: text_editor::Action,
     },
+    ZoomIntoSubtitle {
+        id: SubtitleId,
+    },
+    CloseSubtitlePreview,
     None,
 }
 
 pub enum Event {
     GoToPostProduction,
+    /// Ask the application to synchronize the export preview from `results()`.
+    /// The source mutation is already committed; this event carries its scope.
+    SyncWithPostProduction(ResultsChanged),
     Run(Task<Message>),
     Error(eyre::Report),
     None,
@@ -147,22 +383,20 @@ pub enum Event {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum VirtualRowKey {
     TopSpacer,
-    Row { id: usize },
+    Row { id: SubtitleId },
     BottomSpacer,
 }
 
 struct SubtitleTable<'a> {
     scroll_offset: f32,
     viewport_height: f32,
-    results: &'a [SubtitleResult],
+    results: &'a SubtitleResults,
+    config: SubtitleTableConfig,
 }
 
 impl<'a> SubtitleTable<'a> {
-    fn row_spacing() -> f32 {
-        f32::from(cosmic::theme::spacing().space_m)
-    }
     fn row_pitch() -> f32 {
-        RESULT_ROW_HEIGHT + Self::row_spacing()
+        RESULT_ROW_HEIGHT
     }
     fn visible_result_range(&self, result_count: usize) -> std::ops::Range<usize> {
         let first_visible =
@@ -185,94 +419,168 @@ impl<'a> SubtitleTable<'a> {
     }
 
     fn wrap_row(item: Element<'a, Message>) -> Element<'a, Message> {
-        item.apply(widget::container)
+        widget::column![item, widget::rule::horizontal(1)]
             .height(Length::Fixed(Self::row_pitch()))
-            .padding(iced::Padding::ZERO.bottom(Self::row_spacing()))
             .into()
     }
 
     fn active_subtitles(
-        results: &'a [SubtitleResult],
+        &self,
         active_range: std::ops::Range<usize>,
     ) -> impl Iterator<Item = (VirtualRowKey, Element<'a, Message>)> {
-        results[active_range.clone()]
+        self.results
             .iter()
+            .skip(active_range.start)
+            .take(active_range.len())
             .enumerate()
-            .map(move |(relative_id, result)| {
-                let id = active_range.start + relative_id;
+            .map(move |(relative_index, result)| {
+                let index = SubtitleIndex(active_range.start + relative_index);
                 (
-                    VirtualRowKey::Row { id },
-                    Self::subtitle_row(id, result).apply(Self::wrap_row),
+                    VirtualRowKey::Row { id: result.id },
+                    self.subtitle_row(index, result).apply(Self::wrap_row),
                 )
             })
     }
-    fn timestamp(result: &SubtitleResult) -> Element<'_, Message> {
-        let t_start = result.subtitle.start_timestamp.as_secs_f64();
-        let t_end = result.subtitle.end_timestamp.as_secs_f64();
-        widget::text(format!("{t_start:.1}s – {t_end:.1}s")).into()
-    }
-    fn subtitle_row(id: usize, result: &'a SubtitleResult) -> Element<'a, Message> {
-        let toolbar = Self::toolbar(id);
-        let space_s = cosmic::theme::spacing().space_s;
 
-        widget::row!(
-            toolbar,
+    fn timestamp(result: &SubtitleResult, render_atop: bool) -> Element<'_, Message> {
+        fn precise_timestamp(timestamp: Duration) -> String {
+            let total_seconds = timestamp.as_secs();
+            let hours = total_seconds / 3_600;
+            let minutes = (total_seconds % 3_600) / 60;
+            let seconds = total_seconds % 60;
+            let milliseconds = timestamp.subsec_millis();
+
+            format!("{hours:02}:{minutes:02}:{seconds:02}.{milliseconds:03}")
+        }
+        if render_atop {
+            widget::text::monotext(format!(
+                "{} → {}",
+                precise_timestamp(result.subtitle.start_timestamp),
+                precise_timestamp(result.subtitle.end_timestamp)
+            ))
+            .into()
+        } else {
+            widget::column![
+                widget::text::monotext(precise_timestamp(result.subtitle.start_timestamp)),
+                widget::text::caption("↓"),
+                widget::text::monotext(precise_timestamp(result.subtitle.end_timestamp)),
+            ]
+            .align_x(Alignment::Center)
+            .width(Length::Fixed(RESULT_TIMING_WIDTH))
+            .into()
+        }
+    }
+    fn subtitle_row(
+        &self,
+        index: SubtitleIndex,
+        result: &'a SubtitleResult,
+    ) -> Element<'a, Message> {
+        let spacing = cosmic::theme::spacing();
+
+        let leading: Element<'a, Message> = if self.config.show_id_instead_of_preview {
+            widget::text::title3((index.0 + 1).to_string())
+                .apply(widget::container)
+                .width(Length::Fixed(24.0))
+                .center_y(Length::Fill)
+                .style(cosmic::theme::Container::Card::style)
+                .into()
+        } else {
             widget::image(result.preview.clone())
                 .content_fit(iced::ContentFit::Contain)
-                .width(Length::FillPortion(65))
-                .height(Length::Fill),
-            widget::column![
-                Self::timestamp(result),
-                Self::text_editor(id, &result.editor_content)
-            ]
-            .spacing(space_s / 2)
-            .width(Length::FillPortion(35))
+                .width(Length::Fixed(RESULT_PREVIEW_WIDTH))
+                .height(Length::Fill)
+                .apply(widget::mouse_area)
+                .on_press(Message::ZoomIntoSubtitle { id: result.id })
+                .interaction(iced::mouse::Interaction::Pointer)
+                .into()
+        };
+
+        let subtitle_text: Element<'a, Message> = if self.config.read_only {
+            widget::text(result.text_for_display(self.config.show_transformed))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_y(iced::alignment::Vertical::Center)
+                .apply(widget::scrollable)
+                .horizontal()
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .apply(widget::container)
+                .style(cosmic::theme::Container::Secondary::style)
+                .padding([spacing.space_s, spacing.space_m])
+                .center_y(Length::Fill)
+                .height(Length::Fill)
+                .into()
+        } else {
+            let SubtitleDisplay::Editor(content) = &result.display else {
+                return widget::text(result.subtitle.text()).into();
+            };
+            Self::text_editor(result.id, content)
+        };
+
+        let timing_and_text: Element<'a, Message> = if self.config.timestamp_above_text {
+            widget::column![Self::timestamp(result, true), subtitle_text]
+                .spacing(spacing.space_xxs)
+                .height(Length::Fill)
+                .width(Length::Fill)
+                .into()
+        } else {
+            widget::row![Self::timestamp(result, false), subtitle_text]
+                .spacing(spacing.space_m)
+                .height(Length::Fill)
+                .width(Length::Fill)
+                .align_y(Alignment::Center)
+                .into()
+        };
+
+        let mut row = widget::row!(leading, timing_and_text);
+        if !self.config.read_only {
+            row = row.push(Self::toolbar(index, result.id));
+        }
+        row.spacing(spacing.space_m)
+            .padding([spacing.space_s, spacing.space_m])
             .height(Length::Fill)
-            .align_x(Alignment::Start),
-        )
-        .spacing(space_s)
-        .padding([0, 40])
-        .height(Length::Fixed(RESULT_ROW_HEIGHT))
-        .align_y(Alignment::Center)
-        .into()
-    }
-    fn toolbar(id: usize) -> Element<'static, Message> {
-        widget::column::with_capacity(2)
-            .push(Self::delete(id))
-            .width(TOOLBAR_SIZE)
-            .spacing(cosmic::theme::spacing().space_s)
-            .align_x(Alignment::Center)
-            .push_maybe((id != 0).then_some(Self::merge_with_previous(id)))
+            .align_y(Alignment::Center)
             .into()
     }
-    fn text_editor(id: usize, content: &'a widget::text_editor::Content) -> Element<'a, Message> {
-        widget::text_editor::text_editor(content)
+    fn toolbar(index: SubtitleIndex, id: SubtitleId) -> Element<'static, Message> {
+        let mut row = widget::Row::with_capacity(2);
+        if index.0 != 0 {
+            row = row.push(Self::merge_with_previous(id));
+        }
+        row.push(Self::delete(id))
+            .spacing(cosmic::theme::spacing().space_s)
+            .align_y(Alignment::Center)
+            .into()
+    }
+    fn text_editor(
+        id: SubtitleId,
+        content: &'a widget::text_editor::Content,
+    ) -> Element<'a, Message> {
+        widget::text_editor(content)
             .on_action(move |action| Message::SubtitleContentEdit { id, action })
             .height(Length::Fill)
-            .min_height(48.0)
-            .style(|x, y| {
-                use iced::widget::text_editor::Catalog;
-                let mut style = x.style(&theme::iced::TextEditor::default(), y);
+            .style(|theme, status| {
+                let mut style = widget::text_editor::default(theme, status);
                 style.border.width = 2.0;
                 style
             })
             .apply(Element::from)
     }
-    fn delete(id: usize) -> Element<'static, Message> {
-        widget::button::icon(widget::icon::from_name("edit-delete-symbolic"))
+    fn delete(id: SubtitleId) -> Element<'static, Message> {
+        widget::button(widget::icon::from_name("edit-delete-symbolic"))
             .on_press(Message::Delete(id))
-            .class(cosmic::theme::Button::Destructive)
+            .style(cosmic::theme::Button::Destructive::style)
             .into()
     }
-    fn merge_with_previous(id: usize) -> Element<'static, Message> {
-        widget::button::icon(widget::icon::from_name("go-up-symbolic"))
+    fn merge_with_previous(id: SubtitleId) -> Element<'static, Message> {
+        widget::button(widget::icon::from_name("go-up-symbolic"))
             .on_press(Message::MergeWithPrevious(id))
-            .class(cosmic::theme::Button::Icon)
+            .style(cosmic::theme::Button::Icon::style)
             .into()
     }
     fn view(self) -> Element<'a, Message> {
         let visible_range = self.visible_result_range(self.results.len());
-        let active_subtitles = Self::active_subtitles(self.results, visible_range.clone());
+        let active_subtitles = self.active_subtitles(visible_range.clone());
 
         let top_spacer = Self::spacer(visible_range.start);
         let bottom_spacer = Self::spacer(self.results.len().saturating_sub(visible_range.end));
@@ -283,8 +591,6 @@ impl<'a> SubtitleTable<'a> {
             .extend(active_subtitles)
             .push(VirtualRowKey::BottomSpacer, bottom_spacer)
             .width(Length::Fill)
-            // .apply(widget::container)
-            // .class(theme::Container::List)
             .into()
     }
 }
@@ -318,7 +624,7 @@ impl<'a> SubtitleView<'a> {
                 "complete-subtitles-found",
                 count = self.model.results.len()
             ))
-            .class(cosmic::theme::Text::Accent)
+            .style(cosmic::theme::Text::Accent::style)
             .into()
         } else if self.model.search_active {
             let status_text = widget::text(fl!(
@@ -327,12 +633,13 @@ impl<'a> SubtitleView<'a> {
                 igt = self.model.current_timestamp.apply(format_duration),
                 eta = self.model.progress_bar.eta().apply(Self::format_eta)
             ))
-            .class(cosmic::theme::Text::Accent);
+            .style(cosmic::theme::Text::Accent::style);
 
-            let progress_bar = widget::progress_bar::determinate_linear(
+            let progress_bar = widget::progress_bar(
+                0.0..=1.0,
                 self.model.current_timestamp.as_secs_f32() / self.video_duration.as_secs_f32(),
             )
-            .width(Length::Fill);
+            .length(Length::Fill);
 
             widget::row!(status_text, progress_bar)
                 .spacing(cosmic::theme::spacing().space_s)
@@ -341,16 +648,17 @@ impl<'a> SubtitleView<'a> {
                 .into()
         } else {
             widget::text(fl!("no-active-search"))
-                .class(cosmic::theme::Text::Accent)
+                .style(cosmic::theme::Text::Accent::style)
                 .into()
         }
     }
 
     fn controls(&self) -> Element<'a, Message> {
-        let to_post_prod = widget::button::text(fl!("post-production"))
-            .class(cosmic::theme::Button::Suggested)
+        let to_post_prod = widget::button(widget::text(fl!("post-production")))
+            .style(cosmic::theme::Button::Suggested::style)
             .on_press_maybe((!self.model.search_active).then_some(Message::GoToPostProduction));
-        let undo_edit = widget::button::icon(icon::from_name("edit-undo-symbolic"))
+        let undo_edit = widget::button(icon::from_name("edit-undo-symbolic"))
+            .style(cosmic::theme::Button::Icon::style)
             .on_press_maybe((!self.model.edit_history.is_empty()).then_some(Message::UndoEdit));
 
         widget::row![self.status(), undo_edit, to_post_prod]
@@ -369,23 +677,20 @@ impl<'a> SubtitleView<'a> {
         )
         .align_x(Alignment::Center)
         .apply(widget::container)
-        .class(cosmic::theme::Container::Card)
+        .style(cosmic::theme::Container::Card::style)
         .padding(20)
         .into()
     }
 
     fn header(&self) -> Option<Element<'a, Message>> {
         self.model.preview.as_ref().map(|handle| {
-            widget::Row::new()
+            let mut row = widget::Row::new()
                 .spacing(cosmic::theme::spacing().space_s)
-                .push(Self::preview_card(fl!("view"), handle))
-                .push_maybe(
-                    self.model
-                        .results
-                        .last()
-                        .map(|result| Self::preview_card(fl!("current"), &result.preview)),
-                )
-                .into()
+                .push(Self::preview_card(fl!("view"), handle));
+            if let Some(result) = self.model.results.last() {
+                row = row.push(Self::preview_card(fl!("current"), &result.preview));
+            }
+            row.into()
         })
     }
 
@@ -400,11 +705,70 @@ impl<'a> SubtitleView<'a> {
     }
 
     fn results(&self) -> Element<'a, Message> {
-        let scrollable_id = iced::id::Id::new("scrollable");
-        let jump_to_end = (self.model.scrollbar_jump_status == ScrollbarJumpStatus::DisplayButton)
+        let config = SubtitleTableConfig {
+            timestamp_above_text: true,
+            ..Default::default()
+        };
+        self.model.results_table(config, true)
+    }
+
+    fn zoomed_preview(result: &'a SubtitleResult) -> Element<'a, Message> {
+        cosmic::components::dialog(
+            fl!("subtitle-preview"),
+            widget::image(result.preview.clone())
+                .expand(true)
+                .content_fit(iced::ContentFit::Contain),
+            widget::button(icon::from_name("window-close-symbolic"))
+                .style(cosmic::theme::Button::Icon::style)
+                .on_press(Message::CloseSubtitlePreview),
+        )
+        .apply(widget::container)
+        .width(1000.0)
+        .apply(widget::container)
+        .center(Length::Fill)
+        .style(|_| widget::container::background(iced::Color::from_rgba(0., 0., 0., 0.45)))
+        .into()
+    }
+
+    fn view(&self) -> Element<'a, Message> {
+        let content: Element<'a, Message> =
+            widget::column![self.header(), self.controls(), self.results()]
+                .spacing(cosmic::theme::spacing().space_s)
+                .into();
+
+        let zoomed_result = self
+            .model
+            .zoomed_result_id
+            .and_then(|id| self.model.results.get(id));
+
+        if let Some(result) = zoomed_result {
+            iced::widget::stack![content, Self::zoomed_preview(result)].into()
+        } else {
+            content
+        }
+    }
+}
+
+impl Model {
+    pub(crate) fn results(&self) -> &SubtitleResults {
+        &self.results
+    }
+
+    fn result_index(&self, id: SubtitleId) -> Option<SubtitleIndex> {
+        self.results.0.get_index_of(&id).map(SubtitleIndex)
+    }
+
+    pub(crate) fn results_table(
+        &self,
+        config: SubtitleTableConfig,
+        show_jump_to_end: bool,
+    ) -> Element<'_, Message> {
+        let scrollable_id = iced::widget::Id::new("scrollable");
+        let jump_to_end = (show_jump_to_end
+            && self.scrollbar_jump_status == ScrollbarJumpStatus::DisplayButton)
             .then_some(
-                widget::button::text(fl!("jump-to-latest"))
-                    .class(cosmic::theme::Button::Suggested)
+                widget::button(widget::text(fl!("jump-to-latest")))
+                    .style(cosmic::theme::Button::Suggested::style)
                     .on_press(Message::JumpToEnd {
                         id: scrollable_id.clone(),
                     })
@@ -412,30 +776,27 @@ impl<'a> SubtitleView<'a> {
                     .padding(cosmic::theme::spacing().space_m),
             );
 
-        SubtitleTable {
-            scroll_offset: self.model.result_scroll_offset,
-            viewport_height: self.model.result_viewport_height,
-            results: &self.model.results,
+        let results = SubtitleTable {
+            scroll_offset: self.result_scroll_offset,
+            viewport_height: self.result_viewport_height,
+            results: &self.results,
+            config,
         }
         .view()
         .apply(widget::container)
         .padding(iced::Padding::ZERO.right(20))
         .height(Length::Fill)
         .apply(widget::scrollable)
-        .on_scroll(Self::scrolled)
+        .on_scroll(SubtitleView::scrolled)
         .id(scrollable_id)
-        .apply(Element::from)
-        .apply(|results| iced::widget::stack![results, jump_to_end].into())
-    }
+        .apply(Element::from);
 
-    fn view(&self) -> Element<'a, Message> {
-        widget::column![self.header(), self.controls(), self.results()]
-            .spacing(cosmic::theme::spacing().space_s)
+        iced::widget::stack![results, jump_to_end]
+            .apply(widget::container)
+            .style(cosmic::theme::Container::List::style)
+            .height(Length::Fill)
             .into()
     }
-}
-
-impl Model {
     pub fn start_search(
         &mut self,
         path: std::path::PathBuf,
@@ -451,13 +812,14 @@ impl Model {
         self.native_search_params = config.native_search_params;
         self.post_ocr_processing = config.post_ocr_processing;
         self.processing_resolution = config.processing_resolution;
-        self.results.clear();
+        let _ = self.results.with_mut(IndexMap::clear);
         self.preview = None;
         self.current_timestamp = Duration::ZERO;
         self.done = false;
         self.edit_history.clear();
-        self.progress_bar.set_elapsed(Duration::ZERO);
+        self.progress_bar.reset();
         self.scrollbar_jump_status = ScrollbarJumpStatus::NoShow;
+        self.zoomed_result_id = None;
         self.next_result_id = 0;
         self.result_scroll_offset = 0.0;
         self.result_viewport_height = 0.0;
@@ -486,15 +848,19 @@ impl Model {
                     preview.height(),
                     preview.into_raw(),
                 );
-                if replace_previous && let Some(previous) = self.results.last_mut() {
-                    *previous = SubtitleResult::new(previous.id, subtitle, preview);
-                    return Event::None;
+                if replace_previous && let Some(previous_id) = self.results.last().map(|x| x.id) {
+                    let (_, changed) = self.results.with_mut(|results| {
+                        let previous = results.last_mut().unwrap().1;
+                        *previous = SubtitleResult::new_with_editor(previous_id, subtitle, preview);
+                    });
+                    return Event::SyncWithPostProduction(changed);
                 }
-                let id = self.next_result_id;
+                let id = SubtitleId(self.next_result_id);
                 self.next_result_id = self.next_result_id.wrapping_add(1);
-                self.results
-                    .push(SubtitleResult::new(id, subtitle, preview));
-                Event::None
+                let changed = self
+                    .results
+                    .push(SubtitleResult::new_with_editor(id, subtitle, preview));
+                Event::SyncWithPostProduction(changed)
             }
             Message::SearchDone => {
                 self.search_active = false;
@@ -537,34 +903,50 @@ impl Model {
                 }
                 Event::None
             }
-            Message::Delete(x) => {
-                if x < self.results.len() {
-                    let result = self.results.remove(x);
+            Message::Delete(id) => {
+                if let Some(SubtitleIndex(index)) = self.result_index(id) {
+                    let (result, changed) = self
+                        .results
+                        .with_mut(|results| results.shift_remove_index(index).unwrap().1);
                     self.edit_history
-                        .push(SubtitleEdit::Delete { index: x, result });
+                        .push(SubtitleEdit::Delete { index, result });
+                    return Event::SyncWithPostProduction(changed);
                 }
                 Event::None
             }
-            Message::MergeWithPrevious(x) => {
-                if x > 0 && x < self.results.len() {
-                    let result = self.results.remove(x);
-                    let previous_end_timestamp = std::mem::replace(
-                        &mut self.results[x - 1].subtitle.end_timestamp,
-                        result.subtitle.end_timestamp,
-                    );
+            Message::MergeWithPrevious(id) => {
+                if let Some(SubtitleIndex(index)) = self.result_index(id)
+                    && index > 0
+                {
+                    let ((result, previous_end_timestamp), changed) =
+                        self.results.with_mut(|results| {
+                            let result = results.shift_remove_index(index).unwrap().1;
+                            let previous_end_timestamp = std::mem::replace(
+                                &mut results
+                                    .get_index_mut(index - 1)
+                                    .unwrap()
+                                    .1
+                                    .subtitle
+                                    .end_timestamp,
+                                result.subtitle.end_timestamp,
+                            );
+                            (result, previous_end_timestamp)
+                        });
                     self.edit_history.push(SubtitleEdit::MergeWithPrevious {
-                        index: x,
+                        index,
                         previous_end_timestamp,
                         result,
                     });
+                    return Event::SyncWithPostProduction(changed);
                 }
                 Event::None
             }
             Message::UndoEdit => {
                 if let Some(edit) = self.edit_history.pop() {
-                    match edit {
+                    let (_, changed) = self.results.with_mut(|results| match edit {
                         SubtitleEdit::Delete { index, result } => {
-                            self.results.insert(index.min(self.results.len()), result);
+                            let index = index.min(results.len());
+                            results.shift_insert(index, result.id, result);
                         }
                         SubtitleEdit::MergeWithPrevious {
                             index,
@@ -573,21 +955,36 @@ impl Model {
                         } => {
                             if let Some(previous) = index
                                 .checked_sub(1)
-                                .and_then(|index| self.results.get_mut(index))
+                                .and_then(|index| results.get_index_mut(index))
+                                .map(|(_, result)| result)
                             {
                                 previous.subtitle.end_timestamp = previous_end_timestamp;
-                                self.results.insert(index.min(self.results.len()), result);
+                                let index = index.min(results.len());
+                                results.shift_insert(index, result.id, result);
                             }
                         }
-                    }
+                    });
+                    return Event::SyncWithPostProduction(changed);
                 }
                 Event::None
             }
             Message::SubtitleContentEdit { id, action } => {
-                if let Some(result) = self.results.get_mut(id) {
-                    result.editor_content.perform(action);
-                    result.subtitle.text = result.editor_content.text();
+                if let Some(((), changed)) = self.results.with_mut_entry(id, |result| {
+                    if let SubtitleDisplay::Editor(content) = &mut result.display {
+                        content.perform(action);
+                        result.subtitle.set_text(content.text());
+                    }
+                }) {
+                    return Event::SyncWithPostProduction(changed);
                 }
+                Event::None
+            }
+            Message::ZoomIntoSubtitle { id } => {
+                self.zoomed_result_id = Some(id);
+                Event::None
+            }
+            Message::CloseSubtitlePreview => {
+                self.zoomed_result_id = None;
                 Event::None
             }
             Message::None => Event::None,
@@ -597,6 +994,71 @@ impl Model {
     pub fn set_ocr_model(&self, ocr: OcrModel) {
         if let Some(search_ocr) = &self.search_ocr {
             search_ocr.set(ocr);
+        }
+    }
+
+    /// Apply a source snapshot using the supplied invalidation scope.
+    ///
+    /// `source` is borrowed from the editing model; only affected cues are copied
+    /// into read-only results, without cloning editor content.
+    /// Unaffected destination entries retain their transformed caches. If a
+    /// targeted ID cannot be resolved, this rebuilds from the supplied snapshot
+    /// and returns `Full`, so the caller can schedule conversion for every cue.
+    /// Append checks that the ID is new and is the last cue in the source, and
+    /// that the collection lengths differ by one; otherwise it rebuilds.
+    /// This updates local state only; it does not emit another source-change event.
+    pub(crate) fn sync_result_from_source(
+        &mut self,
+        source: &SubtitleResults,
+        changed: ResultsChanged,
+    ) -> ResultsChanged {
+        let applied = match changed {
+            ResultsChanged::Full => {
+                self.results = source.readonly_snapshot();
+                ResultsChanged::Full
+            }
+            ResultsChanged::Targeted(id) => {
+                let source_result = source.get(id);
+                let target = self.results.0.get_mut(&id);
+                if let (Some(source_result), Some(target)) = (source_result, target) {
+                    *target = source_result.readonly_snapshot();
+                    ResultsChanged::Targeted(id)
+                } else {
+                    self.results = source.readonly_snapshot();
+                    ResultsChanged::Full
+                }
+            }
+            ResultsChanged::Append(id) => {
+                if let Some(source_result) = source.get(id)
+                    && !self.results.0.contains_key(&id)
+                    && source.len() == self.results.len() + 1
+                    && source.last().map(SubtitleResult::id) == Some(id)
+                {
+                    self.results.0.insert(id, source_result.readonly_snapshot());
+                    ResultsChanged::Append(id)
+                } else {
+                    self.results = source.readonly_snapshot();
+                    ResultsChanged::Full
+                }
+            }
+        };
+        self.result_scroll_offset = 0.0;
+        self.result_viewport_height = 0.0;
+        self.scrollbar_jump_status = ScrollbarJumpStatus::NoShow;
+        applied
+    }
+
+    pub(crate) fn set_transformed_text(&mut self, id: SubtitleId, text: Option<String>) -> bool {
+        let Some(result) = self.results.0.get_mut(&id) else {
+            return false;
+        };
+        result.set_transformed_text(text);
+        true
+    }
+
+    pub(crate) fn clear_transformed_text(&mut self) {
+        for result in self.results.0.values_mut() {
+            result.set_transformed_text(None);
         }
     }
 
@@ -643,11 +1105,15 @@ impl Model {
     }
 }
 
-pub fn to_srt(results: &[SubtitleResult]) -> String {
+pub(crate) fn to_srt(results: &SubtitleResults) -> String {
     extraction::to_srt(
         &results
             .iter()
-            .map(|result| result.subtitle.clone())
+            .map(|result| {
+                let mut subtitle = result.subtitle.clone();
+                subtitle.set_text(result.text_for_display(true).to_owned());
+                subtitle
+            })
             .collect::<Vec<_>>(),
     )
 }
@@ -724,7 +1190,7 @@ fn subtitle_search_stream(
             replace_previous,
         },
         extraction::Event::Finished => Message::SearchDone,
-        extraction::Event::Error(error) => Message::SearchError(error),
+        extraction::Event::Error(error) => Message::SearchError(format!("{error:#?}")),
     })
 }
 
@@ -734,11 +1200,11 @@ mod tests {
 
     fn detection(start: u64, end: u64, text: &str, replace_previous: bool) -> Message {
         Message::EventFound {
-            subtitle: Subtitle {
-                start_timestamp: Duration::from_secs(start),
-                end_timestamp: Duration::from_secs(end),
-                text: text.to_owned(),
-            },
+            subtitle: Subtitle::new(
+                Duration::from_secs(start),
+                Duration::from_secs(end),
+                text.to_owned(),
+            ),
             replace_previous,
             preview: RgbaImage::new(1, 1),
         }
@@ -771,5 +1237,118 @@ mod tests {
         model.update(detection(2, 3, "same text", false), &config);
 
         assert_eq!(model.results.len(), 2);
+    }
+
+    fn model_with_three_results() -> (Model, Config, [SubtitleId; 3]) {
+        let mut model = Model::default();
+        let config = Config::default();
+
+        model.update(detection(0, 1, "first", false), &config);
+        model.update(detection(2, 3, "second", false), &config);
+        model.update(detection(4, 5, "third", false), &config);
+
+        let ids = [
+            model.results[0].id,
+            model.results[1].id,
+            model.results[2].id,
+        ];
+        (model, config, ids)
+    }
+
+    #[test]
+    fn deletion_resolves_stable_id_after_indices_shift() {
+        let (mut model, config, [first_id, second_id, third_id]) = model_with_three_results();
+
+        model.update(Message::Delete(first_id), &config);
+        model.update(Message::Delete(third_id), &config);
+
+        assert_eq!(model.results.len(), 1);
+        assert_eq!(model.results[0].id, second_id);
+        assert_eq!(model.results[0].subtitle.text(), "second");
+    }
+
+    #[test]
+    fn edit_targets_stable_id_after_indices_shift() {
+        let (mut model, config, [first_id, second_id, third_id]) = model_with_three_results();
+
+        model.update(Message::Delete(first_id), &config);
+        model.update(
+            Message::SubtitleContentEdit {
+                id: second_id,
+                action: text_editor::Action::Edit(text_editor::Edit::Insert('!')),
+            },
+            &config,
+        );
+
+        let second = model
+            .results
+            .iter()
+            .find(|result| result.id == second_id)
+            .expect("the edited subtitle remains present");
+        let third = model
+            .results
+            .iter()
+            .find(|result| result.id == third_id)
+            .expect("the other subtitle remains present");
+        assert!(second.subtitle.text().contains('!'));
+        assert_eq!(third.subtitle.text(), "third");
+    }
+
+    #[test]
+    fn stale_edit_event_does_not_edit_replacement_at_same_index() {
+        let (mut model, config, [_first_id, second_id, third_id]) = model_with_three_results();
+
+        model.update(Message::Delete(second_id), &config);
+        model.update(
+            Message::SubtitleContentEdit {
+                id: second_id,
+                action: text_editor::Action::Edit(text_editor::Edit::Insert('!')),
+            },
+            &config,
+        );
+
+        let third = model
+            .results
+            .iter()
+            .find(|result| result.id == third_id)
+            .expect("the following subtitle remains present");
+        assert_eq!(third.subtitle.text(), "third");
+        assert!(!model.results.iter().any(|result| result.id == second_id));
+    }
+
+    #[test]
+    fn merge_resolves_stable_id_after_indices_shift() {
+        let (mut model, config, [first_id, second_id, third_id]) = model_with_three_results();
+
+        model.update(Message::Delete(first_id), &config);
+        model.update(Message::MergeWithPrevious(third_id), &config);
+
+        assert_eq!(model.results.len(), 1);
+        assert_eq!(model.results[0].id, second_id);
+        assert_eq!(
+            model.results[0].subtitle.end_timestamp,
+            Duration::from_secs(5)
+        );
+    }
+
+    #[test]
+    fn undo_merge_restores_stable_identity_and_order() {
+        let (mut model, config, [first_id, second_id, third_id]) = model_with_three_results();
+
+        model.update(Message::MergeWithPrevious(third_id), &config);
+        model.update(Message::UndoEdit, &config);
+
+        assert_eq!(
+            model
+                .results
+                .iter()
+                .map(|result| result.id)
+                .collect::<Vec<_>>(),
+            vec![first_id, second_id, third_id]
+        );
+        assert_eq!(
+            model.results[1].subtitle.end_timestamp,
+            Duration::from_secs(3)
+        );
     }
 }

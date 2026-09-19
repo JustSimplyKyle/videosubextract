@@ -11,6 +11,7 @@ use image::{DynamicImage, RgbaImage};
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
+use vse_ui::Apply;
 
 const OCR_PARALLELISM: usize = 4;
 
@@ -18,7 +19,24 @@ const OCR_PARALLELISM: usize = 4;
 pub struct Subtitle {
     pub start_timestamp: Duration,
     pub end_timestamp: Duration,
-    pub text: String,
+    text: String,
+}
+impl Subtitle {
+    pub fn new(start_timestamp: Duration, end_timestamp: Duration, text: String) -> Self {
+        Self {
+            start_timestamp,
+            end_timestamp,
+            text,
+        }
+    }
+
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    pub fn set_text(&mut self, text: String) {
+        self.text = text;
+    }
 }
 
 pub fn to_srt(results: &[Subtitle]) -> String {
@@ -97,7 +115,7 @@ pub enum Event {
         replace_previous: bool,
     },
     Finished,
-    Error(String),
+    Error(eyre::Report),
 }
 
 pub fn stream(request: Request) -> impl Stream<Item = Event> + Send {
@@ -110,9 +128,7 @@ pub fn stream(request: Request) -> impl Stream<Item = Event> + Send {
 }
 
 async fn run(request: Request, event_tx: async_channel::Sender<Event>) {
-    let (subtitle_tx, subtitle_rx) =
-        async_channel::bounded::<NativeSubtitleEvent>(OCR_PARALLELISM);
-    let (completion_tx, completion_rx) = futures::channel::oneshot::channel();
+    let (subtitle_tx, subtitle_rx) = async_channel::bounded::<NativeSubtitleEvent>(OCR_PARALLELISM);
     let blocking_event_tx = event_tx.clone();
     let input = request.input;
     let crop = request.crop;
@@ -122,49 +138,43 @@ async fn run(request: Request, event_tx: async_channel::Sender<Event>) {
     let progress_interval = request.progress_interval.max(1);
     let include_progress_preview = request.include_progress_preview;
 
-    smol::spawn(smol::unblock(move || {
-        let result = (|| {
-            let input = ffmpeg_the_third::format::input(&input)
-                .wrap_err("opening the video with FFmpeg")?;
-            let (controller, iter) =
-                create_video_player::<false>(input, crop, processing_resolution)
-                    .wrap_err("initializing the video decoder")?;
+    let task = smol::unblock(move || {
+        let input =
+            ffmpeg_the_third::format::input(&input).wrap_err("opening the video with FFmpeg")?;
+        let (_controller, iter) = create_video_player::<false>(input, crop, processing_resolution)
+            .wrap_err("initializing the video decoder")?;
 
-            let frame_iter = ProgressIter {
-                inner: iter.filter_map(Result::ok),
-                event_tx: blocking_event_tx,
-                count: 0,
-                interval: progress_interval,
-                include_preview: include_progress_preview,
-            };
+        let frame_iter = ProgressIter {
+            inner: iter.filter_map(Result::ok),
+            event_tx: blocking_event_tx,
+            count: 0,
+            interval: progress_interval,
+            include_preview: include_progress_preview,
+        };
 
-            match detector {
-                SubtitleDetector::OriginalCpp => {
-                    find_subtitles_with(frame_iter, &native_search_params, |event| {
-                        subtitle_tx
-                            .send_blocking(event)
-                            .map_err(|_| eyre::eyre!("subtitle OCR receiver closed"))
-                    })
-                }
-                SubtitleDetector::RustRewrite => {
-                    for event in SubtitleSearch::new(frame_iter, RustSearchParams::default()) {
-                        let event = NativeSubtitleEvent {
-                            start_timestamp: event.start_timestamp,
-                            end_timestamp: event.end_timestamp,
-                            ocr_image: event.sample_bgr,
-                        };
-                        subtitle_tx
-                            .send_blocking(event)
-                            .map_err(|_| eyre::eyre!("subtitle OCR receiver closed"))?;
-                    }
-                    Ok(())
-                }
+        match detector {
+            SubtitleDetector::OriginalCpp => {
+                find_subtitles_with(frame_iter, &native_search_params, |event| {
+                    subtitle_tx
+                        .send_blocking(event)
+                        .map_err(|_| eyre::eyre!("subtitle OCR receiver closed"))
+                })
             }
-        })();
-
-        completion_tx.send(result).ok();
-    }))
-    .detach();
+            SubtitleDetector::RustRewrite => {
+                for event in SubtitleSearch::new(frame_iter, RustSearchParams::default()) {
+                    let event = NativeSubtitleEvent {
+                        start_timestamp: event.start_timestamp,
+                        end_timestamp: event.end_timestamp,
+                        ocr_image: event.sample_bgr,
+                    };
+                    subtitle_tx
+                        .send_blocking(event)
+                        .map_err(|_| eyre::eyre!("subtitle OCR receiver closed"))?;
+                }
+                Ok(())
+            }
+        }
+    });
 
     let ocr = request.ocr;
     let jobs = futures::stream::unfold(subtitle_rx, |receiver| async move {
@@ -181,11 +191,7 @@ async fn run(request: Request, event_tx: async_channel::Sender<Event>) {
                 .wrap_err("recognizing subtitle text")?;
 
             eyre::Ok((
-                Subtitle {
-                    start_timestamp: event.start_timestamp,
-                    end_timestamp: event.end_timestamp,
-                    text,
-                },
+                Subtitle::new(event.start_timestamp, event.end_timestamp, text),
                 preview,
             ))
         })
@@ -198,7 +204,7 @@ async fn run(request: Request, event_tx: async_channel::Sender<Event>) {
         let (mut subtitle, preview) = match result {
             Ok(result) => result,
             Err(error) => {
-                event_tx.send(Event::Error(format!("{error:#}"))).await.ok();
+                event_tx.send(Event::Error(error)).await.ok();
                 return;
             }
         };
@@ -229,17 +235,14 @@ async fn run(request: Request, event_tx: async_channel::Sender<Event>) {
         }
     }
 
-    match completion_rx.await {
-        Ok(Ok(())) => {
+    match task.await {
+        Ok(()) => {
             event_tx.send(Event::Finished).await.ok();
         }
-        Ok(Err(error)) => {
-            event_tx.send(Event::Error(format!("{error:#}"))).await.ok();
-        }
-        Err(_) => {
+        Err(e) => {
             event_tx
                 .send(Event::Error(
-                    "subtitle detector stopped unexpectedly".into(),
+                    e.wrap_err("subtitle detector stopped unexpectedly"),
                 ))
                 .await
                 .ok();
