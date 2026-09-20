@@ -80,6 +80,67 @@ pub fn dropdown<'a, Message: Clone + 'a>(
     })
 }
 
+/// A compact value control with decrement and increment buttons.
+pub fn spin_button<'a, T, Message>(
+    label: impl Into<std::borrow::Cow<'a, str>>,
+    _name: impl Into<std::borrow::Cow<'a, str>>,
+    value: T,
+    step: T,
+    min: T,
+    max: T,
+    on_press: impl Fn(T) -> Message + 'a,
+) -> iced::Element<'a, Message>
+where
+    T: Copy + std::ops::Add<Output = T> + std::ops::Sub<Output = T> + PartialOrd + 'a,
+    Message: Clone + 'a,
+{
+    let value = if value < min {
+        min
+    } else if value > max {
+        max
+    } else {
+        value
+    };
+    let decrement = if value < min + step {
+        min
+    } else {
+        value - step
+    };
+    let increment = if value > max - step {
+        max
+    } else {
+        value + step
+    };
+
+    let decrement_button = button(icon::from_name("list-remove-symbolic"))
+        .padding(6)
+        .style(crate::theme::Button::Icon::style);
+    let decrement_button = if value > min {
+        decrement_button.on_press(on_press(decrement))
+    } else {
+        decrement_button
+    };
+
+    let increment_button = button(icon::from_name("list-add-symbolic"))
+        .padding(6)
+        .style(crate::theme::Button::Icon::style);
+    let increment_button = if value < max {
+        increment_button.on_press(on_press(increment))
+    } else {
+        increment_button
+    };
+
+    iced::widget::row![
+        decrement_button,
+        iced::widget::container(iced::widget::text(label.into()))
+            .center_x(48)
+            .center_y(28),
+        increment_button,
+    ]
+    .align_y(iced::Alignment::Center)
+    .into()
+}
+
 pub mod segmented_button {
     use std::any::Any;
 

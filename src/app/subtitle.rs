@@ -145,15 +145,6 @@ impl SubtitleResult {
         }
     }
 
-    /// Replace presentation state with an untransformed source-text snapshot.
-    ///
-    /// This discards editor state and any previous transformation. Cloning an
-    /// editable result before calling this also clones the discarded editor.
-    pub fn into_readonly(mut self) -> Self {
-        self.display = SubtitleDisplay::DisplayOnly { transformed: None };
-        self
-    }
-
     pub(crate) const fn id(&self) -> SubtitleId {
         self.id
     }

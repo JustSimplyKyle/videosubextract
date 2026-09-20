@@ -1,0 +1,7 @@
+[bundle]
+identifier = "dev.justsimplykyle.videosubextract"
+publisher = "justsimplykyle"
+
+[application]
+default_platform = "linux"
+asset_dir = "models"

@@ -6,6 +6,7 @@ pub mod selection_canvas;
 pub mod subtitle;
 
 use crate::config::{Config, Language, ProcessingResolution, SubtitleDetector};
+use crate::native_video_sub_finder::NativeSearchParams;
 use crate::ocr::OcrModel;
 pub(crate) use crate::video_player::{
     self, InnerPlayer, VideoPlayerController, create_video_player,
@@ -33,7 +34,7 @@ pub fn format_duration(duration: Duration) -> String {
 pub struct AppModel {
     active_page: Page,
     navigation_open: bool,
-    settings_open: bool,
+    dialog_page: Option<DialogPage>,
     next_toast_id: u64,
     toasts: Vec<(u64, String)>,
     config_handler: cosmic_config::Config,
@@ -48,11 +49,12 @@ pub struct AppModel {
 #[derive(Debug, Clone)]
 pub enum Message {
     SelectPage(Page),
+    SelectDialogPage(Option<DialogPage>),
     ToggleNavigation,
-    ToggleSettings,
     CloseToast(u64),
     SetOcrModel(OcrModel),
     SetSubtitleDetector(SubtitleDetector),
+    SetNativeSearchParams(NativeSearchParams),
     SetPostOcrProcessing(bool),
     SetProcessingResolution(ProcessingResolution),
     SetLanguage(Language),
@@ -68,6 +70,13 @@ pub enum Page {
     Subtitle,
     PostProduction,
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DialogPage {
+    Settings,
+    Error,
+}
+
 impl Page {
     fn label(self) -> String {
         match self {
@@ -100,8 +109,7 @@ impl AppModel {
         let selected_resolution = ProcessingResolution::ALL
             .iter()
             .position(|value| value == &self.config.processing_resolution);
-
-        widget::scrollable(widget::settings::view_column(vec![
+        let mut sections = vec![
             widget::settings::section()
                 .title(fl!("internationalization"))
                 .add(widget::settings::item(
@@ -145,7 +153,215 @@ impl AppModel {
                     }),
                 ))
                 .into(),
-        ]))
+        ];
+
+        if self.config.subtitle_detector == SubtitleDetector::OriginalCpp {
+            sections.push(self.original_cpp_settings());
+        }
+
+        widget::scrollable(widget::settings::view_column(sections)).into()
+    }
+
+    fn original_cpp_settings(&self) -> Element<'_, Message> {
+        let native = self.config.native_search_params;
+
+        widget::settings::section()
+            .title(fl!("original-cpp-parameters"))
+            .add(
+                widget::settings::togglable(fl!("ocr-image-cleanup"))
+                    .description(fl!("run-find-text-lines"))
+                    .toggler(native.apply_ocr_image_cleanup, move |enabled| {
+                        Message::SetNativeSearchParams(NativeSearchParams {
+                            apply_ocr_image_cleanup: enabled,
+                            ..native
+                        })
+                    }),
+            )
+            .add(widget::settings::item(
+                fl!("worker-threads"),
+                widget::spin_button(
+                    native.threads.to_string(),
+                    fl!("worker-threads"),
+                    native.threads,
+                    1,
+                    1,
+                    256,
+                    move |threads| {
+                        Message::SetNativeSearchParams(NativeSearchParams { threads, ..native })
+                    },
+                ),
+            ))
+            .add(widget::settings::item(
+                fl!("minimum-subtitle-frames"),
+                widget::spin_button(
+                    native.min_subtitle_frames.to_string(),
+                    fl!("minimum-subtitle-frames"),
+                    native.min_subtitle_frames,
+                    1,
+                    1,
+                    1000,
+                    move |min_subtitle_frames| {
+                        Message::SetNativeSearchParams(NativeSearchParams {
+                            min_subtitle_frames,
+                            ..native
+                        })
+                    },
+                ),
+            ))
+            .add(widget::settings::item(
+                fl!("text-percentage"),
+                widget::spin_button(
+                    format!("{:.3}", native.text_percent),
+                    fl!("text-percentage"),
+                    native.text_percent,
+                    0.01,
+                    0.0,
+                    1.0,
+                    move |text_percent| {
+                        Message::SetNativeSearchParams(NativeSearchParams {
+                            text_percent,
+                            ..native
+                        })
+                    },
+                ),
+            ))
+            .add(widget::settings::item(
+                fl!("minimum-text-length"),
+                widget::spin_button(
+                    format!("{:.3}", native.min_text_length),
+                    fl!("minimum-text-length"),
+                    native.min_text_length,
+                    0.001,
+                    0.0,
+                    1.0,
+                    move |min_text_length| {
+                        Message::SetNativeSearchParams(NativeSearchParams {
+                            min_text_length,
+                            ..native
+                        })
+                    },
+                ),
+            ))
+            .add(widget::settings::item(
+                fl!("vertical-edge-line-error"),
+                widget::spin_button(
+                    format!("{:.2}", native.vertical_edges_line_error),
+                    fl!("vertical-edge-line-error"),
+                    native.vertical_edges_line_error,
+                    0.05,
+                    0.0,
+                    1.0,
+                    move |vertical_edges_line_error| {
+                        Message::SetNativeSearchParams(NativeSearchParams {
+                            vertical_edges_line_error,
+                            ..native
+                        })
+                    },
+                ),
+            ))
+            .add(widget::settings::item(
+                fl!("ila-points-line-error"),
+                widget::spin_button(
+                    format!("{:.2}", native.ila_points_line_error),
+                    fl!("ila-points-line-error"),
+                    native.ila_points_line_error,
+                    0.05,
+                    0.0,
+                    1.0,
+                    move |ila_points_line_error| {
+                        Message::SetNativeSearchParams(NativeSearchParams {
+                            ila_points_line_error,
+                            ..native
+                        })
+                    },
+                ),
+            ))
+            .add(widget::settings::item(
+                fl!("maximum-frame-gap-down"),
+                widget::spin_button(
+                    native.max_frame_gap_down.to_string(),
+                    fl!("maximum-frame-gap-down"),
+                    native.max_frame_gap_down,
+                    1,
+                    0,
+                    1000,
+                    move |max_frame_gap_down| {
+                        Message::SetNativeSearchParams(NativeSearchParams {
+                            max_frame_gap_down,
+                            ..native
+                        })
+                    },
+                ),
+            ))
+            .add(widget::settings::item(
+                fl!("maximum-frame-gap-up"),
+                widget::spin_button(
+                    native.max_frame_gap_up.to_string(),
+                    fl!("maximum-frame-gap-up"),
+                    native.max_frame_gap_up,
+                    1,
+                    0,
+                    1000,
+                    move |max_frame_gap_up| {
+                        Message::SetNativeSearchParams(NativeSearchParams {
+                            max_frame_gap_up,
+                            ..native
+                        })
+                    },
+                ),
+            ))
+            .add(widget::settings::togglable(fl!("use-isa-images")).toggler(
+                native.use_isa_images,
+                move |use_isa_images| {
+                    Message::SetNativeSearchParams(NativeSearchParams {
+                        use_isa_images,
+                        ..native
+                    })
+                },
+            ))
+            .add(widget::settings::togglable(fl!("use-ila-images")).toggler(
+                native.use_ila_images,
+                move |use_ila_images| {
+                    Message::SetNativeSearchParams(NativeSearchParams {
+                        use_ila_images,
+                        ..native
+                    })
+                },
+            ))
+            .add(
+                widget::settings::togglable(fl!("replace-isa-with-filtered-image")).toggler(
+                    native.replace_isa_with_filtered,
+                    move |enabled| {
+                        Message::SetNativeSearchParams(NativeSearchParams {
+                            replace_isa_with_filtered: enabled,
+                            ..native
+                        })
+                    },
+                ),
+            )
+            .into()
+    }
+
+    fn error_view(&self) -> Element<'_, Message> {
+        use std::fmt::Write;
+
+        let errors = self
+            .errors
+            .iter()
+            .flat_map(|report| report.chain())
+            .enumerate()
+            .fold(String::new(), |mut output, (index, error)| {
+                let _ = writeln!(output, "{}: {}", index + 1, error);
+                output
+            });
+
+        widget::scrollable(
+            widget::container(widget::text(errors))
+                .width(Length::Fill)
+                .padding(vse_ui::theme::spacing().space_l)
+                .style(vse_ui::theme::Container::Card::style),
+        )
+        .height(Length::Fill)
         .into()
     }
 
@@ -158,7 +374,7 @@ impl AppModel {
             Self {
                 active_page: Page::Prepare,
                 navigation_open: true,
-                settings_open: false,
+                dialog_page: None,
                 next_toast_id: 0,
                 toasts: Vec::new(),
                 config_handler,
@@ -216,8 +432,8 @@ impl AppModel {
                 self.navigation_open = !self.navigation_open;
                 Task::none()
             }
-            Message::ToggleSettings => {
-                self.settings_open = !self.settings_open;
+            Message::SelectDialogPage(page) => {
+                self.dialog_page = page;
                 Task::none()
             }
             Message::CloseToast(id) => {
@@ -239,6 +455,17 @@ impl AppModel {
                     .config
                     .set_subtitle_detector(&self.config_handler, value);
                 Task::none()
+            }
+            Message::SetNativeSearchParams(value) => {
+                match self
+                    .config
+                    .set_native_search_params(&self.config_handler, value)
+                {
+                    Ok(_) => Task::none(),
+                    Err(error) => Task::done(Message::ErrorReported(Arc::new(eyre::eyre!(
+                        "failed to save original C++ parameters: {error}"
+                    )))),
+                }
             }
             Message::SetPostOcrProcessing(value) => {
                 let _ = self
@@ -307,6 +534,7 @@ impl AppModel {
             }
             Message::ErrorReported(error) => {
                 self.errors.push(error);
+                self.dialog_page = Some(DialogPage::Error);
                 Task::none()
             }
         }
@@ -352,27 +580,35 @@ impl AppModel {
         } else {
             Vec::new()
         };
-        let settings_dialog = self.settings_open.then(|| {
+        let dialog = self.dialog_page.map(|page| {
+            let (title, content) = match page {
+                DialogPage::Settings => (fl!("settings"), self.settings_view()),
+                DialogPage::Error => (fl!("errors"), self.error_view()),
+            };
+
             vse_ui::components::dialog(
-                fl!("settings"),
-                self.settings_view(),
+                title,
+                content,
                 widget::button(icon::from_name("window-close-symbolic"))
                     .padding(4)
                     .style(vse_ui::theme::Button::Icon::style)
-                    .on_press(Message::ToggleSettings),
+                    .on_press(Message::SelectDialogPage(None)),
             )
         });
 
         shell::Shell::new(active.label(), active.details(), content)
             .navigation(navigation)
-            .header_controls(Message::ToggleNavigation, Message::ToggleSettings)
+            .header_controls(
+                Message::ToggleNavigation,
+                Message::SelectDialogPage(Some(DialogPage::Settings)),
+            )
             .toasts(
                 self.toasts
                     .iter()
                     .map(|(id, message)| (message.clone(), Message::CloseToast(*id)))
                     .collect(),
             )
-            .dialog(settings_dialog)
+            .dialog(dialog)
             .into()
     }
 }

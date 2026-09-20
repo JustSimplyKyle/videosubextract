@@ -107,13 +107,13 @@
               stdenv.cc.cc
               clang
               libclang
-            ]
-            ;
+            ];
 
           # RUSTC_WRAPPER = "${pkgs.sccache}/bin/sccache";
           FONT_PATH = "${pkgs.noto-fonts-cjk-sans}/share/fonts/opentype/noto-cjk/NotoSansCJK-VF.otf.ttc";
           RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
           LIBCLANG_PATH = "${pkgs.libclang.lib}/lib";
+          COSMIC_ICONS = "${pkgs.cosmic-icons}/share";
           LD_LIBRARY_PATH = "$LD_LIBRARY_PATH:${pkgs.lib.makeLibraryPath buildInputs}";
 
           shellHook = ''
