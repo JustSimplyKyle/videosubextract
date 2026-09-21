@@ -42,7 +42,7 @@ impl<'a, Message: 'a> From<Section<'a, Message>> for Element<'a, Message> {
         let content = container(column(section.items).spacing(12))
             .padding(16)
             .width(Fill)
-            .style(crate::theme::Container::List::style);
+            .style(crate::theme::container::list);
         match section.title {
             Some(title) => column![text(title).size(18), content].spacing(10).into(),
             None => content.into(),

@@ -473,7 +473,7 @@ impl<'a> SubtitleTable<'a> {
                 .apply(widget::container)
                 .width(Length::Fixed(24.0))
                 .center_y(Length::Fill)
-                .style(cosmic::theme::Container::Card::style)
+                .style(cosmic::theme::container::card)
                 .into()
         } else {
             widget::image(result.preview.clone())
@@ -496,7 +496,7 @@ impl<'a> SubtitleTable<'a> {
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .apply(widget::container)
-                .style(cosmic::theme::Container::Secondary::style)
+                .style(cosmic::theme::container::secondary)
                 .padding([spacing.space_s, spacing.space_m])
                 .center_y(Length::Fill)
                 .height(Length::Fill)
@@ -560,13 +560,13 @@ impl<'a> SubtitleTable<'a> {
     fn delete(id: SubtitleId) -> Element<'static, Message> {
         widget::button(widget::icon::from_name("edit-delete-symbolic"))
             .on_press(Message::Delete(id))
-            .style(cosmic::theme::Button::Destructive::style)
+            .style(cosmic::theme::button::destructive)
             .into()
     }
     fn merge_with_previous(id: SubtitleId) -> Element<'static, Message> {
         widget::button(widget::icon::from_name("go-up-symbolic"))
             .on_press(Message::MergeWithPrevious(id))
-            .style(cosmic::theme::Button::Icon::style)
+            .style(cosmic::theme::button::icon)
             .into()
     }
     fn view(self) -> Element<'a, Message> {
@@ -615,7 +615,7 @@ impl<'a> SubtitleView<'a> {
                 "complete-subtitles-found",
                 count = self.model.results.len()
             ))
-            .style(cosmic::theme::Text::Accent::style)
+            .style(cosmic::theme::text::accent)
             .into()
         } else if self.model.search_active {
             let status_text = widget::text(fl!(
@@ -624,7 +624,7 @@ impl<'a> SubtitleView<'a> {
                 igt = self.model.current_timestamp.apply(format_duration),
                 eta = self.model.progress_bar.eta().apply(Self::format_eta)
             ))
-            .style(cosmic::theme::Text::Accent::style);
+            .style(cosmic::theme::text::accent);
 
             let progress_bar = widget::progress_bar(
                 0.0..=1.0,
@@ -639,17 +639,17 @@ impl<'a> SubtitleView<'a> {
                 .into()
         } else {
             widget::text(fl!("no-active-search"))
-                .style(cosmic::theme::Text::Accent::style)
+                .style(cosmic::theme::text::accent)
                 .into()
         }
     }
 
     fn controls(&self) -> Element<'a, Message> {
         let to_post_prod = widget::button(widget::text(fl!("post-production")))
-            .style(cosmic::theme::Button::Suggested::style)
+            .style(cosmic::theme::button::suggested)
             .on_press_maybe((!self.model.search_active).then_some(Message::GoToPostProduction));
         let undo_edit = widget::button(icon::from_name("edit-undo-symbolic"))
-            .style(cosmic::theme::Button::Icon::style)
+            .style(cosmic::theme::button::icon)
             .on_press_maybe((!self.model.edit_history.is_empty()).then_some(Message::UndoEdit));
 
         widget::row![self.status(), undo_edit, to_post_prod]
@@ -668,7 +668,7 @@ impl<'a> SubtitleView<'a> {
         )
         .align_x(Alignment::Center)
         .apply(widget::container)
-        .style(cosmic::theme::Container::Card::style)
+        .style(cosmic::theme::container::card)
         .padding(20)
         .into()
     }
@@ -710,7 +710,7 @@ impl<'a> SubtitleView<'a> {
                 .expand(true)
                 .content_fit(iced::ContentFit::Contain),
             widget::button(icon::from_name("window-close-symbolic"))
-                .style(cosmic::theme::Button::Icon::style)
+                .style(cosmic::theme::button::icon)
                 .on_press(Message::CloseSubtitlePreview),
         )
         .apply(widget::container)
@@ -759,7 +759,7 @@ impl Model {
             && self.scrollbar_jump_status == ScrollbarJumpStatus::DisplayButton)
             .then_some(
                 widget::button(widget::text(fl!("jump-to-latest")))
-                    .style(cosmic::theme::Button::Suggested::style)
+                    .style(cosmic::theme::button::suggested)
                     .on_press(Message::JumpToEnd {
                         id: scrollable_id.clone(),
                     })
@@ -784,7 +784,7 @@ impl Model {
 
         iced::widget::stack![results, jump_to_end]
             .apply(widget::container)
-            .style(cosmic::theme::Container::List::style)
+            .style(cosmic::theme::container::list)
             .height(Length::Fill)
             .into()
     }

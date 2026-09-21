@@ -11,7 +11,7 @@ pub use iced::widget::{canvas, image, text_editor};
 pub fn button<'a, Message>(
     content: impl Into<crate::Element<'a, Message>>,
 ) -> iced::widget::Button<'a, Message, crate::Theme> {
-    iced::widget::button(content).style(crate::theme::Button::Standard::style)
+    iced::widget::button(content).style(crate::theme::button::standard)
 }
 
 pub mod icon {
@@ -114,7 +114,7 @@ where
 
     let decrement_button = button(icon::from_name("list-remove-symbolic"))
         .padding(6)
-        .style(crate::theme::Button::Icon::style);
+        .style(crate::theme::button::icon);
     let decrement_button = if value > min {
         decrement_button.on_press(on_press(decrement))
     } else {
@@ -123,7 +123,7 @@ where
 
     let increment_button = button(icon::from_name("list-add-symbolic"))
         .padding(6)
-        .style(crate::theme::Button::Icon::style);
+        .style(crate::theme::button::icon);
     let increment_button = if value < max {
         increment_button.on_press(on_press(increment))
     } else {

@@ -403,7 +403,7 @@ impl Model {
             .spacing(cosmic::theme::spacing().space_xxs),
             widget::column![
                 widget::text(status)
-                    .style(cosmic::theme::Text::Accent::style)
+                    .style(cosmic::theme::text::accent)
                     .align_x(iced::widget::text::Alignment::Right)
                     .width(Length::Fill),
                 widget::text::caption(state)
@@ -416,7 +416,7 @@ impl Model {
         .align_y(Alignment::Center)
         .padding(cosmic::theme::spacing().space_m)
         .apply(widget::container)
-        .style(cosmic::theme::Container::Card::style)
+        .style(cosmic::theme::container::card)
         .width(Length::Fill)
         .into()
     }
@@ -467,7 +467,7 @@ impl Model {
                 fl!("export"),
                 self.selected_format().extension().to_uppercase()
             )))
-            .style(cosmic::theme::Button::Suggested::style)
+            .style(cosmic::theme::button::suggested)
             .on_press_maybe((!disabled).then_some(Message::Export))
             .width(Length::Shrink)
             .into(),
@@ -513,7 +513,7 @@ impl Model {
         .padding(cosmic::theme::spacing().space_m)
         .height(Length::Fill)
         .apply(widget::container)
-        .style(cosmic::theme::Container::Card::style)
+        .style(cosmic::theme::container::card)
         .width(Length::FillPortion(3));
 
         widget::row![

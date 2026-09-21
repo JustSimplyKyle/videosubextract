@@ -67,9 +67,9 @@ impl<'a, Message: Clone + 'a> From<Shell<'a, Message>> for Element<'a, Message> 
                 .fold(column![].spacing(8).padding(12), |nav, item| {
                     let button = button(text(item.label)).on_press(item.on_press).width(Fill);
                     nav.push(if item.selected {
-                        button.style(crate::theme::Button::NavigationActive::style)
+                        button.style(crate::theme::button::navigation_active)
                     } else {
-                        button.style(crate::theme::Button::NavigationInactive::style)
+                        button.style(crate::theme::button::navigation_inactive)
                     })
                 });
 
@@ -77,14 +77,14 @@ impl<'a, Message: Clone + 'a> From<Shell<'a, Message>> for Element<'a, Message> 
             row![
                 button(crate::widget::icon::from_name("open-menu-symbolic"))
                     .padding(8)
-                    .style(crate::theme::Button::Icon::style)
+                    .style(crate::theme::button::icon)
                     .on_press(toggle_navigation),
                 iced::widget::Space::new().width(Fill),
                 button(crate::widget::icon::from_name(
                     "preferences-system-symbolic"
                 ))
                 .padding(8)
-                .style(crate::theme::Button::Icon::style)
+                .style(crate::theme::button::icon)
                 .on_press(open_settings),
             ]
             .align_y(Alignment::Center)
@@ -102,7 +102,7 @@ impl<'a, Message: Clone + 'a> From<Shell<'a, Message>> for Element<'a, Message> 
             container(nav)
                 .width(if navigation_open { 200 } else { 0 })
                 .height(Length::Fill)
-                .style(crate::theme::Container::Navigation::style),
+                .style(crate::theme::container::navigation),
             container(page).padding([30, 50]).width(Fill)
         ]
         .align_y(Alignment::Start)
@@ -116,14 +116,14 @@ impl<'a, Message: Clone + 'a> From<Shell<'a, Message>> for Element<'a, Message> 
                     text(message),
                     button(crate::widget::icon::from_name("window-close-symbolic"))
                         .padding(4)
-                        .style(crate::theme::Button::Icon::style)
+                        .style(crate::theme::button::icon)
                         .on_press(close),
                 ]
                 .spacing(12)
                 .align_y(Alignment::Center),
             )
             .padding(12)
-            .style(crate::theme::Container::Card::style)
+            .style(crate::theme::container::card)
             .into()
         }))
         .spacing(8)

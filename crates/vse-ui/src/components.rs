@@ -17,6 +17,6 @@ pub fn dialog<'a, Message: 'a>(
         .padding(24)
         .width(570)
         .height(Length::Shrink)
-        .style(crate::theme::Container::Dialog::style)
+        .style(crate::theme::container::dialog)
         .into()
 }

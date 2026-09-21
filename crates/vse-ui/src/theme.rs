@@ -90,46 +90,36 @@ fn navigation_item_style(
     }
 }
 
-#[allow(non_snake_case)]
-pub mod Button {
+pub mod button {
     use super::*;
     macro_rules! style {
         ($name:ident, $field:ident, $radius:ident) => {
-            pub struct $name;
-            impl $name {
-                pub fn style(
-                    _: &Theme,
-                    status: ::iced::widget::button::Status,
-                ) -> ::iced::widget::button::Style {
-                    button_style(&COSMIC.$field, COSMIC.corner_radii.$radius, status)
-                }
+            pub fn $name(
+                _: &Theme,
+                status: ::iced::widget::button::Status,
+            ) -> ::iced::widget::button::Style {
+                button_style(&COSMIC.$field, COSMIC.corner_radii.$radius, status)
             }
         };
     }
-    style!(Standard, button, radius_xl);
-    style!(Suggested, accent_button, radius_xl);
-    style!(Destructive, destructive_button, radius_xl);
-    style!(Icon, icon_button, radius_xl);
-    style!(NavToggle, icon_button, radius_s);
+    style!(standard, button, radius_xl);
+    style!(suggested, accent_button, radius_xl);
+    style!(destructive, destructive_button, radius_xl);
+    style!(icon, icon_button, radius_xl);
+    style!(nav_toggle, icon_button, radius_s);
 
-    pub struct NavigationActive;
-    impl NavigationActive {
-        pub fn style(
-            _: &Theme,
-            status: ::iced::widget::button::Status,
-        ) -> ::iced::widget::button::Style {
-            navigation_item_style(true, status)
-        }
+    pub fn navigation_active(
+        _: &Theme,
+        status: ::iced::widget::button::Status,
+    ) -> ::iced::widget::button::Style {
+        navigation_item_style(true, status)
     }
 
-    pub struct NavigationInactive;
-    impl NavigationInactive {
-        pub fn style(
-            _: &Theme,
-            status: ::iced::widget::button::Status,
-        ) -> ::iced::widget::button::Style {
-            navigation_item_style(false, status)
-        }
+    pub fn navigation_inactive(
+        _: &Theme,
+        status: ::iced::widget::button::Status,
+    ) -> ::iced::widget::button::Style {
+        navigation_item_style(false, status)
     }
 }
 
@@ -141,9 +131,9 @@ pub fn segmented_button(
     last: bool,
 ) -> ::iced::widget::button::Style {
     let mut style = if active {
-        Button::Suggested::style(theme, status)
+        button::suggested(theme, status)
     } else {
-        Button::Standard::style(theme, status)
+        button::standard(theme, status)
     };
     let radius = COSMIC.corner_radii.radius_s[0];
     style.border.radius = ::iced::border::Radius {
@@ -169,85 +159,70 @@ fn container_style(
         ..Default::default()
     }
 }
-#[allow(non_snake_case)]
-pub mod Container {
+pub mod container {
     use super::*;
-    pub struct Navigation;
-    impl Navigation {
-        pub fn style(_: &Theme) -> ::iced::widget::container::Style {
-            let surface = COSMIC.primary(false);
-            container_style(surface, COSMIC.corner_radii.radius_s)
-        }
+    pub fn navigation(_: &Theme) -> ::iced::widget::container::Style {
+        let surface = COSMIC.primary(false);
+        container_style(surface, COSMIC.corner_radii.radius_s)
     }
-    pub struct Card;
-    impl Card {
-        pub fn style(_: &Theme) -> ::iced::widget::container::Style {
-            let layer = COSMIC.background(false);
-            container_style(
-                &cosmic_theme::Container {
-                    base: layer.component.base,
-                    component: layer.component.clone(),
-                    divider: layer.component.divider,
-                    on: layer.component.on,
-                    small_widget: layer.small_widget,
-                },
-                COSMIC.corner_radii.radius_s,
-            )
-        }
+
+    pub fn card(_: &Theme) -> ::iced::widget::container::Style {
+        let layer = COSMIC.background(false);
+        container_style(
+            &cosmic_theme::Container {
+                base: layer.component.base,
+                component: layer.component.clone(),
+                divider: layer.component.divider,
+                on: layer.component.on,
+                small_widget: layer.small_widget,
+            },
+            COSMIC.corner_radii.radius_s,
+        )
     }
-    pub struct Secondary;
-    impl Secondary {
-        pub fn style(_: &Theme) -> ::iced::widget::container::Style {
-            container_style(COSMIC.secondary(false), COSMIC.corner_radii.radius_s)
-        }
+
+    pub fn secondary(_: &Theme) -> ::iced::widget::container::Style {
+        container_style(COSMIC.secondary(false), COSMIC.corner_radii.radius_s)
     }
-    pub struct List;
-    impl List {
-        pub fn style(_: &Theme) -> ::iced::widget::container::Style {
-            let layer = COSMIC.background(false);
-            container_style(
-                &cosmic_theme::Container {
-                    base: layer.component.base,
-                    component: layer.component.clone(),
-                    divider: layer.component.divider,
-                    on: layer.component.on,
-                    small_widget: layer.small_widget,
-                },
-                COSMIC.corner_radii.radius_s,
-            )
-        }
+
+    pub fn list(_: &Theme) -> ::iced::widget::container::Style {
+        let layer = COSMIC.background(false);
+        container_style(
+            &cosmic_theme::Container {
+                base: layer.component.base,
+                component: layer.component.clone(),
+                divider: layer.component.divider,
+                on: layer.component.on,
+                small_widget: layer.small_widget,
+            },
+            COSMIC.corner_radii.radius_s,
+        )
     }
-    pub struct Dialog;
-    impl Dialog {
-        pub fn style(_: &Theme) -> ::iced::widget::container::Style {
-            let surface = COSMIC.primary(false);
-            ::iced::widget::container::Style {
-                text_color: Some(color(surface.on)),
-                background: Some(Background::Color(color(surface.base))),
-                border: Border {
-                    color: color(surface.divider),
-                    width: 1.0,
-                    radius: radius(COSMIC.corner_radii.radius_m),
-                },
-                shadow: ::iced::Shadow {
-                    color: color(COSMIC.shade),
-                    offset: ::iced::Vector::new(0.0, 4.0),
-                    blur_radius: 16.0,
-                },
-                ..Default::default()
-            }
+
+    pub fn dialog(_: &Theme) -> ::iced::widget::container::Style {
+        let surface = COSMIC.primary(false);
+        ::iced::widget::container::Style {
+            text_color: Some(color(surface.on)),
+            background: Some(Background::Color(color(surface.base))),
+            border: Border {
+                color: color(surface.divider),
+                width: 1.0,
+                radius: radius(COSMIC.corner_radii.radius_m),
+            },
+            shadow: ::iced::Shadow {
+                color: color(COSMIC.shade),
+                offset: ::iced::Vector::new(0.0, 4.0),
+                blur_radius: 16.0,
+            },
+            ..Default::default()
         }
     }
 }
-#[allow(non_snake_case)]
-pub mod Text {
+
+pub mod text {
     use super::*;
-    pub struct Accent;
-    impl Accent {
-        pub fn style(_: &Theme) -> ::iced::widget::text::Style {
-            ::iced::widget::text::Style {
-                color: Some(color(COSMIC.accent_text_color())),
-            }
+    pub fn accent(_: &Theme) -> ::iced::widget::text::Style {
+        ::iced::widget::text::Style {
+            color: Some(color(COSMIC.accent_text_color())),
         }
     }
 }

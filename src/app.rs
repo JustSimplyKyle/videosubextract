@@ -359,7 +359,7 @@ impl AppModel {
             widget::container(widget::text(errors))
                 .width(Length::Fill)
                 .padding(vse_ui::theme::spacing().space_l)
-                .style(vse_ui::theme::Container::Card::style),
+                .style(vse_ui::theme::container::card),
         )
         .height(Length::Fill)
         .into()
@@ -591,7 +591,7 @@ impl AppModel {
                 content,
                 widget::button(icon::from_name("window-close-symbolic"))
                     .padding(4)
-                    .style(vse_ui::theme::Button::Icon::style)
+                    .style(vse_ui::theme::button::icon)
                     .on_press(Message::SelectDialogPage(None)),
             )
         });

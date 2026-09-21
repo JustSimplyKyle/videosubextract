@@ -254,7 +254,7 @@ impl Model {
 
         let reset_btn = widget::button(widget::text(fl!("reset-selection")))
             .on_press(Message::ResetSelection)
-            .style(cosmic::theme::Button::Destructive::style);
+            .style(cosmic::theme::button::destructive);
 
         let load_video = widget::button(widget::text(if self.video_path.is_none() {
             fl!("load-video")
@@ -264,22 +264,22 @@ impl Model {
         .on_press(Message::PickVideo);
 
         let load_video = if self.video_path.is_none() {
-            load_video.style(cosmic::theme::Button::Suggested::style)
+            load_video.style(cosmic::theme::button::suggested)
         } else {
             load_video
         };
 
         let skip_backward = widget::button(icon::from_name("media-seek-backward-symbolic"))
             .on_press(Message::VideoSeekBackward(Duration::from_secs(5)))
-            .style(cosmic::theme::Button::NavToggle::style);
+            .style(cosmic::theme::button::nav_toggle);
 
         let skip_forward = widget::button(icon::from_name("media-seek-forward-symbolic"))
             .on_press(Message::VideoSeekForward(Duration::from_secs(5)))
-            .style(cosmic::theme::Button::NavToggle::style);
+            .style(cosmic::theme::button::nav_toggle);
         let selection_label: Element<'_, Message> = self.screenshot_selection_scaled.map_or_else(
             || {
                 widget::text(fl!("select-region"))
-                    .style(cosmic::theme::Text::Accent::style)
+                    .style(cosmic::theme::text::accent)
                     .into()
             },
             |rectangle| {
@@ -288,7 +288,7 @@ impl Model {
                     rectangle.width, rectangle.height, rectangle.x, rectangle.y
                 );
                 let label = widget::text(fl!("selection", dimensions = dimensions.clone()))
-                    .style(cosmic::theme::Text::Accent::style);
+                    .style(cosmic::theme::text::accent);
 
                 widget::mouse_area(label)
                     .on_press(Message::CopySelectionDimensions(dimensions))
@@ -301,7 +301,7 @@ impl Model {
         let find_subs = if self.video_path.is_some() {
             find_subs
                 .on_press(Message::StartSubtitleDisplay)
-                .style(cosmic::theme::Button::Suggested::style)
+                .style(cosmic::theme::button::suggested)
         } else {
             find_subs
         };
