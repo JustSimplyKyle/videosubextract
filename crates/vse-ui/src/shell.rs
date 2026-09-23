@@ -19,7 +19,7 @@ pub struct Shell<'a, Message> {
     dialog: Option<Element<'a, Message>>,
 }
 
-impl<'a, Message: Clone + 'a> Shell<'a, Message> {
+impl<'a, Message: 'a> Shell<'a, Message> {
     pub fn new(
         title: impl Into<String>,
         description: impl Into<String>,
@@ -36,21 +36,25 @@ impl<'a, Message: Clone + 'a> Shell<'a, Message> {
         }
     }
 
+    #[must_use]
     pub fn navigation(mut self, items: Vec<NavigationItem<Message>>) -> Self {
         self.navigation = items;
         self
     }
 
+    #[must_use]
     pub fn header_controls(mut self, toggle_navigation: Message, open_settings: Message) -> Self {
         self.controls = Some((toggle_navigation, open_settings));
         self
     }
 
+    #[must_use]
     pub fn toasts(mut self, toasts: Vec<(String, Message)>) -> Self {
         self.toasts = toasts;
         self
     }
 
+    #[must_use]
     pub fn dialog(mut self, dialog: Option<impl Into<Element<'a, Message>>>) -> Self {
         self.dialog = dialog.map(Into::into);
         self

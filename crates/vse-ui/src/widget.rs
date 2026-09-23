@@ -142,134 +142,291 @@ where
 }
 
 pub mod segmented_button {
-    use std::any::Any;
+    use indexmap::IndexMap;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     pub struct Entity(pub(crate) u64);
 
-    pub struct SingleSelectModel {
+    pub struct SingleSelectModel<T> {
+        entries: IndexMap<Entity, Entry<T>>,
+        active: Entity,
+    }
+
+    /// The builder has no entries and no active selection yet.
+    pub struct MissingActiveWithoutEntry;
+
+    /// The builder has entries, but none has been selected as active yet.
+    pub struct MissingActiveWithEntries {
+        first: Entity,
+    }
+
+    /// The builder has an active entry and can produce a model.
+    pub struct HasActive {
+        active: Entity,
+    }
+
+    /// Builds a [`SingleSelectModel`] with at least one active entry.
+    ///
+    /// The `State` parameter tracks construction: [`build`](Self::build) is
+    /// available only after an entry is selected with [`active`](Self::active)
+    /// or [`with_first_as_active`](Self::with_first_as_active).
+    ///
+    /// For a fixed set of entries, [`from_array`](Self::from_array) checks at
+    /// compile time that the array is nonempty:
+    ///
+    /// ```
+    /// use vse_ui::widget::segmented_button::SingleSelectModelBuilder;
+    ///
+    /// let model = SingleSelectModelBuilder::from_array([
+    ///     ("Original", 0),
+    ///     ("Converted", 1),
+    /// ])
+    /// .with_first_as_active()
+    /// .build();
+    /// assert_eq!(*model.active_data(), 0);
+    /// ```
+    ///
+    /// Entries can also be added one at a time:
+    ///
+    /// ```
+    /// use vse_ui::widget::segmented_button::SingleSelectModelBuilder;
+    ///
+    /// let model = SingleSelectModelBuilder::new()
+    ///     .insert("Original", 0)
+    ///     .insert("Converted", 1)
+    ///     .with_first_as_active()
+    ///     .build();
+    /// assert_eq!(*model.active_data(), 0);
+    /// ```
+    pub struct SingleSelectModelBuilder<T, State = MissingActiveWithoutEntry> {
         next: u64,
-        active: Option<Entity>,
-        entries: Vec<Entry>,
+        entries: IndexMap<Entity, Entry<T>>,
+        state: State,
     }
 
-    struct Entry {
-        id: Entity,
-        text: String,
-        data: Box<dyn Any>,
-    }
-
-    impl Default for SingleSelectModel {
-        fn default() -> Self {
+    impl<T> SingleSelectModelBuilder<T, MissingActiveWithoutEntry> {
+        /// Creates an empty builder. Add an active entry before calling `build`.
+        pub fn new() -> Self {
             Self {
                 next: 0,
-                active: None,
-                entries: Vec::new(),
+                entries: IndexMap::new(),
+                state: MissingActiveWithoutEntry,
+            }
+        }
+
+        /// Adds the first entry and marks it active.
+        #[must_use]
+        pub fn active(
+            mut self,
+            text: impl Into<String>,
+            data: T,
+        ) -> SingleSelectModelBuilder<T, HasActive> {
+            let id = Entity(self.next);
+            self.next += 1;
+            self.entries.shift_insert(
+                0,
+                id,
+                Entry {
+                    text: text.into(),
+                    data,
+                },
+            );
+            SingleSelectModelBuilder {
+                next: self.next,
+                entries: self.entries,
+                state: HasActive { active: id },
+            }
+        }
+
+        /// Adds a fixed, nonempty array of `(label, data)` pairs in order.
+        /// Call [`with_first_as_active`](Self::with_first_as_active) to select
+        /// its first entry before building the model.
+        ///
+        /// An empty array fails to compile:
+        ///
+        /// ```compile_fail
+        /// use vse_ui::widget::segmented_button::SingleSelectModelBuilder;
+        ///
+        /// let _ = SingleSelectModelBuilder::<u8>::from_array([] as [(String, u8); 0]);
+        /// ```
+        pub fn from_array<S: Into<String>, const N: usize>(
+            items: [(S, T); N],
+        ) -> SingleSelectModelBuilder<T, MissingActiveWithEntries> {
+            const { assert!(N > 0, "single select models need at least one entry") };
+
+            let mut builder = Self::new();
+            for (text, data) in items {
+                let id = Entity(builder.next);
+                builder.next += 1;
+                builder.entries.insert(
+                    id,
+                    Entry {
+                        text: text.into(),
+                        data,
+                    },
+                );
+            }
+            SingleSelectModelBuilder {
+                next: builder.next,
+                entries: builder.entries,
+                state: MissingActiveWithEntries { first: Entity(0) },
             }
         }
     }
 
-    impl SingleSelectModel {
-        pub fn insert(&mut self) -> Inserter<'_> {
-            Inserter {
-                model: self,
-                text: String::new(),
-            }
-        }
-        pub fn activate(&mut self, id: Entity) {
-            if self.entries.iter().any(|entry| entry.id == id) {
-                self.active = Some(id);
-            }
-        }
-        pub fn active(&self) -> Option<Entity> {
-            self.active
-        }
-        pub fn active_data<T: 'static>(&self) -> Option<&T> {
-            self.entries
-                .iter()
-                .find(|entry| Some(entry.id) == self.active)?
-                .data
-                .downcast_ref()
-        }
-        pub fn iter(&self) -> impl Iterator<Item = Entity> + '_ {
-            self.entries.iter().map(|entry| entry.id)
-        }
-        pub fn text_set(&mut self, id: Entity, text: impl Into<String>) {
-            if let Some(entry) = self.entries.iter_mut().find(|entry| entry.id == id) {
-                entry.text = text.into();
+    impl<T> SingleSelectModelBuilder<T, MissingActiveWithEntries> {
+        /// Selects the first inserted entry as active.
+        #[must_use]
+        pub fn with_first_as_active(self) -> SingleSelectModelBuilder<T, HasActive> {
+            SingleSelectModelBuilder {
+                next: self.next,
+                entries: self.entries,
+                state: HasActive {
+                    active: self.state.first,
+                },
             }
         }
     }
 
-    pub struct Inserter<'a> {
-        model: &'a mut SingleSelectModel,
-        text: String,
+    impl<T> Default for SingleSelectModelBuilder<T, MissingActiveWithoutEntry> {
+        fn default() -> Self {
+            Self::new()
+        }
     }
-    impl<'a> Inserter<'a> {
-        pub fn text(mut self, text: impl Into<String>) -> Self {
-            self.text = text.into();
+
+    impl<T> SingleSelectModelBuilder<T, MissingActiveWithoutEntry> {
+        /// Adds the first entry without selecting it yet.
+        #[must_use]
+        pub fn insert(
+            mut self,
+            text: impl Into<String>,
+            data: T,
+        ) -> SingleSelectModelBuilder<T, MissingActiveWithEntries> {
+            let id = Entity(self.next);
+            self.next += 1;
+            self.entries.insert(
+                id,
+                Entry {
+                    text: text.into(),
+                    data,
+                },
+            );
+            SingleSelectModelBuilder {
+                next: self.next,
+                entries: self.entries,
+                state: MissingActiveWithEntries { first: id },
+            }
+        }
+    }
+    impl<T> SingleSelectModelBuilder<T, MissingActiveWithEntries> {
+        /// Appends another entry while leaving the first entry available for selection.
+        #[must_use]
+        pub fn insert(mut self, text: impl Into<String>, data: T) -> Self {
+            let id = Entity(self.next);
+            self.next += 1;
+            self.entries.insert(
+                id,
+                Entry {
+                    text: text.into(),
+                    data,
+                },
+            );
             self
         }
-        pub fn data<T: 'static>(self, data: T) -> Inserted {
-            let id = Entity(self.model.next);
-            self.model.next += 1;
-            self.model.entries.push(Entry {
-                id,
-                text: self.text,
-                data: Box::new(data),
-            });
-            Inserted(id)
-        }
     }
-    pub struct Inserted(Entity);
-    impl Inserted {
-        pub fn id(self) -> Entity {
-            self.0
+
+    impl<T> SingleSelectModelBuilder<T, HasActive> {
+        /// Appends an entry without changing the active selection.
+        #[must_use]
+        pub fn insert(mut self, text: impl Into<String>, data: T) -> Self {
+            let id = Entity(self.next);
+            self.next += 1;
+            self.entries.insert(
+                id,
+                Entry {
+                    text: text.into(),
+                    data,
+                },
+            );
+            self
+        }
+
+        /// Finishes the builder with its selected active entry.
+        pub fn build(self) -> SingleSelectModel<T> {
+            SingleSelectModel {
+                entries: self.entries,
+                active: self.state.active,
+            }
         }
     }
 
-    pub(crate) fn labels(
-        model: &SingleSelectModel,
-    ) -> impl Iterator<Item = (Entity, String, bool)> + '_ {
-        model
-            .entries
-            .iter()
-            .map(|entry| (entry.id, entry.text.clone(), model.active == Some(entry.id)))
+    pub struct Entry<T> {
+        text: String,
+        data: T,
+    }
+
+    impl<T> Entry<T> {
+        pub fn text(&self) -> &str {
+            &self.text
+        }
+        pub const fn data(&self) -> &T {
+            &self.data
+        }
+    }
+
+    impl<T> SingleSelectModel<T> {
+        pub fn activate(&mut self, id: Entity) {
+            if self.entries.contains_key(&id) {
+                self.active = id;
+            }
+        }
+        pub const fn active(&self) -> Entity {
+            self.active
+        }
+        pub fn active_data(&self) -> &T {
+            &self.entries[&self.active].data
+        }
+        pub fn text_set(&mut self, id: Entity, text: impl Into<String>) {
+            self.entries[&id].text = text.into();
+        }
+        pub const fn entries(&self) -> &IndexMap<Entity, Entry<T>> {
+            &self.entries
+        }
     }
 }
 
 pub mod segmented_control {
     use crate::Apply;
 
-    use super::segmented_button::{self, Entity, SingleSelectModel};
+    use super::segmented_button::{Entity, SingleSelectModel};
     use iced::widget::{Component, button, component, row, text};
     use iced::{Element, Renderer};
 
-    pub fn horizontal(model: &SingleSelectModel) -> SegmentedControl<'_> {
-        SegmentedControl { model }
+    pub fn horizontal<T>(model: &SingleSelectModel<T>) -> SegmentedControlBuilder<'_, T> {
+        SegmentedControlBuilder { model }
     }
 
-    pub struct SegmentedControl<'a> {
-        model: &'a SingleSelectModel,
+    pub struct SegmentedControlBuilder<'a, T> {
+        model: &'a SingleSelectModel<T>,
     }
-    pub struct ActiveSegmentedControl<'a, Message> {
-        model: &'a SingleSelectModel,
+    pub struct SegmentedControl<'a, Message, T> {
+        model: &'a SingleSelectModel<T>,
         on_activate: crate::components::MessageEmitter<'a, Entity, Message>,
     }
 
-    impl<'a> SegmentedControl<'a> {
+    impl<'a, T> SegmentedControlBuilder<'a, T> {
         pub fn on_activate<Message>(
             self,
             f: impl Fn(Entity) -> Message + 'a,
-        ) -> ActiveSegmentedControl<'a, Message> {
-            ActiveSegmentedControl {
+        ) -> SegmentedControl<'a, Message, T> {
+            SegmentedControl {
                 model: self.model,
                 on_activate: Box::new(f),
             }
         }
     }
 
-    impl<'a, Message: 'a> Component<'a, Message> for ActiveSegmentedControl<'a, Message> {
+    impl<'a, Message: 'a, T> Component<'a, Message> for SegmentedControl<'a, Message, T> {
         type State = ();
         type Event = Entity;
 
@@ -278,20 +435,21 @@ pub mod segmented_control {
         }
 
         fn view(&self, _: &Self::State) -> Element<'a, Self::Event> {
-            let labels = segmented_button::labels(self.model).collect::<Vec<_>>();
+            let labels = self.model.entries();
+            let active = self.model.active();
             let last = labels.len().saturating_sub(1);
             labels
                 .into_iter()
                 .enumerate()
-                .map(|(index, (id, label, active))| {
-                    button(text(label))
-                        .on_press(id)
+                .map(|(index, (id, entry))| {
+                    button(text(entry.text()))
+                        .on_press(*id)
                         .padding([6, 14])
                         .style(move |theme, status| {
                             crate::theme::segmented_button(
                                 theme,
                                 status,
-                                active,
+                                active == *id,
                                 index == 0,
                                 index == last,
                             )
@@ -304,8 +462,8 @@ pub mod segmented_control {
         }
     }
 
-    impl<'a, Message: 'a> From<ActiveSegmentedControl<'a, Message>> for Element<'a, Message> {
-        fn from(control: ActiveSegmentedControl<'a, Message>) -> Self {
+    impl<'a, Message: 'a, T> From<SegmentedControl<'a, Message, T>> for Element<'a, Message> {
+        fn from(control: SegmentedControl<'a, Message, T>) -> Self {
             component(control)
         }
     }

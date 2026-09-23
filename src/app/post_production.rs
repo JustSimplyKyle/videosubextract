@@ -4,12 +4,11 @@ use cosmic::{
     Apply, Element,
     widget::{self, segmented_button::SingleSelectModel},
 };
-use futures::channel::mpsc;
 use iced::futures::SinkExt;
 use iced::{Alignment, Length, Subscription, Task};
 use rfd::AsyncFileDialog;
 use std::{fmt::Write, path::PathBuf, sync::Arc, time::Duration};
-use vse_ui as cosmic;
+use vse_ui::{self as cosmic, widget::segmented_button::SingleSelectModelBuilder};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PreviewMode {
@@ -62,8 +61,8 @@ impl std::hash::Hash for ConversionStream {
 }
 
 pub struct Model {
-    formats: SingleSelectModel,
-    preview_modes: SingleSelectModel,
+    formats: SingleSelectModel<ExportFormat>,
+    preview_modes: SingleSelectModel<PreviewMode>,
     filename: String,
     opencc_enabled: bool,
     opencc_mode: usize,
@@ -75,30 +74,17 @@ pub struct Model {
 
 impl Default for Model {
     fn default() -> Self {
-        let mut formats = SingleSelectModel::default();
-        let mut first = None;
-        for format in ExportFormat::ALL {
-            let id = formats
-                .insert()
-                .text(format.extension().to_uppercase())
-                .data::<ExportFormat>(format)
-                .id();
-            first.get_or_insert(id);
-        }
-        let first = first.expect("there is at least one export format");
-        formats.activate(first);
+        let formats = SingleSelectModelBuilder::from_array(
+            ExportFormat::ALL.map(|format| (format.extension().to_uppercase(), format)),
+        )
+        .with_first_as_active()
+        .build();
 
-        let mut preview_modes = SingleSelectModel::default();
-        let original = preview_modes
-            .insert()
-            .text(fl!("original"))
-            .data::<PreviewMode>(PreviewMode::Original)
-            .id();
-        preview_modes
-            .insert()
-            .text(fl!("converted"))
-            .data::<PreviewMode>(PreviewMode::Converted);
-        preview_modes.activate(original);
+        let preview_modes = SingleSelectModelBuilder::new()
+            .insert(fl!("original"), PreviewMode::Original)
+            .insert(fl!("converted"), PreviewMode::Converted)
+            .with_first_as_active()
+            .build();
 
         Self {
             formats,
@@ -198,7 +184,12 @@ impl Model {
     }
 
     pub fn refresh_language(&mut self) {
-        let preview_modes = self.preview_modes.iter().collect::<Vec<_>>();
+        let preview_modes = self
+            .preview_modes
+            .entries()
+            .keys()
+            .copied()
+            .collect::<Vec<_>>();
         if let Some(id) = preview_modes.first() {
             self.preview_modes.text_set(*id, fl!("original"));
         }
@@ -208,10 +199,7 @@ impl Model {
     }
 
     fn selected_format(&self) -> ExportFormat {
-        self.formats
-            .active_data::<ExportFormat>()
-            .copied()
-            .unwrap_or(ExportFormat::Srt)
+        *self.formats.active_data()
     }
 
     fn timestamp(duration: Duration, separator: char) -> String {
@@ -483,10 +471,7 @@ impl Model {
         subtitles: &'a subtitle::Model,
         search_active: bool,
     ) -> Element<'a, Message> {
-        let show_converted = matches!(
-            self.preview_modes.active_data::<PreviewMode>(),
-            Some(PreviewMode::Converted)
-        );
+        let show_converted = matches!(self.preview_modes.active_data(), PreviewMode::Converted);
         let preview_toggle = widget::segmented_control::horizontal(&self.preview_modes)
             .on_activate(Message::SelectPreviewMode);
         let preview = widget::column![

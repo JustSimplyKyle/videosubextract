@@ -8,6 +8,7 @@ publish = false
 [dependencies]
 iced = { workspace = true }
 cosmic-theme = { path = "../../../libcosmic/cosmic-theme", default-features = false }
+indexmap = "2.14.2"
 
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 freedesktop-icons = { package = "cosmic-freedesktop-icons", git = "https://github.com/pop-os/freedesktop-icons" }

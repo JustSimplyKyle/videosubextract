@@ -130,31 +130,24 @@ pub fn stream(request: Request) -> impl Stream<Item = Event> + Send {
 async fn run(request: Request, event_tx: async_channel::Sender<Event>) {
     let (subtitle_tx, subtitle_rx) = async_channel::bounded::<NativeSubtitleEvent>(OCR_PARALLELISM);
     let blocking_event_tx = event_tx.clone();
-    let input = request.input;
-    let crop = request.crop;
-    let detector = request.detector;
-    let native_search_params = request.native_search_params;
-    let processing_resolution = request.processing_resolution;
-    let progress_interval = request.progress_interval.max(1);
-    let include_progress_preview = request.include_progress_preview;
-
     let task = smol::unblock(move || {
-        let input =
-            ffmpeg_the_third::format::input(&input).wrap_err("opening the video with FFmpeg")?;
-        let (_controller, iter) = create_video_player::<false>(input, crop, processing_resolution)
-            .wrap_err("initializing the video decoder")?;
+        let input = ffmpeg_the_third::format::input(&request.input)
+            .wrap_err("opening the video with FFmpeg")?;
+        let (_controller, iter) =
+            create_video_player::<false>(input, request.crop, request.processing_resolution)
+                .wrap_err("initializing the video decoder")?;
 
         let frame_iter = ProgressIter {
             inner: iter.filter_map(Result::ok),
             event_tx: blocking_event_tx,
             count: 0,
-            interval: progress_interval,
-            include_preview: include_progress_preview,
+            interval: request.progress_interval.max(1),
+            include_preview: request.include_progress_preview,
         };
 
-        match detector {
+        match request.detector {
             SubtitleDetector::OriginalCpp => {
-                find_subtitles_with(frame_iter, &native_search_params, |event| {
+                find_subtitles_with(frame_iter, &request.native_search_params, |event| {
                     subtitle_tx
                         .send_blocking(event)
                         .map_err(|_| eyre::eyre!("subtitle OCR receiver closed"))
@@ -184,11 +177,12 @@ async fn run(request: Request, event_tx: async_channel::Sender<Event>) {
         let ocr = ocr.clone();
         smol::unblock(move || {
             let preview = mat_to_rgba(&event.ocr_image)?;
-            let image = DynamicImage::ImageRgba8(preview.clone());
+            let image = DynamicImage::ImageRgba8(preview);
             let text = ocr
                 .read()
                 .recognize_text(&image)
                 .wrap_err("recognizing subtitle text")?;
+            let preview = image.into_rgba8();
 
             eyre::Ok((
                 Subtitle::new(event.start_timestamp, event.end_timestamp, text),
