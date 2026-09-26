@@ -54,7 +54,7 @@ pub enum Event {
 }
 
 impl Model {
-    pub fn update(&mut self, message: Message) -> Event {
+    fn update(&mut self, message: Message) -> Event {
         let needs_recompute = Self::scaled_selection_needs_recomputation(&message);
 
         let task = match message {
@@ -212,7 +212,7 @@ impl Model {
         task
     }
 
-    pub fn view(&self) -> Element<'_, Message> {
+    fn view(&self) -> Element<'_, Message> {
         let space_s = cosmic::theme::spacing().space_s;
 
         let full_img_handle = self.video_allocation.as_ref().map_or_else(
@@ -343,7 +343,7 @@ impl Model {
         .into()
     }
 
-    pub fn subscription(&self) -> Subscription<Message> {
+    fn subscription(&self) -> Subscription<Message> {
         let mut subscriptions = vec![];
         if let Some(ref controller) = self.video_controller {
             subscriptions.push(iced::Subscription::run_with(controller.clone(), |x| {
@@ -384,6 +384,26 @@ impl Model {
             message,
             Message::VideoFrameAllocated(_) | Message::Canvas(_) | Message::ResetSelection
         )
+    }
+}
+
+impl Composition for Model {
+    type Message = Message;
+    type Event = Event;
+    type ViewContext<'a> = ();
+    type UpdateContext<'a> = ();
+    type SubscriptionContext<'a> = ();
+
+    fn view(&self, (): Self::ViewContext<'_>) -> Element<'_, Self::Message> {
+        Self::view(self)
+    }
+
+    fn update(&mut self, message: Self::Message, (): Self::UpdateContext<'_>) -> Self::Event {
+        Self::update(self, message)
+    }
+
+    fn subscription(&self, (): Self::SubscriptionContext<'_>) -> Subscription<Self::Message> {
+        Self::subscription(self)
     }
 }
 

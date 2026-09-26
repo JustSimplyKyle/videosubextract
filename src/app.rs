@@ -19,6 +19,26 @@ use vse_ui::shell;
 pub(crate) use vse_ui::widget;
 pub(crate) use vse_ui::widget::icon;
 
+trait Composition {
+    type Message: 'static;
+    type Event;
+    type ViewContext<'a>
+    where
+        Self: 'a;
+    type UpdateContext<'a>
+    where
+        Self: 'a;
+    type SubscriptionContext<'a>
+    where
+        Self: 'a;
+
+    fn view<'a>(&'a self, context: Self::ViewContext<'a>) -> Element<'a, Self::Message>;
+
+    fn update(&mut self, message: Self::Message, context: Self::UpdateContext<'_>) -> Self::Event;
+
+    fn subscription(&self, context: Self::SubscriptionContext<'_>) -> Subscription<Self::Message>;
+}
+
 const APP_ID: &str = "dev.justsimplykyle.videosubextract";
 
 pub fn format_duration(duration: Duration) -> String {
@@ -403,10 +423,12 @@ impl AppModel {
                 .map(Message::Subtitle),
         ];
         match self.active_page {
-            Page::Prepare => subscriptions.push(self.prepare.subscription().map(Message::Prepare)),
+            Page::Prepare => {
+                subscriptions.push(self.prepare.subscription(()).map(Message::Prepare));
+            }
             Page::PostProduction => subscriptions.push(
                 self.post_production
-                    .subscription()
+                    .subscription(())
                     .map(Message::PostProduction),
             ),
             Page::Subtitle => {}
@@ -479,7 +501,7 @@ impl AppModel {
                     .set_processing_resolution(&self.config_handler, value);
                 Task::none()
             }
-            Message::Prepare(message) => match self.prepare.update(message) {
+            Message::Prepare(message) => match self.prepare.update(message, ()) {
                 prepare::Event::StartSubtitleSearch(path, selection) => {
                     self.subtitle.start_search(path, selection, &self.config);
                     self.active_page = Page::Subtitle;
@@ -542,7 +564,7 @@ impl AppModel {
 
     pub fn view(&self) -> Element<'_, Message> {
         let content = match self.active_page {
-            Page::Prepare => self.prepare.view().map(Message::Prepare),
+            Page::Prepare => self.prepare.view(()).map(Message::Prepare),
             Page::Subtitle => self
                 .subtitle
                 .view(
@@ -555,7 +577,10 @@ impl AppModel {
                 .map(Message::Subtitle),
             Page::PostProduction => self
                 .post_production
-                .view(&self.subtitle, self.prepare.video_path.as_ref())
+                .view(post_production::ViewArgs {
+                    subtitles: &self.subtitle,
+                    video_path: self.prepare.video_path.as_ref(),
+                })
                 .map(Message::PostProduction),
         };
         let active = self.active_page;

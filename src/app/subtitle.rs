@@ -816,7 +816,7 @@ impl Model {
         self.result_viewport_height = 0.0;
     }
 
-    pub fn update(&mut self, message: Message, config: &Config) -> Event {
+    fn update(&mut self, message: Message, config: &Config) -> Event {
         self.set_ocr_model(config.ocr_model.clone());
         match message {
             Message::Progress { timestamp, preview } => {
@@ -1053,7 +1053,7 @@ impl Model {
         }
     }
 
-    pub fn view(&self, video_duration: Duration) -> Element<'_, Message> {
+    fn view(&self, video_duration: Duration) -> Element<'_, Message> {
         SubtitleView {
             model: self,
             video_duration,
@@ -1061,7 +1061,7 @@ impl Model {
         .view()
     }
 
-    pub fn subscription(&self, video_frame_rate: f64) -> Subscription<Message> {
+    fn subscription(&self, video_frame_rate: f64) -> Subscription<Message> {
         let mut subscriptions = vec![];
         if self.search_active
             && let Some(path) = &self.search_path
@@ -1093,6 +1093,29 @@ impl Model {
             _ => Message::None,
         }));
         Subscription::batch(subscriptions)
+    }
+}
+
+impl Composition for Model {
+    type Message = Message;
+    type Event = Event;
+    type ViewContext<'a> = Duration;
+    type UpdateContext<'a> = &'a Config;
+    type SubscriptionContext<'a> = f64;
+
+    fn view(&self, video_duration: Self::ViewContext<'_>) -> Element<'_, Self::Message> {
+        Self::view(self, video_duration)
+    }
+
+    fn update(&mut self, message: Self::Message, config: Self::UpdateContext<'_>) -> Self::Event {
+        Self::update(self, message, config)
+    }
+
+    fn subscription(
+        &self,
+        video_frame_rate: Self::SubscriptionContext<'_>,
+    ) -> Subscription<Self::Message> {
+        Self::subscription(self, video_frame_rate)
     }
 }
 
