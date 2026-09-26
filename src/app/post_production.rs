@@ -1,4 +1,7 @@
-use super::subtitle::{self, SubtitleTableConfig};
+use super::{
+    Composition,
+    subtitle::{self, SubtitleTableConfig},
+};
 use crate::{config::Config, fl};
 use cosmic::{
     Apply, Element,
@@ -256,7 +259,7 @@ impl Model {
         }
     }
 
-    pub fn update(&mut self, message: Message, config: &Config) -> Event {
+    fn update(&mut self, message: Message, config: &Config) -> Event {
         match message {
             Message::SelectFormat(id) => {
                 self.formats.activate(id);
@@ -510,7 +513,7 @@ impl Model {
         .into()
     }
 
-    pub fn view<'a>(
+    fn view<'a>(
         &'a self,
         subtitles: &'a subtitle::Model,
         video_path: Option<&'a PathBuf>,
@@ -524,7 +527,7 @@ impl Model {
             .into()
     }
 
-    pub fn subscription(&self) -> Subscription<Message> {
+    fn subscription(&self) -> Subscription<Message> {
         if self.transformation_inputs.is_empty() {
             return Subscription::none();
         }
@@ -539,6 +542,35 @@ impl Model {
             },
             conversion_stream,
         )
+    }
+}
+
+pub(super) struct ViewArgs<'a> {
+    pub subtitles: &'a subtitle::Model,
+    pub video_path: Option<&'a PathBuf>,
+}
+
+impl Composition for Model {
+    type Message = Message;
+
+    type Event = Event;
+
+    type ViewContext<'a> = ViewArgs<'a>;
+
+    type UpdateContext<'a> = &'a Config;
+
+    type SubscriptionContext<'a> = ();
+
+    fn view<'a>(&'a self, context: Self::ViewContext<'a>) -> Element<'a, Self::Message> {
+        Self::view(self, context.subtitles, context.video_path)
+    }
+
+    fn update(&mut self, message: Self::Message, context: Self::UpdateContext<'_>) -> Self::Event {
+        Self::update(self, message, context)
+    }
+
+    fn subscription(&self, (): Self::SubscriptionContext<'_>) -> Subscription<Self::Message> {
+        Self::subscription(self)
     }
 }
 
