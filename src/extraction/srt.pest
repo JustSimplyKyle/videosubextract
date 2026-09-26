@@ -1,0 +1,6 @@
+file      = { SOI ~ NEWLINE* ~ (block ~ (NEWLINE+ ~ block)*)? ~ NEWLINE* ~ EOI }
+block       = { index ~ NEWLINE ~ timing ~ NEWLINE ~ text_line ~ (NEWLINE ~ text_line)* }
+index     = @{ ASCII_DIGIT+ }
+timing    = { time ~ " --> " ~ time }
+time      = @{ ASCII_DIGIT{2,} ~ ":" ~ ASCII_DIGIT{2} ~ ":" ~ ASCII_DIGIT{2} ~ "," ~ ASCII_DIGIT{3} }
+text_line = @{ (!NEWLINE ~ ANY)+ }
