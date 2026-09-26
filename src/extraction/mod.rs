@@ -1,3 +1,5 @@
+pub mod srt_parser;
+
 use crate::config::{ProcessingResolution, SubtitleDetector};
 use crate::native_video_sub_finder::{
     NativeSearchParams, NativeSubtitleEvent, find_subtitles_with,
@@ -11,7 +13,6 @@ use image::{DynamicImage, RgbaImage};
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
-use vse_ui::Apply;
 
 const OCR_PARALLELISM: usize = 4;
 
@@ -22,7 +23,7 @@ pub struct Subtitle {
     text: String,
 }
 impl Subtitle {
-    pub fn new(start_timestamp: Duration, end_timestamp: Duration, text: String) -> Self {
+    pub const fn new(start_timestamp: Duration, end_timestamp: Duration, text: String) -> Self {
         Self {
             start_timestamp,
             end_timestamp,
