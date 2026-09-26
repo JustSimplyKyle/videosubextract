@@ -119,7 +119,7 @@ impl<'a, Message: 'a> Component<'a, Message> for ToggleItem<'a, Message> {
     type State = ();
     type Event = ToggleEvent;
 
-    fn update(&mut self, _: &mut Self::State, event: ToggleEvent, _: &Renderer) -> Option<Message> {
+    fn update(&self, _: &mut Self::State, event: ToggleEvent, _: &Renderer) -> Option<Message> {
         match event {
             ToggleEvent::Changed(value) => Some((self.on_toggle)(value)),
         }

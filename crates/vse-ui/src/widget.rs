@@ -15,50 +15,59 @@ pub fn button<'a, Message>(
 }
 
 pub mod icon {
-    use iced::{Element, Length};
+    use std::{cell::RefCell, collections::HashMap};
 
-    pub fn from_name<'a, Message: 'a>(name: impl AsRef<str>) -> Element<'a, Message> {
-        let name = name.as_ref();
-        let symbolic = name.ends_with("-symbolic");
-        #[cfg(all(unix, not(target_os = "macos")))]
-        let path = {
-            let extra_paths = std::env::var_os("COSMIC_ICONS")
-                .map(std::path::PathBuf::from)
-                .into_iter()
-                .collect::<Vec<_>>();
-            let lookup = |candidate: &str| {
-                let lookup = freedesktop_icons::lookup(candidate)
-                    .with_theme("Cosmic")
-                    .with_extra_paths(&extra_paths)
-                    .with_size(16)
-                    .with_cache();
-                if symbolic {
-                    lookup.force_svg().find()
-                } else {
-                    lookup.find()
-                }
-            };
+    use iced::{Element, Length, widget::svg};
 
-            lookup(name).or_else(|| {
-                name.rmatch_indices('-')
-                    .find_map(|(position, _)| lookup(&name[..position]))
-            })
+    thread_local! {
+        static ICON_CACHE: RefCell<HashMap<&'static str, Option<svg::Handle>>> = RefCell::new(HashMap::new());
+    }
+    fn icon_lookup(name: &'static str, symbolic: bool) -> Option<svg::Handle> {
+        let extra_paths = std::env::var_os("COSMIC_ICONS")
+            .map(std::path::PathBuf::from)
+            .into_iter()
+            .collect::<Vec<_>>();
+        let lookup = |candidate: &str| {
+            // the `with_cache()` doesn't work with extra paths sent in by COSMIC_ICONS
+            let lookup = freedesktop_icons::lookup(candidate)
+                .with_theme("Cosmic")
+                .with_extra_paths(&extra_paths)
+                .with_size(16)
+                .with_cache();
+            if symbolic {
+                lookup.force_svg().find()
+            } else {
+                lookup.find()
+            }
         };
-        #[cfg(any(not(unix), target_os = "macos"))]
-        let path: Option<std::path::PathBuf> = None;
 
-        match path {
-            Some(path) => iced::widget::svg(iced::widget::svg::Handle::from_path(path))
-                // This upstream Iced revision cannot inherit a button's icon
-                // color. Use the COSMIC icon component foreground instead.
-                .style(move |_, _| iced::widget::svg::Style {
-                    color: symbolic.then(crate::theme::icon_color),
-                })
-                .width(Length::Fixed(16.0))
-                .height(Length::Fixed(16.0))
-                .into(),
-            None => iced::widget::space().width(16).height(16).into(),
-        }
+        let path = lookup(name).or_else(|| {
+            name.rmatch_indices('-')
+                .find_map(|(position, _)| lookup(&name[..position]))
+        });
+
+        path.map(iced::widget::svg::Handle::from_path)
+    }
+    pub fn from_name<'a, Message: 'a>(name: &'static str) -> Element<'a, Message> {
+        let symbolic = name.ends_with("-symbolic");
+        let handle = ICON_CACHE.with(move |x| {
+            x.borrow_mut()
+                .entry(name)
+                .or_insert_with(move || icon_lookup(name, symbolic))
+                .clone()
+        });
+        handle.map_or_else(
+            || iced::widget::space().width(16).height(16).into(),
+            |x| {
+                iced::widget::svg(x)
+                    .style(move |_, _| iced::widget::svg::Style {
+                        color: symbolic.then(crate::theme::icon_color),
+                    })
+                    .width(Length::Fixed(16.0))
+                    .height(Length::Fixed(16.0))
+                    .into()
+            },
+        )
     }
 }
 
@@ -430,7 +439,7 @@ pub mod segmented_control {
         type State = ();
         type Event = Entity;
 
-        fn update(&mut self, _: &mut Self::State, event: Entity, _: &Renderer) -> Option<Message> {
+        fn update(&self, _: &mut Self::State, event: Entity, _: &Renderer) -> Option<Message> {
             Some((self.on_activate)(event))
         }
 
