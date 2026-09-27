@@ -1,3 +1,4 @@
+pub mod chapter_writer;
 pub mod srt_parser;
 
 use crate::config::{ProcessingResolution, SubtitleDetector};
