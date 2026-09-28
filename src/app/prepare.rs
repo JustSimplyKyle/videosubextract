@@ -1,47 +1,25 @@
-use crate::apply_traits::ApplyConditional;
-
 use super::*;
 use cosmic::iced::widget::Stack;
 use cosmic::{Apply, Element};
 use iced::alignment::Horizontal;
-use iced::futures::SinkExt;
-use image::RgbaImage;
-use rfd::AsyncFileDialog;
-use std::{env::current_dir, time::Duration};
+use std::time::Duration;
 use vse_ui as cosmic;
 
 #[derive(Default)]
 pub struct Model {
-    pub video_path: Option<std::path::PathBuf>,
-    pub video_controller: Option<VideoPlayerController>,
-    pub video_allocation: Option<(widget::image::Allocation, iced::Size)>,
-    pub is_allocating_frame: bool,
+    pub video_player: video_player_widget::Model,
     pub screenshot_selection: Option<iced::Rectangle>,
     pub screenshot_selection_scaled: Option<iced::Rectangle>,
     pub canvas_dimensions: iced::Rectangle,
     pub canvas_generation: u32,
-    current_time: Duration,
 }
 
 #[derive(derive_more::Debug, Clone)]
 pub enum Message {
     ResetSelection,
     Canvas(selection_canvas::Message),
-    PickVideo,
-    VideoFilePicked(Option<std::path::PathBuf>),
-    LoadVideo(std::path::PathBuf),
-
-    #[debug("{}x{}@{}", image.width(), image.height(), format_duration(*timestamp))]
-    VideoFrame {
-        image: RgbaImage,
-        timestamp: Duration,
-    },
-    VideoFrameAllocated(Result<(widget::image::Allocation, iced::Size), String>),
-    VideoSeekForward(Duration),
-    VideoSeekBackward(Duration),
-    VideoSeekAbsolute(Duration),
+    VideoPlayer(video_player_widget::Message),
     CopySelectionDimensions(String),
-    VideoError(String),
     StartSubtitleDisplay,
 }
 
@@ -73,132 +51,16 @@ impl Model {
                     Event::None
                 }
             },
-            Message::PickVideo => {
-                let pwd = current_dir();
-                Task::perform(
-                    async move {
-                        let dialog = AsyncFileDialog::new().add_filter(
-                            fl!("video"),
-                            &["mkv", "mp4", "avi", "mov", "webm", "flv", "wmv"],
-                        );
-
-                        let file = dialog
-                            .apply_if_ok_ref(&pwd, AsyncFileDialog::set_directory)
-                            .pick_file()
-                            .await;
-
-                        file.map(|f| f.path().to_path_buf())
-                    },
-                    Message::VideoFilePicked,
-                )
-                .apply(Event::Run)
-            }
-            Message::VideoFilePicked(Some(path)) => self.update(Message::LoadVideo(path)),
-            Message::VideoFilePicked(None) => Event::None,
-            Message::LoadVideo(path) => {
-                match ffmpeg_the_third::format::input(&path) {
-                    Ok(input) => match create_video_player::<false>(
-                        input,
-                        None,
-                        crate::config::ProcessingResolution::None,
-                    ) {
-                        Ok((controller, _iter)) => {
-                            self.video_path = Some(path);
-                            self.video_controller = Some(controller);
-                        }
-                        Err(error) => {
-                            return Event::Error(error.wrap_err("initializing the video player"));
-                        }
-                    },
-                    Err(error) => {
-                        return Event::Error(
-                            eyre::eyre!(error).wrap_err("opening the video with FFmpeg"),
-                        );
-                    }
-                }
-                Event::None
-            }
-            Message::VideoFrame {
-                image: frame,
-                timestamp,
-            } => {
-                if self.is_allocating_frame {
-                    println!("ui overdrive");
-                    return Event::None;
-                }
-
-                self.current_time = timestamp;
-
-                // let mut hasher = DefaultHasher::new();
-                // Id::unique().0.hash(&mut hasher);
-                // frame.save(format!("test/{}.png", hasher.finish())).unwrap();
-
-                self.is_allocating_frame = true;
-                let (width, height) = (frame.width(), frame.height());
-                let handle = widget::image::Handle::from_rgba(
-                    frame.width(),
-                    frame.height(),
-                    frame.into_raw(),
-                );
-                widget::image::allocate(handle)
-                    .map(move |result| {
-                        Message::VideoFrameAllocated(
-                            result
-                                .map_err(|error| error.to_string())
-                                .map(|x| (x, iced::Size::new(width as f32, height as f32))),
-                        )
-                    })
-                    .apply(Event::Run)
-            }
-            Message::VideoFrameAllocated(allocation) => {
-                self.is_allocating_frame = false;
-                match allocation {
-                    Ok(allocation) => self.video_allocation = Some(allocation),
-                    Err(error) => {
-                        return Event::Error(eyre::eyre!(
-                            "failed to allocate video frame on GPU: {error}"
-                        ));
-                    }
-                }
-                Event::None
-            }
-            Message::VideoSeekForward(duration) => {
-                if let Some(ref controller) = self.video_controller
-                    && let Err(error) = controller.seek_forward(duration)
-                {
-                    return Event::Error(error.wrap_err("seeking forward"));
-                }
-                Event::None
-            }
-            Message::VideoSeekBackward(duration) => {
-                if let Some(ref controller) = self.video_controller
-                    && let Err(error) = controller.seek_backward(duration)
-                {
-                    return Event::Error(error.wrap_err("seeking backward"));
-                }
-                Event::None
-            }
-            Message::VideoSeekAbsolute(duration) => {
-                self.current_time = duration;
-
-                if let Some(ref controller) = self.video_controller
-                    && let Err(error) = controller.seek_absolute(duration)
-                {
-                    return Event::Error(
-                        error.wrap_err(format!("seeking to {:.2}s", duration.as_secs_f64())),
-                    );
-                }
-                Event::None
-            }
+            Message::VideoPlayer(message) => match self.video_player.update(message) {
+                video_player_widget::Event::Run(task) => Event::Run(task.map(Message::VideoPlayer)),
+                video_player_widget::Event::Error(error) => Event::Error(error),
+                video_player_widget::Event::None => Event::None,
+            },
             Message::CopySelectionDimensions(dimensions) => {
                 Event::CopySelectionDimensions(dimensions)
             }
-            Message::VideoError(msg) => {
-                self.video_controller = None;
-                Event::Error(eyre::eyre!("video playback failed: {msg}"))
-            }
             Message::StartSubtitleDisplay => {
-                if let Some(path) = &self.video_path {
+                if let Some(path) = self.video_player.path() {
                     Event::StartSubtitleSearch(path.clone(), self.screenshot_selection_scaled)
                 } else {
                     Event::None
@@ -215,10 +77,7 @@ impl Model {
     fn view(&self) -> Element<'_, Message> {
         let space_s = cosmic::theme::spacing().space_s;
 
-        let full_img_handle = self.video_allocation.as_ref().map_or_else(
-            || widget::image::Handle::from_rgba(1920, 1080, RgbaImage::new(1920, 1080).to_vec()),
-            |(img, _)| img.handle().clone(),
-        );
+        let full_img_handle = self.video_player.frame_handle();
 
         let full_img = widget::image(&full_img_handle)
             .content_fit(iced::ContentFit::Contain)
@@ -256,25 +115,31 @@ impl Model {
             .on_press(Message::ResetSelection)
             .style(cosmic::theme::button::destructive);
 
-        let load_video = widget::button(widget::text(if self.video_path.is_none() {
+        let load_video = widget::button(widget::text(if self.video_player.path().is_none() {
             fl!("load-video")
         } else {
             fl!("change-video")
         }))
-        .on_press(Message::PickVideo);
+        .on_press(Message::VideoPlayer(
+            video_player_widget::Message::PickVideo,
+        ));
 
-        let load_video = if self.video_path.is_none() {
+        let load_video = if self.video_player.path().is_none() {
             load_video.style(cosmic::theme::button::suggested)
         } else {
             load_video
         };
 
         let skip_backward = widget::button(icon::from_name("media-seek-backward-symbolic"))
-            .on_press(Message::VideoSeekBackward(Duration::from_secs(5)))
+            .on_press(Message::VideoPlayer(
+                video_player_widget::Message::SeekBackward(Duration::from_secs(5)),
+            ))
             .style(cosmic::theme::button::nav_toggle);
 
         let skip_forward = widget::button(icon::from_name("media-seek-forward-symbolic"))
-            .on_press(Message::VideoSeekForward(Duration::from_secs(5)))
+            .on_press(Message::VideoPlayer(
+                video_player_widget::Message::SeekForward(Duration::from_secs(5)),
+            ))
             .style(cosmic::theme::button::nav_toggle);
         let selection_label: Element<'_, Message> = self.screenshot_selection_scaled.map_or_else(
             || {
@@ -298,7 +163,7 @@ impl Model {
         );
 
         let find_subs = widget::button(widget::text(fl!("find-subtitles")));
-        let find_subs = if self.video_path.is_some() {
+        let find_subs = if self.video_player.path().is_some() {
             find_subs
                 .on_press(Message::StartSubtitleDisplay)
                 .style(cosmic::theme::button::suggested)
@@ -307,16 +172,22 @@ impl Model {
         };
 
         let slider = self
-            .video_controller
-            .as_ref()
+            .video_player
+            .controller()
             .map(|x| x.inner.info.video_time.as_secs_f64())
             .map(|video_time| {
-                widget::slider(0.0..=video_time, self.current_time.as_secs_f64(), |x| {
-                    Message::VideoSeekAbsolute(Duration::from_secs_f64(x))
-                })
+                widget::slider(
+                    0.0..=video_time,
+                    self.video_player.current_time().as_secs_f64(),
+                    |x| {
+                        Message::VideoPlayer(video_player_widget::Message::SeekAbsolute(
+                            Duration::from_secs_f64(x),
+                        ))
+                    },
+                )
             });
 
-        let current_time = widget::text(self.current_time.apply(format_duration))
+        let current_time = widget::text(self.video_player.current_time().apply(format_duration))
             .width(Length::Fill)
             .align_x(Horizontal::Right);
 
@@ -344,17 +215,11 @@ impl Model {
     }
 
     fn subscription(&self) -> Subscription<Message> {
-        let mut subscriptions = vec![];
-        if let Some(ref controller) = self.video_controller {
-            subscriptions.push(iced::Subscription::run_with(controller.clone(), |x| {
-                video_frame_stream(x.inner.clone(), x.inner.info.frame_rate)
-            }));
-        }
-        Subscription::batch(subscriptions)
+        self.video_player.subscription().map(Message::VideoPlayer)
     }
 
     fn recompute_scaled_selection(&mut self) {
-        let Some((_, size)) = self.video_allocation.as_ref() else {
+        let Some((_, size)) = self.video_player.allocation() else {
             self.screenshot_selection_scaled = None;
             return;
         };
@@ -382,7 +247,9 @@ impl Model {
     const fn scaled_selection_needs_recomputation(message: &Message) -> bool {
         matches!(
             message,
-            Message::VideoFrameAllocated(_) | Message::Canvas(_) | Message::ResetSelection
+            Message::VideoPlayer(video_player_widget::Message::VideoFrameAllocated(_))
+                | Message::Canvas(_)
+                | Message::ResetSelection
         )
     }
 }
@@ -405,62 +272,4 @@ impl Composition for Model {
     fn subscription(&self, (): Self::SubscriptionContext<'_>) -> Subscription<Self::Message> {
         Self::subscription(self)
     }
-}
-
-fn video_frame_stream(
-    inner: Arc<InnerPlayer>,
-    frame_rate: f64,
-) -> impl futures::Stream<Item = Message> + Send {
-    let frame_dur = Duration::from_secs_f64(1.0 / frame_rate.max(1.0));
-
-    iced::stream::channel(
-        2,
-        async move |mut tx: futures::channel::mpsc::Sender<Message>| {
-            let (btx, brx) = async_channel::bounded::<Message>(2);
-
-            smol::spawn(smol::unblock(move || {
-                let mut iter = video_player::VideoPlayerIterator::<false> {
-                    inner,
-                    current_generation: 0,
-                };
-                loop {
-                    let t = std::time::Instant::now();
-                    match iter.next() {
-                        Some(Ok(mat)) => match video_player::mat_to_rgba(&mat.mat) {
-                            Ok(handle) => {
-                                if btx
-                                    .send_blocking(Message::VideoFrame {
-                                        image: handle,
-                                        timestamp: mat.timestamp,
-                                    })
-                                    .is_err()
-                                {
-                                    break;
-                                }
-                            }
-                            Err(e) => {
-                                btx.send_blocking(Message::VideoError(e.to_string())).ok();
-                                break;
-                            }
-                        },
-                        Some(Err(e)) => {
-                            btx.send_blocking(Message::VideoError(e.to_string())).ok();
-                            break;
-                        }
-                        None => break,
-                    }
-                    if let Some(rem) = frame_dur.checked_sub(t.elapsed()) {
-                        std::thread::sleep(rem);
-                    }
-                }
-            }))
-            .detach();
-
-            while let Ok(msg) = brx.recv().await {
-                if tx.send(msg).await.is_err() {
-                    break;
-                }
-            }
-        },
-    )
 }

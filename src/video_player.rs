@@ -173,6 +173,7 @@ impl VideoPlayerController {
 
         state.input.seek(target_us, i64::MIN..=target_us)?;
         state.decoder.flush();
+        state.frame_buffer.clear();
 
         state.seek_generation += 1;
 

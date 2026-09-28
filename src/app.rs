@@ -4,6 +4,7 @@ pub mod post_production;
 pub mod prepare;
 pub mod selection_canvas;
 pub mod subtitle;
+pub mod video_player_widget;
 
 use crate::config::{Config, Language, ProcessingResolution, SubtitleDetector};
 use crate::native_video_sub_finder::NativeSearchParams;
@@ -441,7 +442,7 @@ impl AppModel {
             Message::SelectPage(page) => {
                 if page == Page::PostProduction {
                     self.post_production.sync(
-                        self.prepare.video_path.as_ref(),
+                        self.prepare.video_player.path(),
                         self.subtitle.results(),
                         subtitle::ResultsChanged::Full,
                         &self.config,
@@ -465,7 +466,7 @@ impl AppModel {
             Message::SetLanguage(value) => {
                 let _ = i18n::select(value.code());
                 let _ = self.config.set_language(&self.config_handler, value);
-                self.post_production.refresh_language();
+                // self.post_production.refresh_language();
                 Task::none()
             }
             Message::SetOcrModel(value) => {
@@ -517,7 +518,7 @@ impl AppModel {
             Message::Subtitle(message) => match self.subtitle.update(message, &self.config) {
                 subtitle::Event::GoToPostProduction => {
                     self.post_production.sync(
-                        self.prepare.video_path.as_ref(),
+                        self.prepare.video_player.path(),
                         self.subtitle.results(),
                         subtitle::ResultsChanged::Full,
                         &self.config,
@@ -527,7 +528,7 @@ impl AppModel {
                 }
                 subtitle::Event::SyncWithPostProduction(changed) => {
                     self.post_production.sync(
-                        self.prepare.video_path.as_ref(),
+                        self.prepare.video_player.path(),
                         self.subtitle.results(),
                         changed,
                         &self.config,
@@ -569,8 +570,8 @@ impl AppModel {
                 .subtitle
                 .view(
                     self.prepare
-                        .video_controller
-                        .as_ref()
+                        .video_player
+                        .controller()
                         .map(|controller| controller.inner.info.video_time)
                         .unwrap_or_default(),
                 )
@@ -579,7 +580,7 @@ impl AppModel {
                 .post_production
                 .view(post_production::ViewArgs {
                     subtitles: &self.subtitle,
-                    video_path: self.prepare.video_path.as_ref(),
+                    video_path: self.prepare.video_player.path(),
                 })
                 .map(Message::PostProduction),
         };
