@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
+pub mod chapter_finder;
 pub mod post_production;
 pub mod prepare;
 pub mod selection_canvas;
@@ -99,6 +100,7 @@ pub struct AppModel {
     config_handler: Arc<cosmic_config::Config>,
     config: Config,
     video_frame_rate: f64,
+    chapterfinder: chapter_finder::Model,
     prepare: prepare::Model,
     subtitle: subtitle::Model,
     post_production: post_production::Model,
@@ -114,6 +116,7 @@ pub enum Message {
     PushToast(String),
     CloseToast(toast::ToastId),
     SetLanguage(Language),
+    ChapterFinder(chapter_finder::Message),
     Prepare(prepare::Message),
     Subtitle(subtitle::Message),
     PostProduction(post_production::Message),
@@ -125,6 +128,7 @@ pub enum Page {
     Prepare,
     Subtitle,
     PostProduction,
+    ChapterFinder,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -140,6 +144,7 @@ impl Page {
             Self::Prepare => fl!("page-prepare"),
             Self::Subtitle => fl!("page-subtitle"),
             Self::PostProduction => fl!("page-post"),
+            Self::ChapterFinder => fl!("page-chapterfinder"),
         }
     }
     fn details(self) -> String {
@@ -147,6 +152,7 @@ impl Page {
             Self::Prepare => fl!("page-prepare-details"),
             Self::Subtitle => fl!("page-subtitle-details"),
             Self::PostProduction => fl!("page-post-details"),
+            Self::ChapterFinder => fl!("todo"),
         }
     }
 }
@@ -210,6 +216,7 @@ impl AppModel {
                 config_handler: Arc::new(config_handler),
                 config,
                 video_frame_rate: 24.0,
+                chapterfinder: chapter_finder::Model::default(),
                 prepare,
                 subtitle: subtitle::Model::default(),
                 post_production: post_production::Model::default(),
@@ -248,6 +255,11 @@ impl AppModel {
             Page::Subtitle => {
                 // subtitles search should always run in the background regardless of current active page
             }
+            Page::ChapterFinder => subscriptions.push(
+                self.chapterfinder
+                    .subscription()
+                    .map(Message::ChapterFinder),
+            ),
         }
         Subscription::batch(subscriptions)
     }
@@ -302,6 +314,13 @@ impl AppModel {
                 let _ = self.config.set_language(&self.config_handler, value);
                 Task::none()
             }
+            Message::ChapterFinder(message) => match self.chapterfinder.update(message) {
+                chapter_finder::Event::Run(task) => task.map(Message::ChapterFinder),
+                chapter_finder::Event::Error(error) => {
+                    Task::done(Message::ErrorReported(Arc::new(error)))
+                }
+                chapter_finder::Event::None => Task::none(),
+            },
             Message::Prepare(message) => match self.prepare.update(message, &mut self.config) {
                 prepare::Event::StartSubtitleSearch(path, selection) => {
                     self.subtitle.start_search(path, selection, &self.config);
@@ -398,6 +417,11 @@ impl AppModel {
                 })
                 .map(Message::PostProduction)
                 .boxed(),
+            Page::ChapterFinder => self
+                .chapterfinder
+                .view()
+                .map(Message::ChapterFinder)
+                .boxed(),
         };
         let active = self.active_page;
         let navigation = if self.navigation_open {
@@ -416,6 +440,11 @@ impl AppModel {
                     label: Page::PostProduction.label(),
                     selected: active == Page::PostProduction,
                     on_press: Message::SelectPage(Page::PostProduction),
+                },
+                shell::NavigationItem {
+                    label: Page::ChapterFinder.label(),
+                    selected: active == Page::ChapterFinder,
+                    on_press: Message::SelectPage(Page::ChapterFinder),
                 },
             ]
         } else {

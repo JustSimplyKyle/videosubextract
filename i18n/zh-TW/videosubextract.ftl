@@ -6,6 +6,7 @@ page-id = 第 { $num } 頁
 page-prepare = 準備
 page-subtitle = 字幕解析
 page-post = 後製
+page-chapterfinder = 章節尋找器
 git-description = { $date } 的 Git 提交 { $hash }
 page-prepare-details = 定義字幕尺寸
 page-subtitle-details = 可編輯的偵測字幕清單
