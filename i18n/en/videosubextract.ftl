@@ -1,3 +1,5 @@
+todo = todo
+
 app-title = Videosubextract
 about = About
 repository = Repository
@@ -6,6 +8,7 @@ page-id = Page { $num }
 page-prepare = Prepare
 page-subtitle = Subtitle Parsing
 page-post = Post Production
+page-chapterfinder = Chapterfinder
 git-description = Git commit {$hash} on {$date}
 page-prepare-details = Define the subtitle dimensions
 page-subtitle-details = A running, editable list of the detected subtitles
