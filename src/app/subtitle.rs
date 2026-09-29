@@ -708,8 +708,6 @@ impl<'a> SubtitleView<'a> {
                 .on_press(Message::CloseSubtitlePreview),
         )
         .apply(widget::container)
-        .width(1000.0)
-        .apply(widget::container)
         .center(Length::Fill)
         .style(|_| widget::container::background(iced::Color::from_rgba(0., 0., 0., 0.45)))
         .into()
@@ -726,11 +724,10 @@ impl<'a> SubtitleView<'a> {
             .zoomed_result_id
             .and_then(|id| self.model.results.get(id));
 
-        if let Some(result) = zoomed_result {
-            iced::widget::stack![content, Self::zoomed_preview(result)].into()
-        } else {
-            content
-        }
+        std::iter::once(content)
+            .chain(zoomed_result.map(Self::zoomed_preview))
+            .apply(iced::widget::Stack::with_children)
+            .into()
     }
 }
 
@@ -873,7 +870,7 @@ impl Model {
             }
             Message::JumpToEnd { id } => {
                 self.scrollbar_jump_status = ScrollbarJumpStatus::NoShow;
-                Event::Run(iced::widget::operation::snap_to_end(id, Animation::Instant))
+                Event::Run(iced::widget::operation::snap_to_end(id, Animation::Smooth))
             }
             Message::ShowJumpToEnd => {
                 if self.scrollbar_jump_status == ScrollbarJumpStatus::TimeoutRunning {
