@@ -1,9 +1,20 @@
-use crate::apply_traits::ApplyConditional;
+use eyre::Context;
+use iced::alignment::Vertical;
+use rfd::AsyncFileDialog;
+use std::{convert::Infallible, ops::FromResidual, path::PathBuf, time::Duration};
 
-use super::*;
+use crate::{
+    app::{Composition, ReportLike, format_duration, selection_canvas, video_player_widget},
+    extraction::srt_parser::Subtitles,
+    fl, impl_report_residual,
+};
+
 use cosmic::iced::widget::Stack;
-use iced::alignment::Horizontal;
-use vse_ui::{self as cosmic, Apply};
+use iced::{Element, Length, Subscription, Task, alignment::Horizontal};
+use vse_ui::{
+    self as cosmic, Apply,
+    widget::{self, icon},
+};
 
 // Several different modes can be used to find chapters in a video
 // method a.
@@ -19,12 +30,15 @@ use vse_ui::{self as cosmic, Apply};
 pub struct Model {
     video_player: video_player_widget::Model,
     canvas_generation: u32,
+    current_subtitles: Option<Subtitles>,
 }
 
 #[derive(Debug, Clone)]
 pub enum Message {
     VideoPlayer(video_player_widget::Message),
     Canvas(selection_canvas::Message),
+    PickSrt,
+    LoadSubtitlesFromSrt(Option<PathBuf>),
 }
 
 pub enum Event {
@@ -33,10 +47,23 @@ pub enum Event {
     None,
 }
 
+impl ReportLike for Event {
+    fn err(e: eyre::Report) -> Self {
+        Self::Error(e)
+    }
+}
+
+impl_report_residual!(Event);
+
+impl FromResidual<Option<Infallible>> for Event {
+    fn from_residual(residual: Option<Infallible>) -> Self {
+        residual.map_or_else(|| Self::None, |never| match never {})
+    }
+}
 impl Model {
     pub fn update(&mut self, message: Message) -> Event {
         match message {
-            Message::VideoPlayer(message) => match self.video_player.update(message) {
+            Message::VideoPlayer(message) => match self.video_player.update(message, ()) {
                 video_player_widget::Event::Run(task) => Event::Run(task.map(Message::VideoPlayer)),
                 video_player_widget::Event::Error(error) => Event::Error(error),
                 video_player_widget::Event::None => Event::None,
@@ -45,11 +72,28 @@ impl Model {
                 selection_canvas::Message::CanvasSize(rectangle) => Event::None,
                 selection_canvas::Message::ScreenshotRegion(rectangle) => Event::None,
             },
+            Message::PickSrt => Task::perform(
+                async move {
+                    let dialog = AsyncFileDialog::new().add_filter(fl!("video"), &["srt"]);
+                    let file = dialog.pick_file().await;
+                    file.map(|file| file.path().to_path_buf())
+                },
+                Message::LoadSubtitlesFromSrt,
+            )
+            .apply(Event::Run),
+            Message::LoadSubtitlesFromSrt(path) => {
+                let s = std::fs::read(path?)
+                    .wrap_err("couldn't read from path")
+                    .and_then(|x| x.apply(String::from_utf8).wrap_err("read srt isn't utf8"))?;
+                self.current_subtitles =
+                    Some(Subtitles::new(&s).wrap_err("couldn't parse subtitles from srt")?);
+                Event::None
+            }
         }
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
-        self.video_player.subscription().map(Message::VideoPlayer)
+        self.video_player.subscription(()).map(Message::VideoPlayer)
     }
 
     fn canvas(&self) -> Element<'_, Message> {
@@ -112,7 +156,7 @@ impl Model {
             slider,
             widget::row![load_video, backward, forward, current_time]
                 .spacing(cosmic::theme::spacing().space_s)
-                .align_y(Alignment::Center),
+                .align_y(Vertical::Center),
         ]
         .spacing(cosmic::theme::spacing().space_s)
         .into()

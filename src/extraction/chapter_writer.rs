@@ -28,13 +28,13 @@ error_set::error_set! {
 }
 
 pub struct ChapterWriter {
-    file: PathBuf,
     locations: ChapterLocations,
 }
 
 impl ChapterWriter {
     pub fn into_sidecar(
         self,
+        input: impl AsRef<Path>,
         output: impl AsRef<Path>,
     ) -> Result<FfmpegCommand, ChapterWriterError> {
         let mut command = FfmpegCommand::new();
@@ -48,12 +48,12 @@ impl ChapterWriter {
         })?;
 
         command
-            .input(self.file.to_string_lossy())
+            .input(input.as_ref().to_string_lossy())
             .input(f.to_string_lossy())
             .codec_video("copy")
             .codec_audio("copy")
             .codec_subtitle("copy")
-            .args(["-map_metadata", "0"])
+            .args(["-map_metadata", "0"]) // copy the existing metadata information
             .output(output.as_ref().to_string_lossy());
 
         Ok(command)
