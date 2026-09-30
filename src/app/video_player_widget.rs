@@ -1,6 +1,7 @@
 use super::*;
-use crate::apply_traits::ApplyConditional;
+use crate::{app::ReportLike, apply_traits::ApplyConditional, impl_report_residual};
 use cosmic::Apply;
+use eyre::Context;
 use iced::alignment::Horizontal;
 use iced::futures::SinkExt;
 use image::RgbaImage;
@@ -42,55 +43,53 @@ pub enum Event {
     None,
 }
 
+impl ReportLike for Event {
+    fn err(e: eyre::Report) -> Self {
+        Self::Error(e)
+    }
+}
+
+impl_report_residual!(Event);
+
 impl Model {
-    pub fn update(&mut self, message: Message) -> Event {
+    fn update(&mut self, message: Message) -> Event {
         match message {
-            Message::PickVideo => {
-                let pwd = current_dir();
-                Task::perform(
-                    async move {
-                        let dialog = AsyncFileDialog::new().add_filter(
-                            fl!("video"),
-                            &["mkv", "mp4", "avi", "mov", "webm", "flv", "wmv"],
-                        );
-                        let file = dialog
-                            .apply_if_ok_ref(&pwd, AsyncFileDialog::set_directory)
-                            .pick_file()
-                            .await;
-                        file.map(|file| file.path().to_path_buf())
-                    },
-                    Message::VideoFilePicked,
-                )
-                .apply(Event::Run)
-            }
+            Message::PickVideo => Task::perform(
+                async move {
+                    let dialog = AsyncFileDialog::new().add_filter(
+                        fl!("video"),
+                        &["mkv", "mp4", "avi", "mov", "webm", "flv", "wmv"],
+                    );
+                    let file = dialog.pick_file().await;
+                    file.map(|file| file.path().to_path_buf())
+                },
+                Message::VideoFilePicked,
+            )
+            .apply(Event::Run),
             Message::VideoFilePicked(Some(path)) => self.update(Message::LoadVideo(path)),
             Message::VideoFilePicked(None) => Event::None,
-            Message::LoadVideo(path) => match ffmpeg_the_third::format::input(&path) {
-                Ok(input) => match create_video_player::<false>(
+            Message::LoadVideo(path) => {
+                let input = ffmpeg_the_third::format::input(&path)
+                    .wrap_err("opening the video with ffmpeg")?;
+                let (controller, _) = create_video_player::<false>(
                     input,
                     None,
                     crate::config::ProcessingResolution::None,
-                ) {
-                    Ok((controller, _)) => {
-                        self.video_path = Some(path);
-                        self.video_controller = Some(controller);
-                        self.video_allocation = None;
-                        self.current_time = Duration::ZERO;
-                        self.pending_seek = None;
-                        Event::None
-                    }
-                    Err(error) => Event::Error(error.wrap_err("initializing the video player")),
-                },
-                Err(error) => {
-                    Event::Error(eyre::eyre!(error).wrap_err("opening the video with FFmpeg"))
-                }
-            },
+                )?;
+                self.video_path = Some(path);
+                self.video_controller = Some(controller);
+                self.video_allocation = None;
+                self.current_time = Duration::ZERO;
+                self.pending_seek = None;
+                Event::None
+            }
             Message::VideoFrame {
                 image: frame,
                 timestamp,
             } => {
                 if self.is_allocating_frame {
-                    return Event::None;
+                    println!("can't keep up!");
+                    WARNING_CHANNEL.0.try_send("can't keep up".to_string()).ok();
                 }
 
                 if self
@@ -170,7 +169,7 @@ impl Model {
             })
     }
 
-    pub fn subscription(&self) -> Subscription<Message> {
+    fn subscription(&self) -> Subscription<Message> {
         self.video_controller
             .as_ref()
             .map_or_else(Subscription::none, |controller| {
@@ -180,7 +179,7 @@ impl Model {
             })
     }
 
-    pub fn view(&self) -> Element<'_, Message> {
+    fn view(&self) -> Element<'_, Message> {
         let image = widget::image(self.frame_handle())
             .content_fit(iced::ContentFit::Contain)
             .width(Length::Fill)
@@ -242,7 +241,7 @@ impl Model {
 
     pub fn frame_handle(&self) -> widget::image::Handle {
         self.video_allocation.as_ref().map_or_else(
-            || widget::image::Handle::from_rgba(1, 1, vec![0, 0, 0, 255]),
+            || widget::image::Handle::from_rgba(1920, 1080, [0, 0, 0, 255].repeat(1920 * 1080)),
             |(allocation, _)| allocation.handle().clone(),
         )
     }
@@ -313,4 +312,24 @@ fn video_frame_stream(
             }
         },
     )
+}
+
+impl Composition for Model {
+    type Message = Message;
+    type Event = Event;
+    type ViewContext<'a> = ();
+    type UpdateContext<'a> = ();
+    type SubscriptionContext<'a> = ();
+
+    fn view(&self, (): Self::ViewContext<'_>) -> Element<'_, Self::Message> {
+        Self::view(self)
+    }
+
+    fn update(&mut self, message: Self::Message, (): Self::UpdateContext<'_>) -> Self::Event {
+        Self::update(self, message)
+    }
+
+    fn subscription(&self, (): Self::SubscriptionContext<'_>) -> Subscription<Self::Message> {
+        Self::subscription(self)
+    }
 }

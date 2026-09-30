@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MPL-2.0
+#![feature(try_trait_v2)]
 
 mod app;
 pub mod apply_traits;

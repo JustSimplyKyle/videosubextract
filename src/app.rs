@@ -13,8 +13,12 @@ pub(crate) use crate::video_player::{
     self, InnerPlayer, VideoPlayerController, create_video_player,
 };
 use crate::{fl, i18n};
+use async_channel::{Receiver, Sender};
 use cosmic_config::{self, CosmicConfigEntry};
+use futures::{SinkExt, StreamExt};
+use iced::window::{self, Action};
 pub(crate) use iced::{Alignment, Element, Length, Subscription, Task};
+use std::sync::LazyLock;
 use std::{sync::Arc, time::Duration};
 use vse_ui::shell;
 pub(crate) use vse_ui::widget;
@@ -40,6 +44,27 @@ trait Composition {
     fn subscription(&self, context: Self::SubscriptionContext<'_>) -> Subscription<Self::Message>;
 }
 
+pub trait ReportLike {
+    fn err(error: eyre::Report) -> Self;
+}
+
+#[macro_export]
+macro_rules! impl_report_residual {
+    ($ty:ty) => {
+        impl<E> std::ops::FromResidual<Result<std::convert::Infallible, E>> for $ty
+        where
+            E: Into<eyre::Report>,
+        {
+            fn from_residual(residual: Result<std::convert::Infallible, E>) -> Self {
+                match residual {
+                    Err(error) => <Self as ReportLike>::err(error.into()),
+                    Ok(never) => match never {},
+                }
+            }
+        }
+    };
+}
+
 const APP_ID: &str = "dev.justsimplykyle.videosubextract";
 
 pub fn format_duration(duration: Duration) -> String {
@@ -51,6 +76,9 @@ pub fn format_duration(duration: Duration) -> String {
         seconds % 60
     )
 }
+
+pub static WARNING_CHANNEL: LazyLock<(Sender<String>, Receiver<String>)> =
+    LazyLock::new(|| async_channel::bounded(2));
 
 pub struct AppModel {
     active_page: Page,
@@ -67,11 +95,14 @@ pub struct AppModel {
     errors: Vec<Arc<eyre::Report>>,
 }
 
+struct ToastManager {}
+
 #[derive(Debug, Clone)]
 pub enum Message {
     SelectPage(Page),
     SelectDialogPage(Option<DialogPage>),
     ToggleNavigation,
+    PushToast(String),
     CloseToast(u64),
     SetOcrModel(OcrModel),
     SetSubtitleDetector(SubtitleDetector),
@@ -422,6 +453,7 @@ impl AppModel {
             self.subtitle
                 .subscription(self.video_frame_rate)
                 .map(Message::Subtitle),
+            Self::monitor_warning_channel(),
         ];
         match self.active_page {
             Page::Prepare => {
@@ -432,12 +464,30 @@ impl AppModel {
                     .subscription(())
                     .map(Message::PostProduction),
             ),
-            Page::Subtitle => {}
+            Page::Subtitle => {
+                // subtitles search should always run in the background regardless of current active page
+            }
         }
         Subscription::batch(subscriptions)
     }
 
+    fn monitor_warning_channel() -> Subscription<Message> {
+        let stream = || {
+            iced::stream::channel(
+                2,
+                async move |mut output: futures::channel::mpsc::Sender<Message>| {
+                    while let Ok(x) = WARNING_CHANNEL.1.recv().await {
+                        output.send(Message::PushToast(x));
+                    }
+                },
+            )
+        };
+        Subscription::run(stream)
+    }
+
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        // let s = iced::runtime::window::screenshot(id);
+        // window::latest().::screenshotceenshot
         match message {
             Message::SelectPage(page) => {
                 if page == Page::PostProduction {
@@ -459,8 +509,8 @@ impl AppModel {
                 self.dialog_page = page;
                 Task::none()
             }
-            Message::CloseToast(id) => {
-                self.toasts.retain(|(toast_id, _)| *toast_id != id);
+            Message::CloseToast(remove_id) => {
+                self.toasts.retain(|(toast_id, _)| *toast_id != remove_id);
                 Task::none()
             }
             Message::SetLanguage(value) => {
@@ -558,6 +608,12 @@ impl AppModel {
             Message::ErrorReported(error) => {
                 self.errors.push(error);
                 self.dialog_page = Some(DialogPage::Error);
+                Task::none()
+            }
+            Message::PushToast(msg) => {
+                let id = self.next_toast_id;
+                self.next_toast_id = self.next_toast_id.wrapping_add(1);
+                self.toasts.push((id, msg));
                 Task::none()
             }
         }

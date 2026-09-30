@@ -1,3 +1,6 @@
+use crate::app::ReportLike;
+use crate::impl_report_residual;
+
 use super::*;
 use cosmic::iced::widget::Stack;
 use cosmic::{Apply, Element};
@@ -31,6 +34,14 @@ pub enum Event {
     None,
 }
 
+impl ReportLike for Event {
+    fn err(e: eyre::Report) -> Self {
+        Self::Error(e)
+    }
+}
+
+impl_report_residual!(Event);
+
 impl Model {
     fn update(&mut self, message: Message) -> Event {
         let needs_recompute = Self::scaled_selection_needs_recomputation(&message);
@@ -51,7 +62,7 @@ impl Model {
                     Event::None
                 }
             },
-            Message::VideoPlayer(message) => match self.video_player.update(message) {
+            Message::VideoPlayer(message) => match self.video_player.update(message, ()) {
                 video_player_widget::Event::Run(task) => Event::Run(task.map(Message::VideoPlayer)),
                 video_player_widget::Event::Error(error) => Event::Error(error),
                 video_player_widget::Event::None => Event::None,
@@ -215,7 +226,7 @@ impl Model {
     }
 
     fn subscription(&self) -> Subscription<Message> {
-        self.video_player.subscription().map(Message::VideoPlayer)
+        self.video_player.subscription(()).map(Message::VideoPlayer)
     }
 
     fn recompute_scaled_selection(&mut self) {

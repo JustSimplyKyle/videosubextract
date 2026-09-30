@@ -44,8 +44,10 @@
 //! state; these are current implementation choices, not requirements of the
 //! notification protocol.
 
+use crate::app::ReportLike;
 use crate::config::{ProcessingResolution, SubtitleDetector};
 use crate::extraction::{self, OcrHandle, Request as ExtractionRequest, Subtitle};
+use crate::impl_report_residual;
 use crate::native_video_sub_finder::NativeSearchParams;
 use crate::video_player::CropRect;
 use cosmic::widget::text_editor;
@@ -368,6 +370,14 @@ pub enum Event {
     Error(eyre::Report),
     None,
 }
+
+impl ReportLike for Event {
+    fn err(e: eyre::Report) -> Self {
+        Self::Error(e)
+    }
+}
+
+impl_report_residual!(Event);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum VirtualRowKey {

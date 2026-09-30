@@ -2,7 +2,7 @@ use super::{
     Composition,
     subtitle::{self, SubtitleTableConfig},
 };
-use crate::{config::Config, fl};
+use crate::{app::ReportLike, config::Config, fl, impl_report_residual};
 use cosmic::{
     Apply, Element,
     widget::{self, segmented_button::SingleSelectModel},
@@ -131,6 +131,14 @@ pub enum Event {
     Toast(String),
     Error(eyre::Report),
 }
+
+impl ReportLike for Event {
+    fn err(e: eyre::Report) -> Self {
+        Self::Error(e)
+    }
+}
+
+impl_report_residual!(Event);
 
 impl Model {
     /// Synchronize the export snapshot after a source change or page entry.
