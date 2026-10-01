@@ -2,6 +2,7 @@ use super::*;
 use crate::{app::ReportLike, apply_traits::ApplyConditional, impl_report_residual};
 use cosmic::Apply;
 use eyre::Context;
+use iced::advanced::graphics::core::length::Constraint;
 use iced::alignment::Horizontal;
 use iced::futures::SinkExt;
 use image::RgbaImage;
@@ -184,8 +185,13 @@ impl Model {
     fn view(&self) -> Element<'_, Message> {
         let image = widget::image(self.frame_handle())
             .content_fit(iced::ContentFit::Contain)
-            .width(Length::Fill)
+            .expand(true)
+            .width(Length::Shrink)
             .height(Length::Shrink);
+        // Fit within the space left by the controls, releasing unused height.
+        let image = widget::container(image)
+            .center_x(Length::Fill)
+            .height(Length::Fluid(Constraint::Max));
         let load_video = widget::button(widget::text(if self.video_path.is_none() {
             fl!("load-video")
         } else {

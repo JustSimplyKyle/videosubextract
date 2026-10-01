@@ -4,6 +4,7 @@ use crate::impl_report_residual;
 use super::*;
 use cosmic::iced::widget::Stack;
 use cosmic::{Apply, Element};
+use iced::advanced::graphics::core::length::Constraint;
 use iced::alignment::Horizontal;
 use std::time::Duration;
 use vse_ui as cosmic;
@@ -95,7 +96,8 @@ impl Model {
 
         let full_img = widget::image(&full_img_handle)
             .content_fit(iced::ContentFit::Contain)
-            .width(Length::Fill)
+            .expand(true)
+            .width(Length::Shrink)
             .height(Length::Shrink);
 
         let canvas_widget = widget::canvas(selection_canvas::SelectionProgram {
@@ -124,6 +126,11 @@ impl Model {
             });
 
         let full_img = Stack::new().push(full_img).push(canvas_widget);
+        // Keep the selection canvas fitted to the image while reserving space
+        // for the preview and controls before laying out the full frame.
+        let full_img = widget::container(full_img)
+            .center_x(Length::Fill)
+            .height(Length::Fluid(Constraint::Max));
 
         let reset_btn = widget::button(widget::text(fl!("reset-selection")))
             .on_press(Message::ResetSelection)
@@ -224,7 +231,6 @@ impl Model {
         .spacing(space_s)
         .height(Length::Fill)
         .align_x(Alignment::Center)
-        .apply(widget::scrollable)
         .into()
     }
 
