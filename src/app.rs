@@ -16,13 +16,14 @@ use crate::{fl, i18n};
 use async_channel::{Receiver, Sender};
 use cosmic_config::{self, CosmicConfigEntry};
 use futures::{SinkExt, StreamExt};
+use iced::alignment::Vertical;
 use iced::window::{self, Action};
 pub(crate) use iced::{Alignment, Element, Length, Subscription, Task};
 use std::sync::LazyLock;
 use std::{sync::Arc, time::Duration};
-use vse_ui::shell;
 pub(crate) use vse_ui::widget;
 pub(crate) use vse_ui::widget::icon;
+use vse_ui::{Apply, shell, theme};
 
 trait Composition {
     type Message: 'static;
@@ -634,10 +635,14 @@ impl AppModel {
             Page::Prepare => self.prepare.view(()).map(Message::Prepare),
             Page::Subtitle => self
                 .subtitle
-                .view(match &self.prepare.video_player {
-                    Some(player) => player.controller().inner.info.video_time,
-                    None => Duration::ZERO,
-                })
+                .view(
+                    self.prepare
+                        .video_player
+                        .as_ref()
+                        .map_or(Duration::ZERO, |player| {
+                            player.controller().inner.info.video_time
+                        }),
+                )
                 .map(Message::Subtitle),
             Page::PostProduction => self
                 .post_production
@@ -685,7 +690,27 @@ impl AppModel {
             )
         });
 
-        shell::Shell::new(active.label(), active.details(), content)
+        let header = widget::column![
+            widget::text(active.label()).size(36),
+            widget::text(active.details()).size(14),
+        ]
+        .spacing(theme::spacing().space_s);
+
+        let header = widget::row![
+            header,
+            widget::space().width(Length::Fill),
+            self.prepare.title_actions()
+        ]
+        .align_y(Vertical::Center)
+        .apply(Element::from);
+
+        let page = widget::column! {
+            header.map(Message::Prepare),
+            content,
+        }
+        .spacing(theme::spacing().space_m);
+
+        shell::Shell::new(page)
             .navigation(navigation)
             .header_controls(
                 Message::ToggleNavigation,

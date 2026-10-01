@@ -1,5 +1,6 @@
-use crate::app::ReportLike;
 use crate::impl_report_residual;
+use crate::{app::ReportLike, apply_traits::ApplyConditional};
+use vse_ui::theme::WithRadius;
 
 use super::*;
 use cosmic::Element;
@@ -46,7 +47,7 @@ impl ReportLike for Event {
 
 impl_report_residual!(Event);
 
-fn playback_map(x: video_player_widget::PlayerMessage) -> Message {
+const fn playback_map(x: video_player_widget::PlayerMessage) -> Message {
     Message::VideoPlayer(video_player_widget::Message::Playback(x))
 }
 
@@ -109,21 +110,46 @@ impl Model {
     }
 
     fn view(&self) -> Element<'_, Message> {
-        let s = widget::button(widget::text(fl!("load-video")))
-            .on_press(Message::VideoPlayer(video_player_widget::Message::Loading(
-                video_player_widget::LoadingMessage::PickVideo,
-            )))
-            .style(theme::button::suggested);
-        if let Some(player) = &self.video_player {
-            let img = player
-                .image(COSMIC.corner_radii.radius_l[0])
-                .map(playback_map);
-            widget::column![img, Self::video_controls(&player)]
-                .spacing(theme::spacing().space_s)
-                .into()
+        let Some(player) = &self.video_player else {
+            return widget::space().into();
+        };
+        let img = player
+            .image(COSMIC.corner_radii.radius_l[0])
+            .map(playback_map);
+        let selection_canvas = widget::canvas(selection_canvas::SelectionProgram::default())
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .apply(Element::from)
+            .map(Message::Canvas);
+
+        let img_with_selection = widget::stack![img, selection_canvas];
+
+        widget::column![img_with_selection, Self::video_controls(player)]
+            .spacing(theme::spacing().space_s)
+            .into()
+    }
+
+    pub fn title_actions(&self) -> Element<'_, Message> {
+        let load_video = if self.video_player.is_some() {
+            widget::button(widget::text(fl!("change-video")))
         } else {
-            s.into()
+            widget::button(widget::text(fl!("load-video"))).style(theme::button::suggested)
         }
+        .on_press(Message::VideoPlayer(video_player_widget::Message::Loading(
+            video_player_widget::LoadingMessage::PickVideo,
+        )))
+        .padding(theme::spacing().space_xs);
+
+        let start_subtitle = widget::button(widget::text(fl!("find-subtitles")))
+            .apply_if(self.video_player.is_some(), |x| {
+                x.on_press(Message::StartSubtitleDisplay)
+                    .style(theme::button::suggested)
+            })
+            .padding(theme::spacing().space_xs);
+
+        widget::row![load_video, start_subtitle]
+            .spacing(theme::spacing().space_xs)
+            .into()
     }
 
     fn settings_view(&self) -> Element<'_, Message> {

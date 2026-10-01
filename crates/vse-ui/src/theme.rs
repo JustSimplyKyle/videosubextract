@@ -6,6 +6,68 @@ use std::sync::LazyLock;
 pub type Theme = ::iced::Theme;
 pub static COSMIC: LazyLock<CosmicTheme> = LazyLock::new(CosmicTheme::dark_default);
 
+/// A widget style with a border that can be customized.
+pub trait WithRadius: Sized {
+    /// Access the border to customize.
+    fn border_mut(&mut self) -> &mut Border;
+
+    /// Override the corner radius while preserving the rest of the style.
+    fn with_radius(mut self, radius: impl Into<::iced::border::Radius>) -> Self {
+        self.border_mut().radius = radius.into();
+        self
+    }
+}
+
+macro_rules! impl_with_radius {
+    ($($widget:ident),+ $(,)?) => {
+        $(impl WithRadius for ::iced::widget::$widget::Style {
+            fn border_mut(&mut self) -> &mut Border {
+                &mut self.border
+            }
+        })+
+    };
+}
+
+impl_with_radius!(
+    button,
+    checkbox,
+    container,
+    pick_list,
+    progress_bar,
+    text_editor,
+    text_input
+);
+
+/// Wrap a status-based style function with a corner-radius override.
+///
+/// The base style is evaluated for every status, preserving its colors and
+/// other properties. Accepts a uniform radius or an [`::iced::border::Radius`]
+/// with different values for each corner.
+///
+/// ```
+/// use vse_ui::{theme, widget};
+///
+/// let button = widget::button(widget::text("Find subtitles"))
+///     .on_press(())
+///     .style(theme::with_radius(theme::button::suggested, 4.0));
+/// ```
+///
+/// For styles without a status, such as containers, use [`WithRadius`] directly:
+///
+/// ```
+/// use vse_ui::{theme::{self, WithRadius}, widget};
+///
+/// let container: widget::Container<'_, ()> = widget::container(widget::text("Content"))
+///     .style(|theme| theme::container::card(theme).with_radius(4.0));
+/// ```
+pub fn with_radius<T, Status, Style: WithRadius>(
+    style: impl Fn(&T, Status) -> Style,
+    radius: impl Into<::iced::border::Radius>,
+) -> impl Fn(&T, Status) -> Style {
+    let radius = radius.into();
+    move |theme, status| style(theme, status).with_radius(radius)
+}
+
 pub fn iced_theme() -> Theme {
     ::iced::Theme::custom(
         "COSMIC Dark",

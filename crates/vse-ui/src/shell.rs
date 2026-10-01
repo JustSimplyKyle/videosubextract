@@ -10,8 +10,6 @@ pub struct NavigationItem<Message> {
 }
 
 pub struct Shell<'a, Message> {
-    title: String,
-    description: String,
     navigation: Vec<NavigationItem<Message>>,
     content: Element<'a, Message>,
     controls: Option<(Message, Message)>,
@@ -20,14 +18,8 @@ pub struct Shell<'a, Message> {
 }
 
 impl<'a, Message: 'a> Shell<'a, Message> {
-    pub fn new(
-        title: impl Into<String>,
-        description: impl Into<String>,
-        content: impl Into<Element<'a, Message>>,
-    ) -> Self {
+    pub fn new(content: impl Into<Element<'a, Message>>) -> Self {
         Self {
-            title: title.into(),
-            description: description.into(),
             navigation: Vec::new(),
             content: content.into(),
             controls: None,
@@ -94,13 +86,7 @@ impl<'a, Message: Clone + 'a> From<Shell<'a, Message>> for Element<'a, Message> 
             .align_y(Alignment::Center)
             .width(Fill)
         });
-        let page = column![
-            header,
-            text(shell.title).size(36),
-            text(shell.description).size(14),
-            shell.content,
-        ]
-        .spacing(16);
+        let page = column![header, shell.content,].spacing(16);
 
         let content: Element<'a, Message> = row![
             container(nav)

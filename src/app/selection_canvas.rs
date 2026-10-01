@@ -64,8 +64,9 @@ pub struct SelectionCanvas {
     pub previous_selection: Rectangle,
 }
 
+#[derive(Default)]
 pub struct SelectionProgram {
-    pub reset_generation: u32,
+    reset_generation: u32,
 }
 
 pub const HANDLE_RADIUS: f32 = 7.0;
