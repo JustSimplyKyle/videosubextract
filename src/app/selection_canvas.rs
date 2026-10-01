@@ -85,6 +85,20 @@ pub enum Message {
     ScreenshotRegion(Option<Rectangle>),
 }
 
+/// Map canvas-local coordinates to a new canvas size, preserving the video region.
+pub fn rescale_rectangle(rectangle: Rectangle, from: iced::Size, to: iced::Size) -> Rectangle {
+    if from.width <= 0.0 || from.height <= 0.0 || to.width <= 0.0 || to.height <= 0.0 {
+        return rectangle;
+    }
+
+    Rectangle {
+        x: rectangle.x * to.width / from.width,
+        y: rectangle.y * to.height / from.height,
+        width: rectangle.width * to.width / from.width,
+        height: rectangle.height * to.height / from.height,
+    }
+}
+
 /// Pure selection rectangle operations used by both interaction and rendering.
 #[derive(Debug, Clone, Copy)]
 struct SelectionGeometry(Rectangle);
@@ -144,7 +158,23 @@ impl SelectionCanvas {
         }
 
         if bounds != self.last_bounds {
+            if bounds.width <= 0.0 || bounds.height <= 0.0 {
+                return None;
+            }
+            let from = self.last_bounds.size();
+            let to = bounds.size();
+            self.selection = self
+                .selection
+                .map(|selection| rescale_rectangle(selection, from, to));
+            if let ClickState::WaitingSecond(first) = self.click_state {
+                let first = rescale_rectangle(Rectangle::new(first, iced::Size::ZERO), from, to);
+                self.click_state = ClickState::WaitingSecond(first.position());
+            }
+            // A resize changes the pointer's local position. End an active drag
+            // so its old anchor cannot move the selection on the next event.
+            self.handle_drag = HandleDrag::None;
             self.last_bounds = bounds;
+            self.cache.clear();
             return Some(canvas::Action::publish(Message::CanvasSize(bounds)));
         }
 
@@ -524,12 +554,18 @@ impl SelectionHandles {
 }
 
 impl SelectionView<'_> {
+    fn selection(&self) -> Option<Rectangle> {
+        self.state.selection.map(|selection| {
+            rescale_rectangle(selection, self.state.last_bounds.size(), self.bounds.size())
+        })
+    }
+
     fn draw(&self, renderer: &iced::Renderer) -> Vec<canvas::Geometry> {
         let geometry = self
             .state
             .cache
             .draw(renderer, self.bounds.size(), |frame| {
-                if let Some(selection) = self.state.selection {
+                if let Some(selection) = self.selection() {
                     SelectionOverlay {
                         selection,
                         bounds: self.bounds,
@@ -564,7 +600,7 @@ impl SelectionView<'_> {
                 mouse::Interaction::Crosshair
             }
             ClickState::Done => {
-                let Some(selection) = self.state.selection else {
+                let Some(selection) = self.selection() else {
                     return mouse::Interaction::default();
                 };
                 let Some(position) = cursor.position_in(self.bounds) else {

@@ -62,6 +62,13 @@ impl Model {
                     Event::None
                 }
                 selection_canvas::Message::CanvasSize(rectangle) => {
+                    self.screenshot_selection = self.screenshot_selection.map(|selection| {
+                        selection_canvas::rescale_rectangle(
+                            selection,
+                            self.canvas_dimensions.size(),
+                            rectangle.size(),
+                        )
+                    });
                     self.canvas_dimensions = rectangle;
                     Event::None
                 }
@@ -248,20 +255,16 @@ impl Model {
             return;
         };
 
-        let (img_w, img_h) = (size.width, size.height);
-        let canvas_w = self.canvas_dimensions.width;
-        let canvas_h = self.canvas_dimensions.height;
+        let canvas_size = self.canvas_dimensions.size();
 
-        let scale = (canvas_w / img_w).min(canvas_h / img_h);
-        let offset_x = (canvas_w - img_w * scale) / 2.0;
-        let offset_y = (canvas_h - img_h * scale) / 2.0;
+        if canvas_size.width <= 0.0 || canvas_size.height <= 0.0 {
+            self.screenshot_selection_scaled = None;
+            return;
+        }
 
-        self.screenshot_selection_scaled = Some(iced::Rectangle {
-            x: ((ele.x - offset_x) / scale).clamp(0.0, img_w - 1.0),
-            y: ((ele.y - offset_y) / scale).clamp(0.0, img_h - 1.0),
-            width: (ele.width / scale).clamp(1.0, img_w),
-            height: (ele.height / scale).clamp(1.0, img_h),
-        });
+        let scaled = selection_canvas::rescale_rectangle(ele, canvas_size, *size);
+
+        self.screenshot_selection_scaled = Some(scaled);
     }
 
     const fn scaled_selection_needs_recomputation(message: &Message) -> bool {
@@ -291,5 +294,37 @@ impl Composition for Model {
 
     fn subscription(&self, (): Self::SubscriptionContext<'_>) -> Subscription<Self::Message> {
         Self::subscription(self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn canvas_resize_keeps_the_crop_in_sync_with_the_overlay() {
+        let selection =
+            iced::Rectangle::new(iced::Point::new(80.0, 90.0), iced::Size::new(640.0, 270.0));
+        let original_bounds =
+            iced::Rectangle::new(iced::Point::new(20.0, 30.0), iced::Size::new(800.0, 450.0));
+        let mut model = Model {
+            screenshot_selection: Some(selection),
+            canvas_dimensions: original_bounds,
+            ..Model::default()
+        };
+        model.update(Message::Canvas(selection_canvas::Message::CanvasSize(
+            iced::Rectangle::new(iced::Point::new(40.0, 50.0), iced::Size::new(400.0, 225.0)),
+        )));
+        assert_eq!(
+            model.screenshot_selection,
+            Some(iced::Rectangle::new(
+                iced::Point::new(40.0, 45.0),
+                iced::Size::new(320.0, 135.0)
+            )),
+        );
+        model.update(Message::Canvas(selection_canvas::Message::CanvasSize(
+            original_bounds,
+        )));
+        assert_eq!(model.screenshot_selection, Some(selection));
     }
 }
