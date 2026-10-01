@@ -38,6 +38,9 @@ impl ReportLike for Event {
     fn err(e: eyre::Report) -> Self {
         Self::Error(e)
     }
+    fn none() -> Self {
+        Self::None
+    }
 }
 
 impl_report_residual!(Event);

@@ -47,6 +47,9 @@ impl ReportLike for Event {
     fn err(e: eyre::Report) -> Self {
         Self::Error(e)
     }
+    fn none() -> Self {
+        Self::None
+    }
 }
 
 impl_report_residual!(Event);
@@ -148,16 +151,15 @@ impl Model {
         match self
             .video_controller
             .as_ref()
-            .map(|controller| controller.seek_absolute(target))
+            .map(|controller| controller.seek_absolute(target))?
         {
-            Some(Err(error)) => {
+            Err(error) => {
                 Event::Error(error.wrap_err(format!("seeking to {:.2}s", target.as_secs_f64())))
             }
-            Some(Ok(())) => {
+            Ok(()) => {
                 self.pending_seek = Some(target);
                 Event::None
             }
-            None => Event::None,
         }
     }
 

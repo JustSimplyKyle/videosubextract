@@ -46,6 +46,7 @@ trait Composition {
 
 pub trait ReportLike {
     fn err(error: eyre::Report) -> Self;
+    fn none() -> Self;
 }
 
 #[macro_export]
@@ -59,6 +60,14 @@ macro_rules! impl_report_residual {
                 match residual {
                     Err(error) => <Self as ReportLike>::err(error.into()),
                     Ok(never) => match never {},
+                }
+            }
+        }
+        impl std::ops::FromResidual<Option<std::convert::Infallible>> for $ty {
+            fn from_residual(residual: Option<std::convert::Infallible>) -> Self {
+                match residual {
+                    None => <Self as ReportLike>::none(),
+                    Some(never) => match never {},
                 }
             }
         }
@@ -603,6 +612,7 @@ impl AppModel {
                     post_production::Event::Error(error) => {
                         Task::done(Message::ErrorReported(Arc::new(error)))
                     }
+                    post_production::Event::None => Task::none(),
                 }
             }
             Message::ErrorReported(error) => {

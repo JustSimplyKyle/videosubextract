@@ -130,11 +130,15 @@ pub enum Event {
     Run(Task<Message>),
     Toast(String),
     Error(eyre::Report),
+    None,
 }
 
 impl ReportLike for Event {
     fn err(e: eyre::Report) -> Self {
         Self::Error(e)
+    }
+    fn none() -> Self {
+        Self::None
     }
 }
 
