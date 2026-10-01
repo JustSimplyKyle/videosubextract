@@ -7,7 +7,14 @@ use iced::alignment::Horizontal;
 use iced::futures::SinkExt;
 use image::RgbaImage;
 use rfd::AsyncFileDialog;
-use std::{path::PathBuf, time::Duration};
+use std::{
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 use vse_ui as cosmic;
 
 /// A missing player means no video has been loaded.
@@ -21,7 +28,7 @@ pub struct Player {
     current_time: Duration,
     // Keep the requested position visible while pre-seek frames drain.
     pending_seek: Option<Duration>,
-    paused: bool,
+    paused: Arc<AtomicBool>,
     is_allocating_frame: bool,
 }
 
@@ -93,7 +100,7 @@ impl Player {
             video_allocation: None,
             current_time: Duration::ZERO,
             pending_seek: None,
-            paused: false,
+            paused: Arc::new(false.into()),
             is_allocating_frame: false,
         })
     }
@@ -158,8 +165,8 @@ fn view(model: &Model) -> Element<'_, Message> {
 }
 
 impl Player {
-    pub const fn is_paused(&self) -> bool {
-        self.paused
+    pub fn is_paused(&self) -> bool {
+        self.paused.load(Ordering::Relaxed)
     }
 
     fn update(&mut self, message: PlayerMessage) -> Event<PlayerMessage> {
@@ -222,7 +229,8 @@ impl Player {
                 Event::Error(eyre::eyre!("video playback failed: {error}"))
             }
             PlayerMessage::PauseToggle => {
-                self.paused = true;
+                self.paused
+                    .update(Ordering::Relaxed, Ordering::Relaxed, |x| !x);
                 Event::None
             }
         }
@@ -244,7 +252,7 @@ impl Player {
         iced::Subscription::run_with(
             VideoFrameStreamData {
                 controller: self.controller().clone(),
-                pause: self.is_paused(),
+                paused: self.paused.clone(),
             },
             |data| video_frame_stream(data.clone()),
         )
@@ -339,7 +347,7 @@ fn seek_has_settled(target: Duration, timestamp: Duration) -> bool {
 #[derive(Clone)]
 struct VideoFrameStreamData {
     controller: VideoPlayerController,
-    pause: bool,
+    paused: Arc<AtomicBool>,
 }
 
 impl std::hash::Hash for VideoFrameStreamData {
@@ -349,7 +357,10 @@ impl std::hash::Hash for VideoFrameStreamData {
 }
 
 fn video_frame_stream(
-    VideoFrameStreamData { controller, pause }: VideoFrameStreamData,
+    VideoFrameStreamData {
+        controller,
+        paused: playback_paused,
+    }: VideoFrameStreamData,
 ) -> impl futures::Stream<Item = PlayerMessage> + Send {
     let inner = controller.inner;
     let frame_rate = inner.info.frame_rate;
@@ -365,8 +376,8 @@ fn video_frame_stream(
                     current_generation: 0,
                 };
                 loop {
-                    if pause {
-                        std::hint::spin_loop();
+                    if playback_paused.load(Ordering::Relaxed) {
+                        std::thread::sleep(Duration::from_millis(10));
                         continue;
                     }
                     let started = std::time::Instant::now();
