@@ -157,8 +157,6 @@ impl VideoPlayerController {
 
         let current_secs = state.timestamp.map(|x| x.as_secs_f64()).unwrap_or_default();
 
-        dbg!(current_secs);
-
         let target_secs = match direction {
             Direction::Forward => current_secs + delta.as_secs_f64(),
             Direction::Backward => (current_secs - delta.as_secs_f64()).max(0.),
@@ -167,12 +165,9 @@ impl VideoPlayerController {
 
         let target_us = (target_secs * f64::from(AV_TIME_BASE)) as i64;
 
-        println!("target: {target_us}");
-
-        println!("got locked");
-
         state.input.seek(target_us, i64::MIN..=target_us)?;
         state.decoder.flush();
+        state.frame_buffer.clear();
 
         state.seek_generation += 1;
 

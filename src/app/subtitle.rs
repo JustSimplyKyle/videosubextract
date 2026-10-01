@@ -44,13 +44,16 @@
 //! state; these are current implementation choices, not requirements of the
 //! notification protocol.
 
+use crate::app::ReportLike;
 use crate::config::{ProcessingResolution, SubtitleDetector};
 use crate::extraction::{self, OcrHandle, Request as ExtractionRequest, Subtitle};
+use crate::impl_report_residual;
 use crate::native_video_sub_finder::NativeSearchParams;
 use crate::video_player::CropRect;
 use cosmic::widget::text_editor;
 use cosmic::{Apply, Element};
 use iced::futures::StreamExt;
+use iced::widget::operation::Animation;
 use image::RgbaImage;
 use indexmap::IndexMap;
 use vse_ui as cosmic;
@@ -273,7 +276,7 @@ pub struct Model {
     post_ocr_processing: bool,
     processing_resolution: ProcessingResolution,
     results: SubtitleResults,
-    pub preview: Option<widget::image::Handle>,
+    // pub preview: Option<widget::image::Handle>,
     pub current_timestamp: Duration,
     pub done: bool,
     pub progress_bar: ProgressBar,
@@ -325,9 +328,6 @@ impl Default for ProgressBar {
 pub enum Message {
     Progress {
         timestamp: Duration,
-
-        #[debug("{}x{}", preview.width(), preview.height())]
-        preview: RgbaImage,
     },
     EventFound {
         subtitle: Subtitle,
@@ -370,6 +370,14 @@ pub enum Event {
     Error(eyre::Report),
     None,
 }
+
+impl ReportLike for Event {
+    fn err(e: eyre::Report) -> Self {
+        Self::Error(e)
+    }
+}
+
+impl_report_residual!(Event);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum VirtualRowKey {
@@ -674,24 +682,20 @@ impl<'a> SubtitleView<'a> {
     }
 
     fn header(&self) -> Option<Element<'a, Message>> {
-        self.model.preview.as_ref().map(|handle| {
-            let mut row = widget::Row::new()
-                .spacing(cosmic::theme::spacing().space_s)
-                .push(Self::preview_card(fl!("view"), handle));
-            if let Some(result) = self.model.results.last() {
-                row = row.push(Self::preview_card(fl!("current"), &result.preview));
-            }
-            row.into()
-        })
+        self.model
+            .results
+            .last()
+            .map(|x| Self::preview_card(fl!("current"), &x.preview))
     }
 
-    fn scrolled(viewport: iced::widget::scrollable::Viewport) -> Message {
-        let content_fits = viewport.content_bounds().height <= viewport.bounds().height + 1.0;
+    fn scrolled(scroll: iced::widget::scrollable::Scroll) -> Message {
+        let viewport = scroll.viewport;
+        let content_fits = viewport.content.height <= viewport.bounds.height + 1.0;
         let at_end = content_fits || viewport.relative_offset().y >= 0.999;
         Message::Scrolled {
             at_end,
             offset: viewport.absolute_offset().y,
-            viewport_height: viewport.bounds().height,
+            viewport_height: viewport.bounds.height,
         }
     }
 
@@ -714,8 +718,6 @@ impl<'a> SubtitleView<'a> {
                 .on_press(Message::CloseSubtitlePreview),
         )
         .apply(widget::container)
-        .width(1000.0)
-        .apply(widget::container)
         .center(Length::Fill)
         .style(|_| widget::container::background(iced::Color::from_rgba(0., 0., 0., 0.45)))
         .into()
@@ -732,11 +734,10 @@ impl<'a> SubtitleView<'a> {
             .zoomed_result_id
             .and_then(|id| self.model.results.get(id));
 
-        if let Some(result) = zoomed_result {
-            iced::widget::stack![content, Self::zoomed_preview(result)].into()
-        } else {
-            content
-        }
+        std::iter::once(content)
+            .chain(zoomed_result.map(Self::zoomed_preview))
+            .apply(iced::widget::Stack::with_children)
+            .into()
     }
 }
 
@@ -804,7 +805,6 @@ impl Model {
         self.post_ocr_processing = config.post_ocr_processing;
         self.processing_resolution = config.processing_resolution;
         let _ = self.results.with_mut(IndexMap::clear);
-        self.preview = None;
         self.current_timestamp = Duration::ZERO;
         self.done = false;
         self.edit_history.clear();
@@ -816,17 +816,12 @@ impl Model {
         self.result_viewport_height = 0.0;
     }
 
-    pub fn update(&mut self, message: Message, config: &Config) -> Event {
+    fn update(&mut self, message: Message, config: &Config) -> Event {
         self.set_ocr_model(config.ocr_model.clone());
         match message {
-            Message::Progress { timestamp, preview } => {
+            Message::Progress { timestamp } => {
                 self.progress_bar.set_position(timestamp.as_millis() as u64);
                 self.current_timestamp = timestamp;
-                self.preview = Some(widget::image::Handle::from_rgba(
-                    preview.width(),
-                    preview.height(),
-                    preview.into_raw(),
-                ));
                 Event::None
             }
             Message::EventFound {
@@ -856,7 +851,6 @@ impl Model {
             Message::SearchDone => {
                 self.search_active = false;
                 self.done = true;
-                self.preview = None;
                 Event::None
             }
             Message::SearchError(e) => {
@@ -886,7 +880,7 @@ impl Model {
             }
             Message::JumpToEnd { id } => {
                 self.scrollbar_jump_status = ScrollbarJumpStatus::NoShow;
-                Event::Run(iced::widget::operation::snap_to_end(id))
+                Event::Run(iced::widget::operation::snap_to_end(id, Animation::Smooth))
             }
             Message::ShowJumpToEnd => {
                 if self.scrollbar_jump_status == ScrollbarJumpStatus::TimeoutRunning {
@@ -1053,7 +1047,7 @@ impl Model {
         }
     }
 
-    pub fn view(&self, video_duration: Duration) -> Element<'_, Message> {
+    fn view(&self, video_duration: Duration) -> Element<'_, Message> {
         SubtitleView {
             model: self,
             video_duration,
@@ -1061,7 +1055,7 @@ impl Model {
         .view()
     }
 
-    pub fn subscription(&self, video_frame_rate: f64) -> Subscription<Message> {
+    fn subscription(&self, video_frame_rate: f64) -> Subscription<Message> {
         let mut subscriptions = vec![];
         if self.search_active
             && let Some(path) = &self.search_path
@@ -1093,6 +1087,29 @@ impl Model {
             _ => Message::None,
         }));
         Subscription::batch(subscriptions)
+    }
+}
+
+impl Composition for Model {
+    type Message = Message;
+    type Event = Event;
+    type ViewContext<'a> = Duration;
+    type UpdateContext<'a> = &'a Config;
+    type SubscriptionContext<'a> = f64;
+
+    fn view(&self, video_duration: Self::ViewContext<'_>) -> Element<'_, Self::Message> {
+        Self::view(self, video_duration)
+    }
+
+    fn update(&mut self, message: Self::Message, config: Self::UpdateContext<'_>) -> Self::Event {
+        Self::update(self, message, config)
+    }
+
+    fn subscription(
+        &self,
+        video_frame_rate: Self::SubscriptionContext<'_>,
+    ) -> Subscription<Self::Message> {
+        Self::subscription(self, video_frame_rate)
     }
 }
 
@@ -1162,15 +1179,11 @@ fn subtitle_search_stream(
         post_ocr_processing: search.post_ocr_processing,
         processing_resolution: search.processing_resolution,
         progress_interval: 100,
-        include_progress_preview: true,
+        include_progress_preview: false,
     };
 
     extraction::stream(request).map(|event| match event {
-        extraction::Event::Progress {
-            timestamp,
-            preview: Some(preview),
-        } => Message::Progress { timestamp, preview },
-        extraction::Event::Progress { .. } => Message::None,
+        extraction::Event::Progress { timestamp, .. } => Message::Progress { timestamp },
         extraction::Event::SubtitleFound {
             subtitle,
             preview,

@@ -4,6 +4,7 @@ pub mod post_production;
 pub mod prepare;
 pub mod selection_canvas;
 pub mod subtitle;
+pub mod video_player_widget;
 
 use crate::config::{Config, Language, ProcessingResolution, SubtitleDetector};
 use crate::native_video_sub_finder::NativeSearchParams;
@@ -12,12 +13,57 @@ pub(crate) use crate::video_player::{
     self, InnerPlayer, VideoPlayerController, create_video_player,
 };
 use crate::{fl, i18n};
+use async_channel::{Receiver, Sender};
 use cosmic_config::{self, CosmicConfigEntry};
+use futures::{SinkExt, StreamExt};
+use iced::window::{self, Action};
 pub(crate) use iced::{Alignment, Element, Length, Subscription, Task};
+use std::sync::LazyLock;
 use std::{sync::Arc, time::Duration};
 use vse_ui::shell;
 pub(crate) use vse_ui::widget;
 pub(crate) use vse_ui::widget::icon;
+
+trait Composition {
+    type Message: 'static;
+    type Event;
+    type ViewContext<'a>
+    where
+        Self: 'a;
+    type UpdateContext<'a>
+    where
+        Self: 'a;
+    type SubscriptionContext<'a>
+    where
+        Self: 'a;
+
+    fn view<'a>(&'a self, context: Self::ViewContext<'a>) -> Element<'a, Self::Message>;
+
+    fn update(&mut self, message: Self::Message, context: Self::UpdateContext<'_>) -> Self::Event;
+
+    fn subscription(&self, context: Self::SubscriptionContext<'_>) -> Subscription<Self::Message>;
+}
+
+pub trait ReportLike {
+    fn err(error: eyre::Report) -> Self;
+}
+
+#[macro_export]
+macro_rules! impl_report_residual {
+    ($ty:ty) => {
+        impl<E> std::ops::FromResidual<Result<std::convert::Infallible, E>> for $ty
+        where
+            E: Into<eyre::Report>,
+        {
+            fn from_residual(residual: Result<std::convert::Infallible, E>) -> Self {
+                match residual {
+                    Err(error) => <Self as ReportLike>::err(error.into()),
+                    Ok(never) => match never {},
+                }
+            }
+        }
+    };
+}
 
 const APP_ID: &str = "dev.justsimplykyle.videosubextract";
 
@@ -30,6 +76,9 @@ pub fn format_duration(duration: Duration) -> String {
         seconds % 60
     )
 }
+
+pub static WARNING_CHANNEL: LazyLock<(Sender<String>, Receiver<String>)> =
+    LazyLock::new(|| async_channel::bounded(2));
 
 pub struct AppModel {
     active_page: Page,
@@ -46,11 +95,14 @@ pub struct AppModel {
     errors: Vec<Arc<eyre::Report>>,
 }
 
+struct ToastManager {}
+
 #[derive(Debug, Clone)]
 pub enum Message {
     SelectPage(Page),
     SelectDialogPage(Option<DialogPage>),
     ToggleNavigation,
+    PushToast(String),
     CloseToast(u64),
     SetOcrModel(OcrModel),
     SetSubtitleDetector(SubtitleDetector),
@@ -401,25 +453,46 @@ impl AppModel {
             self.subtitle
                 .subscription(self.video_frame_rate)
                 .map(Message::Subtitle),
+            Self::monitor_warning_channel(),
         ];
         match self.active_page {
-            Page::Prepare => subscriptions.push(self.prepare.subscription().map(Message::Prepare)),
+            Page::Prepare => {
+                subscriptions.push(self.prepare.subscription(()).map(Message::Prepare));
+            }
             Page::PostProduction => subscriptions.push(
                 self.post_production
-                    .subscription()
+                    .subscription(())
                     .map(Message::PostProduction),
             ),
-            Page::Subtitle => {}
+            Page::Subtitle => {
+                // subtitles search should always run in the background regardless of current active page
+            }
         }
         Subscription::batch(subscriptions)
     }
 
+    fn monitor_warning_channel() -> Subscription<Message> {
+        let stream = || {
+            iced::stream::channel(
+                2,
+                async move |mut output: futures::channel::mpsc::Sender<Message>| {
+                    while let Ok(x) = WARNING_CHANNEL.1.recv().await {
+                        output.send(Message::PushToast(x));
+                    }
+                },
+            )
+        };
+        Subscription::run(stream)
+    }
+
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        // let s = iced::runtime::window::screenshot(id);
+        // window::latest().::screenshotceenshot
         match message {
             Message::SelectPage(page) => {
                 if page == Page::PostProduction {
                     self.post_production.sync(
-                        self.prepare.video_path.as_ref(),
+                        self.prepare.video_player.path(),
                         self.subtitle.results(),
                         subtitle::ResultsChanged::Full,
                         &self.config,
@@ -436,14 +509,14 @@ impl AppModel {
                 self.dialog_page = page;
                 Task::none()
             }
-            Message::CloseToast(id) => {
-                self.toasts.retain(|(toast_id, _)| *toast_id != id);
+            Message::CloseToast(remove_id) => {
+                self.toasts.retain(|(toast_id, _)| *toast_id != remove_id);
                 Task::none()
             }
             Message::SetLanguage(value) => {
                 let _ = i18n::select(value.code());
                 let _ = self.config.set_language(&self.config_handler, value);
-                self.post_production.refresh_language();
+                // self.post_production.refresh_language();
                 Task::none()
             }
             Message::SetOcrModel(value) => {
@@ -479,7 +552,7 @@ impl AppModel {
                     .set_processing_resolution(&self.config_handler, value);
                 Task::none()
             }
-            Message::Prepare(message) => match self.prepare.update(message) {
+            Message::Prepare(message) => match self.prepare.update(message, ()) {
                 prepare::Event::StartSubtitleSearch(path, selection) => {
                     self.subtitle.start_search(path, selection, &self.config);
                     self.active_page = Page::Subtitle;
@@ -495,7 +568,7 @@ impl AppModel {
             Message::Subtitle(message) => match self.subtitle.update(message, &self.config) {
                 subtitle::Event::GoToPostProduction => {
                     self.post_production.sync(
-                        self.prepare.video_path.as_ref(),
+                        self.prepare.video_player.path(),
                         self.subtitle.results(),
                         subtitle::ResultsChanged::Full,
                         &self.config,
@@ -505,7 +578,7 @@ impl AppModel {
                 }
                 subtitle::Event::SyncWithPostProduction(changed) => {
                     self.post_production.sync(
-                        self.prepare.video_path.as_ref(),
+                        self.prepare.video_player.path(),
                         self.subtitle.results(),
                         changed,
                         &self.config,
@@ -537,25 +610,34 @@ impl AppModel {
                 self.dialog_page = Some(DialogPage::Error);
                 Task::none()
             }
+            Message::PushToast(msg) => {
+                let id = self.next_toast_id;
+                self.next_toast_id = self.next_toast_id.wrapping_add(1);
+                self.toasts.push((id, msg));
+                Task::none()
+            }
         }
     }
 
     pub fn view(&self) -> Element<'_, Message> {
         let content = match self.active_page {
-            Page::Prepare => self.prepare.view().map(Message::Prepare),
+            Page::Prepare => self.prepare.view(()).map(Message::Prepare),
             Page::Subtitle => self
                 .subtitle
                 .view(
                     self.prepare
-                        .video_controller
-                        .as_ref()
+                        .video_player
+                        .controller()
                         .map(|controller| controller.inner.info.video_time)
                         .unwrap_or_default(),
                 )
                 .map(Message::Subtitle),
             Page::PostProduction => self
                 .post_production
-                .view(&self.subtitle, self.prepare.video_path.as_ref())
+                .view(post_production::ViewArgs {
+                    subtitles: &self.subtitle,
+                    video_path: self.prepare.video_player.path(),
+                })
                 .map(Message::PostProduction),
         };
         let active = self.active_page;
