@@ -501,7 +501,7 @@ impl AppModel {
             Message::SelectPage(page) => {
                 if page == Page::PostProduction {
                     self.post_production.sync(
-                        self.prepare.video_player.path(),
+                        self.prepare.video_path(),
                         self.subtitle.results(),
                         subtitle::ResultsChanged::Full,
                         &self.config,
@@ -577,7 +577,7 @@ impl AppModel {
             Message::Subtitle(message) => match self.subtitle.update(message, &self.config) {
                 subtitle::Event::GoToPostProduction => {
                     self.post_production.sync(
-                        self.prepare.video_player.path(),
+                        self.prepare.video_path(),
                         self.subtitle.results(),
                         subtitle::ResultsChanged::Full,
                         &self.config,
@@ -587,7 +587,7 @@ impl AppModel {
                 }
                 subtitle::Event::SyncWithPostProduction(changed) => {
                     self.post_production.sync(
-                        self.prepare.video_player.path(),
+                        self.prepare.video_path(),
                         self.subtitle.results(),
                         changed,
                         &self.config,
@@ -634,19 +634,16 @@ impl AppModel {
             Page::Prepare => self.prepare.view(()).map(Message::Prepare),
             Page::Subtitle => self
                 .subtitle
-                .view(
-                    self.prepare
-                        .video_player
-                        .controller()
-                        .map(|controller| controller.inner.info.video_time)
-                        .unwrap_or_default(),
-                )
+                .view(match &self.prepare.video_player {
+                    Some(player) => player.controller().inner.info.video_time,
+                    None => Duration::ZERO,
+                })
                 .map(Message::Subtitle),
             Page::PostProduction => self
                 .post_production
                 .view(post_production::ViewArgs {
                     subtitles: &self.subtitle,
-                    video_path: self.prepare.video_player.path(),
+                    video_path: self.prepare.video_path(),
                 })
                 .map(Message::PostProduction),
         };

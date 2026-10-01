@@ -4,7 +4,7 @@ use cosmic_theme::{Component, Theme as CosmicTheme, palette::Srgba};
 use std::sync::LazyLock;
 
 pub type Theme = ::iced::Theme;
-static COSMIC: LazyLock<CosmicTheme> = LazyLock::new(CosmicTheme::dark_default);
+pub static COSMIC: LazyLock<CosmicTheme> = LazyLock::new(CosmicTheme::dark_default);
 
 pub fn iced_theme() -> Theme {
     ::iced::Theme::custom(
@@ -145,7 +145,7 @@ pub fn segmented_button(
     style
 }
 
-fn container_style(
+pub fn container_style(
     container: &cosmic_theme::Container,
     radii: [f32; 4],
 ) -> ::iced::widget::container::Style {

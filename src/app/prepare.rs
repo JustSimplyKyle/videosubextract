@@ -2,12 +2,12 @@ use crate::app::ReportLike;
 use crate::impl_report_residual;
 
 use super::*;
-use cosmic::iced::widget::Stack;
-use cosmic::{Apply, Element};
-use iced::advanced::graphics::core::length::Constraint;
-use iced::alignment::Horizontal;
-use std::time::Duration;
-use vse_ui as cosmic;
+use cosmic::Element;
+use iced::{Border, Font, alignment::Vertical};
+use vse_ui::{
+    self as cosmic, Apply,
+    theme::{self, COSMIC},
+};
 
 #[derive(Default)]
 pub struct Model {
@@ -46,7 +46,19 @@ impl ReportLike for Event {
 
 impl_report_residual!(Event);
 
+fn playback_map(x: video_player_widget::PlayerMessage) -> Message {
+    Message::VideoPlayer(video_player_widget::Message::Playback(x))
+}
+
 impl Model {
+    /// Other pages can be open before a video has been loaded.
+    pub fn video_path(&self) -> Option<&std::path::PathBuf> {
+        match &self.video_player {
+            Some(player) => Some(player.path()),
+            None => None,
+        }
+    }
+
     fn update(&mut self, message: Message) -> Event {
         let needs_recompute = Self::scaled_selection_needs_recomputation(&message);
 
@@ -81,13 +93,13 @@ impl Model {
             Message::CopySelectionDimensions(dimensions) => {
                 Event::CopySelectionDimensions(dimensions)
             }
-            Message::StartSubtitleDisplay => {
-                if let Some(path) = self.video_player.path() {
-                    Event::StartSubtitleSearch(path.clone(), self.screenshot_selection_scaled)
-                } else {
-                    Event::None
-                }
-            }
+            Message::StartSubtitleDisplay => match &self.video_player {
+                Some(player) => Event::StartSubtitleSearch(
+                    player.path().clone(),
+                    self.screenshot_selection_scaled,
+                ),
+                None => Event::None,
+            },
         };
 
         if needs_recompute {
@@ -97,148 +109,73 @@ impl Model {
     }
 
     fn view(&self) -> Element<'_, Message> {
-        let space_s = cosmic::theme::spacing().space_s;
-
-        let full_img_handle = self.video_player.frame_handle();
-
-        let full_img = widget::image(&full_img_handle)
-            .content_fit(iced::ContentFit::Contain)
-            .expand(true)
-            .width(Length::Shrink)
-            .height(Length::Shrink);
-
-        let canvas_widget = widget::canvas(selection_canvas::SelectionProgram {
-            reset_generation: self.canvas_generation,
-        })
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .apply(Element::from)
-        .map(Message::Canvas);
-
-        let cropped_img = self
-            .screenshot_selection_scaled
-            .unwrap_or_default()
-            .apply(|ele| {
-                let region = iced::Rectangle {
-                    x: ele.x as u32,
-                    y: ele.y as u32,
-                    width: ele.width as u32,
-                    height: ele.height as u32,
-                };
-
-                widget::image(full_img_handle)
-                    .crop(region)
-                    .width(Length::Shrink)
-                    .height(Length::Shrink)
-            });
-
-        let full_img = Stack::new().push(full_img).push(canvas_widget);
-        // Keep the selection canvas fitted to the image while reserving space
-        // for the preview and controls before laying out the full frame.
-        let full_img = widget::container(full_img)
-            .center_x(Length::Fill)
-            .height(Length::Fluid(Constraint::Max));
-
-        let reset_btn = widget::button(widget::text(fl!("reset-selection")))
-            .on_press(Message::ResetSelection)
-            .style(cosmic::theme::button::destructive);
-
-        let load_video = widget::button(widget::text(if self.video_player.path().is_none() {
-            fl!("load-video")
+        let s = widget::button(widget::text(fl!("load-video")))
+            .on_press(Message::VideoPlayer(video_player_widget::Message::Loading(
+                video_player_widget::LoadingMessage::PickVideo,
+            )))
+            .style(theme::button::suggested);
+        if let Some(player) = &self.video_player {
+            let img = player
+                .image(COSMIC.corner_radii.radius_l[0])
+                .map(playback_map);
+            widget::column![img, Self::video_controls(&player)]
+                .spacing(theme::spacing().space_s)
+                .into()
         } else {
-            fl!("change-video")
-        }))
-        .on_press(Message::VideoPlayer(
-            video_player_widget::Message::PickVideo,
-        ));
+            s.into()
+        }
+    }
 
-        let load_video = if self.video_player.path().is_none() {
-            load_video.style(cosmic::theme::button::suggested)
-        } else {
-            load_video
+    fn settings_view(&self) -> Element<'_, Message> {
+        todo!()
+    }
+
+    fn video_controls(player: &video_player_widget::Player) -> Element<'_, Message> {
+        let icon = |name| {
+            widget::icon::from_name(name)
+                .apply(widget::icon_button)
+                .padding(theme::spacing().space_xs)
         };
-
-        let skip_backward = widget::button(icon::from_name("media-seek-backward-symbolic"))
-            .on_press(Message::VideoPlayer(
-                video_player_widget::Message::SeekBackward(Duration::from_secs(5)),
-            ))
-            .style(cosmic::theme::button::nav_toggle);
-
-        let skip_forward = widget::button(icon::from_name("media-seek-forward-symbolic"))
-            .on_press(Message::VideoPlayer(
-                video_player_widget::Message::SeekForward(Duration::from_secs(5)),
-            ))
-            .style(cosmic::theme::button::nav_toggle);
-        let selection_label: Element<'_, Message> = self.screenshot_selection_scaled.map_or_else(
-            || {
-                widget::text(fl!("select-region"))
-                    .style(cosmic::theme::text::accent)
-                    .into()
-            },
-            |rectangle| {
-                let dimensions = format!(
-                    "{:.0}×{:.0}@{:.0},{:.0}",
-                    rectangle.width, rectangle.height, rectangle.x, rectangle.y
-                );
-                let label = widget::text(fl!("selection", dimensions = dimensions.clone()))
-                    .style(cosmic::theme::text::accent);
-
-                widget::mouse_area(label)
-                    .on_press(Message::CopySelectionDimensions(dimensions))
-                    .interaction(iced::mouse::Interaction::Pointer)
-                    .into()
-            },
+        let seek_duration = Duration::from_secs(5);
+        let pause = icon("media-playback-pause-symbolic");
+        let start = icon("media-playback-start-symbolic");
+        let forward = icon("media-seek-forward-symbolic").on_press(Message::VideoPlayer(
+            video_player_widget::Message::Playback(
+                video_player_widget::PlayerMessage::SeekForward(seek_duration),
+            ),
+        ));
+        let backward = icon("media-skip-backward-symbolic").on_press(Message::VideoPlayer(
+            video_player_widget::Message::Playback(
+                video_player_widget::PlayerMessage::SeekBackward(seek_duration),
+            ),
+        ));
+        let play_button = if player.is_paused() { start } else { pause }.on_press(
+            Message::VideoPlayer(video_player_widget::Message::Playback(
+                video_player_widget::PlayerMessage::PauseToggle,
+            )),
         );
 
-        let find_subs = widget::button(widget::text(fl!("find-subtitles")));
-        let find_subs = if self.video_player.path().is_some() {
-            find_subs
-                .on_press(Message::StartSubtitleDisplay)
-                .style(cosmic::theme::button::suggested)
-        } else {
-            find_subs
-        };
+        let slider = player.slider().map(playback_map);
+        let current = player
+            .current_time()
+            .apply(format_duration)
+            .apply(widget::text)
+            .font(Font::MONOSPACE);
 
-        let slider = self
-            .video_player
-            .controller()
-            .map(|x| x.inner.info.video_time.as_secs_f64())
-            .map(|video_time| {
-                widget::slider(
-                    0.0..=video_time,
-                    self.video_player.current_time().as_secs_f64(),
-                    |x| {
-                        Message::VideoPlayer(video_player_widget::Message::SeekAbsolute(
-                            Duration::from_secs_f64(x),
-                        ))
-                    },
-                )
-            });
+        let total = player
+            .video_duration()
+            .apply(format_duration)
+            .apply(widget::text)
+            .font(Font::MONOSPACE);
 
-        let current_time = widget::text(self.video_player.current_time().apply(format_duration))
+        let row = widget::row!(backward, play_button, forward, current, slider, total)
+            .spacing(theme::spacing().space_s)
+            .align_y(Vertical::Center)
+            .apply(widget::container)
+            .padding(theme::spacing().space_m)
             .width(Length::Fill)
-            .align_x(Horizontal::Right);
-
-        widget::column! {
-            full_img,
-            cropped_img,
-            slider,
-            current_time,
-            widget::row! {
-                load_video,
-                reset_btn,
-                selection_label,
-                skip_backward,
-                skip_forward,
-                find_subs,
-            }
-            .spacing(space_s)
-            .align_y(Alignment::Center)
-        }
-        .spacing(space_s)
-        .height(Length::Fill)
-        .align_x(Alignment::Center)
-        .into()
+            .style(vse_ui::theme::container::card);
+        row.into()
     }
 
     fn subscription(&self) -> Subscription<Message> {
@@ -246,7 +183,11 @@ impl Model {
     }
 
     fn recompute_scaled_selection(&mut self) {
-        let Some((_, size)) = self.video_player.allocation() else {
+        let Some(player) = &self.video_player else {
+            self.screenshot_selection_scaled = None;
+            return;
+        };
+        let Some((_, size)) = player.allocation() else {
             self.screenshot_selection_scaled = None;
             return;
         };
@@ -270,8 +211,9 @@ impl Model {
     const fn scaled_selection_needs_recomputation(message: &Message) -> bool {
         matches!(
             message,
-            Message::VideoPlayer(video_player_widget::Message::VideoFrameAllocated(_))
-                | Message::Canvas(_)
+            Message::VideoPlayer(video_player_widget::Message::Playback(
+                video_player_widget::PlayerMessage::VideoFrameAllocated(_)
+            )) | Message::Canvas(_)
                 | Message::ResetSelection
         )
     }

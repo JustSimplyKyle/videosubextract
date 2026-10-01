@@ -14,6 +14,12 @@ pub fn button<'a, Message>(
     iced::widget::button(content).style(crate::theme::button::standard)
 }
 
+pub fn icon_button<'a, Message>(
+    content: impl Into<crate::Element<'a, Message>>,
+) -> iced::widget::Button<'a, Message, crate::Theme> {
+    iced::widget::button(content).style(crate::theme::button::icon)
+}
+
 pub mod icon {
     use std::{cell::RefCell, collections::HashMap};
 

@@ -148,7 +148,6 @@ enum Direction {
 
 impl VideoPlayerController {
     fn seek(&self, delta: Duration, direction: Direction) -> eyre::Result<()> {
-        println!("attempt seeking {:2}s", delta.as_secs_f64());
         let mut state = self
             .inner
             .state

@@ -1,5 +1,5 @@
 use super::*;
-use crate::{app::ReportLike, apply_traits::ApplyConditional, impl_report_residual};
+use crate::{app::ReportLike, impl_report_residual};
 use cosmic::Apply;
 use eyre::Context;
 use iced::advanced::graphics::core::length::Constraint;
@@ -7,25 +7,39 @@ use iced::alignment::Horizontal;
 use iced::futures::SinkExt;
 use image::RgbaImage;
 use rfd::AsyncFileDialog;
-use std::{env::current_dir, path::PathBuf, sync::Arc, time::Duration};
+use std::{path::PathBuf, time::Duration};
 use vse_ui as cosmic;
 
-#[derive(Default)]
-pub struct Model {
-    video_path: Option<PathBuf>,
-    video_controller: Option<VideoPlayerController>,
+/// A missing player means no video has been loaded.
+pub type Model = Option<Player>;
+
+/// Constructed only after opening the video and creating its controller succeed.
+pub struct Player {
+    video_path: PathBuf,
+    video_controller: VideoPlayerController,
     video_allocation: Option<(widget::image::Allocation, iced::Size)>,
     current_time: Duration,
     // Keep the requested position visible while pre-seek frames drain.
     pending_seek: Option<Duration>,
+    paused: bool,
     is_allocating_frame: bool,
 }
 
 #[derive(derive_more::Debug, Clone)]
 pub enum Message {
+    Loading(LoadingMessage),
+    Playback(PlayerMessage),
+}
+
+#[derive(Debug, Clone)]
+pub enum LoadingMessage {
     PickVideo,
     VideoFilePicked(Option<PathBuf>),
     LoadVideo(PathBuf),
+}
+
+#[derive(derive_more::Debug, Clone)]
+pub enum PlayerMessage {
     #[debug("{}x{}@{}", image.width(), image.height(), format_duration(*timestamp))]
     VideoFrame {
         image: RgbaImage,
@@ -36,15 +50,16 @@ pub enum Message {
     SeekBackward(Duration),
     SeekAbsolute(Duration),
     VideoError(String),
+    PauseToggle,
 }
 
-pub enum Event {
-    Run(Task<Message>),
+pub enum Event<M = Message> {
+    Run(Task<M>),
     Error(eyre::Report),
     None,
 }
 
-impl ReportLike for Event {
+impl<M> ReportLike for Event<M> {
     fn err(e: eyre::Report) -> Self {
         Self::Error(e)
     }
@@ -54,40 +69,102 @@ impl ReportLike for Event {
 }
 
 impl_report_residual!(Event);
+impl_report_residual!(Event<PlayerMessage>);
 
-impl Model {
-    fn update(&mut self, message: Message) -> Event {
-        match message {
-            Message::PickVideo => Task::perform(
-                async move {
-                    let dialog = AsyncFileDialog::new().add_filter(
-                        fl!("video"),
-                        &["mkv", "mp4", "avi", "mov", "webm", "flv", "wmv"],
-                    );
-                    let file = dialog.pick_file().await;
-                    file.map(|file| file.path().to_path_buf())
-                },
-                Message::VideoFilePicked,
-            )
-            .apply(Event::Run),
-            Message::VideoFilePicked(Some(path)) => self.update(Message::LoadVideo(path)),
-            Message::VideoFilePicked(None) => Event::None,
-            Message::LoadVideo(path) => {
-                let input = ffmpeg_the_third::format::input(&path)
-                    .wrap_err("opening the video with ffmpeg")?;
-                let (controller, _) = create_video_player::<false>(
-                    input,
-                    None,
-                    crate::config::ProcessingResolution::None,
-                )?;
-                self.video_path = Some(path);
-                self.video_controller = Some(controller);
-                self.video_allocation = None;
-                self.current_time = Duration::ZERO;
-                self.pending_seek = None;
-                Event::None
+impl<M: Send + 'static> Event<M> {
+    fn map<N: Send + 'static>(self, f: impl Fn(M) -> N + Send + Sync + 'static) -> Event<N> {
+        match self {
+            Self::Run(task) => Event::Run(task.map(f)),
+            Self::Error(error) => Event::Error(error),
+            Self::None => Event::None,
+        }
+    }
+}
+
+impl Player {
+    pub fn load(path: PathBuf) -> eyre::Result<Self> {
+        let input =
+            ffmpeg_the_third::format::input(&path).wrap_err("opening the video with ffmpeg")?;
+        let (controller, _) =
+            create_video_player::<false>(input, None, crate::config::ProcessingResolution::None)?;
+        Ok(Self {
+            video_path: path,
+            video_controller: controller,
+            video_allocation: None,
+            current_time: Duration::ZERO,
+            pending_seek: None,
+            paused: false,
+            is_allocating_frame: false,
+        })
+    }
+}
+
+fn update(model: &mut Model, message: Message) -> Event {
+    match message {
+        Message::Loading(LoadingMessage::PickVideo) => Task::perform(
+            async move {
+                let dialog = AsyncFileDialog::new().add_filter(
+                    fl!("video"),
+                    &["mkv", "mp4", "avi", "mov", "webm", "flv", "wmv"],
+                );
+                dialog
+                    .pick_file()
+                    .await
+                    .map(|file| file.path().to_path_buf())
+            },
+            |path| Message::Loading(LoadingMessage::VideoFilePicked(path)),
+        )
+        .apply(Event::Run),
+        Message::Loading(
+            LoadingMessage::VideoFilePicked(Some(path)) | LoadingMessage::LoadVideo(path),
+        ) => {
+            // Build the replacement first so a failed load preserves the current video.
+            *model = Some(Player::load(path)?);
+            Event::None
+        }
+        Message::Loading(LoadingMessage::VideoFilePicked(None)) => Event::None,
+        Message::Playback(message) => {
+            let Some(player) = model.as_mut() else {
+                return Event::None;
+            };
+            if let PlayerMessage::VideoError(error) = message {
+                *model = None;
+                return Event::Error(eyre::eyre!("video playback failed: {error}"));
             }
-            Message::VideoFrame {
+            player.update(message).map(Message::Playback)
+        }
+    }
+}
+
+fn subscription(model: &Model) -> Subscription<Message> {
+    model.as_ref().map_or_else(Subscription::none, |player| {
+        player.subscription().map(Message::Playback)
+    })
+}
+
+fn view(model: &Model) -> Element<'_, Message> {
+    let load = widget::button(widget::text(if model.is_some() {
+        fl!("change-video")
+    } else {
+        fl!("load-video")
+    }))
+    .on_press(Message::Loading(LoadingMessage::PickVideo));
+    match model {
+        Some(player) => widget::column![player.view().map(Message::Playback), load]
+            .spacing(cosmic::theme::spacing().space_s)
+            .into(),
+        None => load.style(cosmic::theme::button::suggested).into(),
+    }
+}
+
+impl Player {
+    pub const fn is_paused(&self) -> bool {
+        self.paused
+    }
+
+    fn update(&mut self, message: PlayerMessage) -> Event<PlayerMessage> {
+        match message {
+            PlayerMessage::VideoFrame {
                 image: frame,
                 timestamp,
             } => {
@@ -112,13 +189,13 @@ impl Model {
                 );
                 widget::image::allocate(handle)
                     .map(move |result| {
-                        Message::VideoFrameAllocated(
+                        PlayerMessage::VideoFrameAllocated(
                             result.map_err(|error| error.to_string()).map(|x| (x, size)),
                         )
                     })
                     .apply(Event::Run)
             }
-            Message::VideoFrameAllocated(allocation) => {
+            PlayerMessage::VideoFrameAllocated(allocation) => {
                 self.is_allocating_frame = false;
                 match allocation {
                     Ok(allocation) => {
@@ -130,92 +207,58 @@ impl Model {
                     )),
                 }
             }
-            Message::SeekForward(duration) => {
+            PlayerMessage::SeekForward(duration) => {
                 let target = self
                     .current_time()
                     .saturating_add(duration)
                     .min(self.video_duration());
                 self.seek(target)
             }
-            Message::SeekBackward(duration) => {
+            PlayerMessage::SeekBackward(duration) => {
                 self.seek(self.current_time().saturating_sub(duration))
             }
-            Message::SeekAbsolute(duration) => self.seek(duration.min(self.video_duration())),
-            Message::VideoError(message) => {
-                self.video_controller = None;
-                Event::Error(eyre::eyre!("video playback failed: {message}"))
+            PlayerMessage::SeekAbsolute(duration) => self.seek(duration.min(self.video_duration())),
+            PlayerMessage::VideoError(error) => {
+                Event::Error(eyre::eyre!("video playback failed: {error}"))
             }
-        }
-    }
-
-    fn seek(&mut self, target: Duration) -> Event {
-        match self
-            .video_controller
-            .as_ref()
-            .map(|controller| controller.seek_absolute(target))?
-        {
-            Err(error) => {
-                Event::Error(error.wrap_err(format!("seeking to {:.2}s", target.as_secs_f64())))
-            }
-            Ok(()) => {
-                self.pending_seek = Some(target);
+            PlayerMessage::PauseToggle => {
+                self.paused = true;
                 Event::None
             }
         }
     }
 
-    fn video_duration(&self) -> Duration {
+    pub fn seek(&mut self, target: Duration) -> Event<PlayerMessage> {
         self.video_controller
-            .as_ref()
-            .map_or(Duration::ZERO, |controller| {
-                controller.inner.info.video_time
-            })
+            .seek_absolute(target)
+            .wrap_err_with(|| format!("seeking to {:.2}s", target.as_secs_f64()))?;
+        self.pending_seek = Some(target);
+        Event::None
     }
 
-    fn subscription(&self) -> Subscription<Message> {
-        self.video_controller
-            .as_ref()
-            .map_or_else(Subscription::none, |controller| {
-                iced::Subscription::run_with(controller.clone(), |controller| {
-                    video_frame_stream(controller.inner.clone(), controller.inner.info.frame_rate)
-                })
-            })
+    pub fn video_duration(&self) -> Duration {
+        self.video_controller.inner.info.video_time
     }
 
-    fn view(&self) -> Element<'_, Message> {
-        let image = widget::image(self.frame_handle())
-            .content_fit(iced::ContentFit::Contain)
-            .expand(true)
-            .width(Length::Shrink)
-            .height(Length::Shrink);
-        // Fit within the space left by the controls, releasing unused height.
-        let image = widget::container(image)
-            .center_x(Length::Fill)
-            .height(Length::Fluid(Constraint::Max));
-        let load_video = widget::button(widget::text(if self.video_path.is_none() {
-            fl!("load-video")
-        } else {
-            fl!("change-video")
-        }))
-        .on_press(Message::PickVideo);
-        let load_video = if self.video_path.is_none() {
-            load_video.style(cosmic::theme::button::suggested)
-        } else {
-            load_video
-        };
+    fn subscription(&self) -> Subscription<PlayerMessage> {
+        iced::Subscription::run_with(
+            VideoFrameStreamData {
+                controller: self.controller().clone(),
+                pause: self.is_paused(),
+            },
+            |data| video_frame_stream(data.clone()),
+        )
+    }
+
+    fn view(&self) -> Element<'_, PlayerMessage> {
+        let image = self.image(0.);
         let backward = widget::button(icon::from_name("media-seek-backward-symbolic"))
-            .on_press(Message::SeekBackward(Duration::from_secs(5)))
+            .on_press(PlayerMessage::SeekBackward(Duration::from_secs(5)))
             .style(cosmic::theme::button::nav_toggle);
         let forward = widget::button(icon::from_name("media-seek-forward-symbolic"))
-            .on_press(Message::SeekForward(Duration::from_secs(5)))
+            .on_press(PlayerMessage::SeekForward(Duration::from_secs(5)))
             .style(cosmic::theme::button::nav_toggle);
-        let slider = self.video_controller.as_ref().map(|controller| {
-            widget::slider(
-                0.0..=controller.inner.info.video_time.as_secs_f64(),
-                self.current_time().as_secs_f64(),
-                |seconds| Message::SeekAbsolute(Duration::from_secs_f64(seconds)),
-            )
-        });
+        let slider = self.slider();
         let current_time = widget::text(format_duration(self.current_time()))
             .width(Length::Fill)
             .align_x(Horizontal::Right);
@@ -223,7 +266,7 @@ impl Model {
         widget::column![
             image,
             slider,
-            widget::row![load_video, backward, forward, current_time]
+            widget::row![backward, forward, current_time]
                 .spacing(cosmic::theme::spacing().space_s)
                 .align_y(Alignment::Center),
         ]
@@ -231,15 +274,24 @@ impl Model {
         .into()
     }
 
-    pub fn path(&self) -> Option<&PathBuf> {
-        self.video_path.as_ref()
+    pub fn slider(&self) -> Element<'_, PlayerMessage> {
+        widget::slider(
+            0.0..=self.video_duration().as_secs_f64(),
+            self.current_time().as_secs_f64(),
+            |seconds| PlayerMessage::SeekAbsolute(Duration::from_secs_f64(seconds)),
+        )
+        .into()
     }
 
-    pub fn controller(&self) -> Option<&VideoPlayerController> {
-        self.video_controller.as_ref()
+    pub const fn path(&self) -> &PathBuf {
+        &self.video_path
     }
 
-    pub fn allocation(&self) -> Option<&(widget::image::Allocation, iced::Size)> {
+    pub const fn controller(&self) -> &VideoPlayerController {
+        &self.video_controller
+    }
+
+    pub const fn allocation(&self) -> Option<&(widget::image::Allocation, iced::Size)> {
         self.video_allocation.as_ref()
     }
 
@@ -247,11 +299,34 @@ impl Model {
         self.pending_seek.unwrap_or(self.current_time)
     }
 
-    pub fn frame_handle(&self) -> widget::image::Handle {
-        self.video_allocation.as_ref().map_or_else(
-            || widget::image::Handle::from_rgba(1920, 1080, [0, 0, 0, 255].repeat(1920 * 1080)),
-            |(allocation, _)| allocation.handle().clone(),
-        )
+    pub fn frame_handle(&self) -> Option<widget::image::Handle> {
+        self.video_allocation
+            .as_ref()
+            .map(|x| x.0.handle())
+            .cloned()
+    }
+
+    pub fn image(&self, radius: f32) -> Element<'_, PlayerMessage> {
+        let image: Element<'_, PlayerMessage> = self
+            .frame_handle()
+            .map(widget::image)
+            .map(|x| {
+                x.content_fit(iced::ContentFit::Contain)
+                    .expand(true)
+                    .width(Length::Shrink)
+                    .height(Length::Shrink)
+                    .border_radius(radius)
+            })
+            .map_or_else(|| widget::space().into(), Element::from);
+
+        // Reserve the controls' intrinsic height first, then fit the frame into
+        // the remaining space. Expand + Shrink keeps both image bounds tight
+        // to its aspect ratio. Fluid(Max) releases unused height so the controls
+        // sit directly below the image instead of at the bottom of the page.
+        widget::container(image)
+            .center_x(Length::Fill)
+            .height(Length::Fluid(Constraint::Max))
+            .into()
     }
 }
 
@@ -261,28 +336,45 @@ fn seek_has_settled(target: Duration, timestamp: Duration) -> bool {
     target.abs_diff(timestamp) <= SEEK_SETTLE_TOLERANCE
 }
 
+#[derive(Clone)]
+struct VideoFrameStreamData {
+    controller: VideoPlayerController,
+    pause: bool,
+}
+
+impl std::hash::Hash for VideoFrameStreamData {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.controller.hash(state);
+    }
+}
+
 fn video_frame_stream(
-    inner: Arc<InnerPlayer>,
-    frame_rate: f64,
-) -> impl futures::Stream<Item = Message> + Send {
+    VideoFrameStreamData { controller, pause }: VideoFrameStreamData,
+) -> impl futures::Stream<Item = PlayerMessage> + Send {
+    let inner = controller.inner;
+    let frame_rate = inner.info.frame_rate;
     let frame_duration = Duration::from_secs_f64(1.0 / frame_rate.max(1.0));
 
     iced::stream::channel(
         2,
-        async move |mut output: futures::channel::mpsc::Sender<Message>| {
-            let (sender, receiver) = async_channel::bounded::<Message>(2);
+        async move |mut output: futures::channel::mpsc::Sender<PlayerMessage>| {
+            let (sender, receiver) = async_channel::bounded::<PlayerMessage>(2);
             smol::spawn(smol::unblock(move || {
                 let mut frames = video_player::VideoPlayerIterator::<false> {
                     inner,
                     current_generation: 0,
                 };
                 loop {
+                    if pause {
+                        std::hint::spin_loop();
+                        continue;
+                    }
                     let started = std::time::Instant::now();
                     match frames.next() {
                         Some(Ok(frame)) => match video_player::mat_to_rgba(&frame.mat) {
                             Ok(image) => {
                                 if sender
-                                    .send_blocking(Message::VideoFrame {
+                                    .send_blocking(PlayerMessage::VideoFrame {
                                         image,
                                         timestamp: frame.timestamp,
                                     })
@@ -293,14 +385,14 @@ fn video_frame_stream(
                             }
                             Err(error) => {
                                 sender
-                                    .send_blocking(Message::VideoError(error.to_string()))
+                                    .send_blocking(PlayerMessage::VideoError(error.to_string()))
                                     .ok();
                                 break;
                             }
                         },
                         Some(Err(error)) => {
                             sender
-                                .send_blocking(Message::VideoError(error.to_string()))
+                                .send_blocking(PlayerMessage::VideoError(error.to_string()))
                                 .ok();
                             break;
                         }
@@ -330,14 +422,14 @@ impl Composition for Model {
     type SubscriptionContext<'a> = ();
 
     fn view(&self, (): Self::ViewContext<'_>) -> Element<'_, Self::Message> {
-        Self::view(self)
+        view(self)
     }
 
     fn update(&mut self, message: Self::Message, (): Self::UpdateContext<'_>) -> Self::Event {
-        Self::update(self, message)
+        update(self, message)
     }
 
     fn subscription(&self, (): Self::SubscriptionContext<'_>) -> Subscription<Self::Message> {
-        Self::subscription(self)
+        subscription(self)
     }
 }
