@@ -121,7 +121,7 @@ impl<'a, Message: Clone + 'a> From<Shell<'a, Message>> for Element<'a, Message> 
 
         let dialog = shell.dialog;
         let shell: Element<'a, Message> =
-            iced::widget::stack![content, iced::widget::bottom_right(toasts)].into();
+            iced::widget::stack![content, iced::widget::bottom_center(toasts)].into();
 
         if let Some(dialog) = dialog {
             iced::widget::stack![

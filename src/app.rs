@@ -570,7 +570,10 @@ impl AppModel {
                 }
                 prepare::Event::Run(task) => task.map(Message::Prepare),
                 prepare::Event::CopySelectionDimensions(value) => {
-                    iced::clipboard::write(value).discard()
+                    let copy = iced::clipboard::write(value.clone());
+                    let update =
+                        self.update(Message::PushToast(format!("{value} copied to clipboard")));
+                    Task::batch([copy.discard(), update])
                 }
                 prepare::Event::Error(error) => Task::done(Message::ErrorReported(Arc::new(error))),
                 prepare::Event::None => Task::none(),
