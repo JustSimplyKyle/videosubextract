@@ -1,10 +1,12 @@
 use crate::impl_report_residual;
 use crate::{app::ReportLike, apply_traits::ApplyConditional};
+use iced::Color;
+use iced::font::Weight;
 use vse_ui::theme::WithRadius;
 
 use super::*;
 use cosmic::Element;
-use iced::{Border, Font, alignment::Vertical};
+use iced::{Font, alignment::Vertical};
 use vse_ui::{
     self as cosmic, Apply,
     theme::{self, COSMIC},
@@ -49,6 +51,35 @@ impl_report_residual!(Event);
 
 const fn playback_map(x: video_player_widget::PlayerMessage) -> Message {
     Message::VideoPlayer(video_player_widget::Message::Playback(x))
+}
+
+fn selection_details_translation(
+    selection: iced::Rectangle,
+    details: iced::Rectangle,
+    viewport: iced::Rectangle,
+    canvas_size: iced::Size,
+) -> iced::Vector {
+    // The selection is canvas-local; the float's bounds and viewport are absolute.
+    let canvas = iced::Rectangle::new(details.position(), canvas_size);
+    let visible = canvas.intersection(&viewport).unwrap_or(viewport);
+    let gap = 8.0;
+    let anchor = details.position() + iced::Vector::new(selection.x, selection.y);
+    let above = anchor.y - details.height - gap;
+    let y = if above >= visible.y {
+        above
+    } else {
+        anchor.y + gap
+    };
+    let x = anchor.x.clamp(
+        visible.x,
+        (visible.x + visible.width - details.width).max(visible.x),
+    );
+    let y = y.clamp(
+        visible.y,
+        (visible.y + visible.height - details.height).max(visible.y),
+    );
+
+    iced::Vector::new(x - details.x, y - details.y)
 }
 
 impl Model {
@@ -116,13 +147,40 @@ impl Model {
         let img = player
             .image(COSMIC.corner_radii.radius_l[0])
             .map(playback_map);
+
         let selection_canvas = widget::canvas(selection_canvas::SelectionProgram::default())
             .width(Length::Fill)
             .height(Length::Fill)
             .apply(Element::from)
             .map(Message::Canvas);
 
-        let img_with_selection = widget::stack![img, selection_canvas];
+        let canvas_size = self.canvas_dimensions.size();
+        let s = self
+            .screenshot_selection
+            .and_then(|x| Some((x, self.screenshot_selection_scaled?)))
+            .map(|(s, scaled)| {
+                let format_dimensions = |s: iced::Rectangle| {
+                    format!("{:.0} x {:.0} @ {:.0}, {:.0}", s.width, s.height, s.x, s.y)
+                };
+                widget::text(format_dimensions(scaled))
+                    .font(Font::MONOSPACE.weight(Weight::Bold))
+                    .color(Color::BLACK)
+                    .apply(widget::button)
+                    .on_press(
+                        scaled
+                            .apply(format_dimensions)
+                            .apply(|x| x.chars().filter(|x| !x.is_whitespace()).collect::<String>())
+                            .apply(Message::CopySelectionDimensions),
+                    )
+                    .style(|x, y| theme::button::suggested(x, y).with_radius(COSMIC.radius_s()[0]))
+                    .apply(widget::float)
+                    .translate(move |original, viewport| {
+                        selection_details_translation(s, original, viewport, canvas_size)
+                    })
+                    .apply(Element::from)
+            });
+
+        let img_with_selection = widget::stack![img, selection_canvas, s];
 
         widget::column![img_with_selection, Self::video_controls(player)]
             .spacing(theme::spacing().space_s)
@@ -268,6 +326,65 @@ impl Composition for Model {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selection_details_stay_visible_at_every_canvas_corner() {
+        let details =
+            iced::Rectangle::new(iced::Point::new(120.0, 80.0), iced::Size::new(240.0, 36.0));
+        let viewport = iced::Rectangle::with_size(iced::Size::new(1200.0, 900.0));
+        for canvas_size in [iced::Size::new(800.0, 450.0), iced::Size::new(320.0, 180.0)] {
+            let canvas = iced::Rectangle::new(details.position(), canvas_size);
+            for x in [0.0, canvas_size.width - 20.0] {
+                for y in [0.0, canvas_size.height - 20.0] {
+                    let selection =
+                        iced::Rectangle::new(iced::Point::new(x, y), iced::Size::new(20.0, 20.0));
+                    let translation =
+                        selection_details_translation(selection, details, viewport, canvas_size);
+                    let placed =
+                        iced::Rectangle::new(details.position() + translation, details.size());
+                    assert!(placed.x >= canvas.x && placed.y >= canvas.y);
+                    assert!(placed.x + placed.width <= canvas.x + canvas.width);
+                    assert!(placed.y + placed.height <= canvas.y + canvas.height);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn selection_details_follow_the_selection_above_when_there_is_room() {
+        let details =
+            iced::Rectangle::new(iced::Point::new(120.0, 80.0), iced::Size::new(240.0, 36.0));
+        let selection = iced::Rectangle::new(
+            iced::Point::new(100.0, 100.0),
+            iced::Size::new(200.0, 100.0),
+        );
+        let canvas_size = iced::Size::new(800.0, 450.0);
+        let viewport = iced::Rectangle::with_size(iced::Size::new(1200.0, 900.0));
+        assert_eq!(
+            selection_details_translation(selection, details, viewport, canvas_size),
+            iced::Vector::new(100.0, 56.0),
+        );
+    }
+
+    #[test]
+    fn selection_details_respect_a_clipped_viewport() {
+        let details =
+            iced::Rectangle::new(iced::Point::new(120.0, 80.0), iced::Size::new(240.0, 36.0));
+        let viewport = iced::Rectangle::new(
+            iced::Point::new(150.0, 100.0),
+            iced::Size::new(400.0, 200.0),
+        );
+        let canvas_size = iced::Size::new(800.0, 450.0);
+        for position in [iced::Point::ORIGIN, iced::Point::new(780.0, 430.0)] {
+            let selection = iced::Rectangle::new(position, iced::Size::new(20.0, 20.0));
+            let translation =
+                selection_details_translation(selection, details, viewport, canvas_size);
+            let placed = iced::Rectangle::new(details.position() + translation, details.size());
+            assert!(placed.x >= viewport.x && placed.y >= viewport.y);
+            assert!(placed.x + placed.width <= viewport.x + viewport.width);
+            assert!(placed.y + placed.height <= viewport.y + viewport.height);
+        }
+    }
 
     #[test]
     fn canvas_resize_keeps_the_crop_in_sync_with_the_overlay() {

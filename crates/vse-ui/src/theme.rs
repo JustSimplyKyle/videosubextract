@@ -81,7 +81,7 @@ pub fn iced_theme() -> Theme {
         },
     )
 }
-fn color(value: Srgba) -> Color {
+pub fn color(value: Srgba) -> Color {
     Color::from_rgba(value.red, value.green, value.blue, value.alpha)
 }
 pub(crate) fn icon_color() -> Color {

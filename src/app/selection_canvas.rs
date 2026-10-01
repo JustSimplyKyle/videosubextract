@@ -4,6 +4,8 @@ use iced::Point;
 use iced::Rectangle;
 use iced::mouse;
 use iced::widget::canvas;
+use vse_ui::theme::COSMIC;
+use vse_ui::theme::color;
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum ClickState {
@@ -67,6 +69,7 @@ pub struct SelectionCanvas {
 #[derive(Default)]
 pub struct SelectionProgram {
     reset_generation: u32,
+    display_dimensions: bool,
 }
 
 pub const HANDLE_RADIUS: f32 = 7.0;
@@ -499,7 +502,7 @@ struct SelectionBorder {
 
 impl SelectionBorder {
     fn color() -> Color {
-        Color::from_rgb(1.0, 0.0, 0.0)
+        color(COSMIC.accent.base)
     }
 
     fn draw(self, frame: &mut canvas::Frame<iced::Renderer>) {
