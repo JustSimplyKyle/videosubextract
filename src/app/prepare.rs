@@ -228,7 +228,7 @@ impl Model {
                 video_player_widget::PlayerMessage::SeekForward(seek_duration),
             ),
         ));
-        let backward = icon("media-skip-backward-symbolic").on_press(Message::VideoPlayer(
+        let backward = icon("media-seek-backward-symbolic").on_press(Message::VideoPlayer(
             video_player_widget::Message::Playback(
                 video_player_widget::PlayerMessage::SeekBackward(seek_duration),
             ),

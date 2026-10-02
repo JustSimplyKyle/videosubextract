@@ -105,8 +105,6 @@ pub struct AppModel {
     errors: Vec<Arc<eyre::Report>>,
 }
 
-struct ToastManager {}
-
 #[derive(Debug, Clone)]
 pub enum Message {
     SelectPage(Page),
@@ -496,8 +494,6 @@ impl AppModel {
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
-        // let s = iced::runtime::window::screenshot(id);
-        // window::latest().::screenshotceenshot
         match message {
             Message::SelectPage(page) => {
                 if page == Page::PostProduction {
@@ -702,13 +698,20 @@ impl AppModel {
         let header = widget::row![
             header,
             widget::space().width(Length::Fill),
-            self.prepare.title_actions()
+            match self.active_page {
+                Page::Prepare => {
+                    self.prepare.title_actions().map(Message::Prepare)
+                }
+                _ => {
+                    widget::space().apply(Element::from)
+                }
+            }
         ]
         .align_y(Vertical::Center)
         .apply(Element::from);
 
         let page = widget::column! {
-            header.map(Message::Prepare),
+            header,
             content,
         }
         .spacing(theme::spacing().space_m);
