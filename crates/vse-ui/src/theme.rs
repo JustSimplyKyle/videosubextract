@@ -223,6 +223,18 @@ pub fn container_style(
 }
 pub mod container {
     use super::*;
+    /// libcosmic's tooltip surface and corner radius.
+    pub fn tooltip(_: &Theme) -> ::iced::widget::container::Style {
+        ::iced::widget::container::Style {
+            background: Some(Background::Color(color(COSMIC.palette.neutral_2))),
+            border: Border {
+                radius: radius(COSMIC.corner_radii.radius_l),
+                ..Border::default()
+            },
+            ..Default::default()
+        }
+    }
+
     pub fn navigation(_: &Theme) -> ::iced::widget::container::Style {
         let surface = COSMIC.primary(false);
         container_style(surface, COSMIC.corner_radii.radius_s)

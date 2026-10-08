@@ -28,6 +28,27 @@ pub fn text_input<'a, Message: Clone>(
     iced::widget::text_input(placeholder, value).style(crate::theme::text_input::standard)
 }
 
+/// COSMIC tooltip defaults, adapted from libcosmic's widget helper.
+pub mod tooltip {
+    use crate::Element;
+
+    pub use iced::widget::tooltip::Position;
+    pub type Tooltip<'a, Message> = iced::widget::Tooltip<'a, Message, crate::Theme>;
+
+    /// Fit tooltip contents automatically and keep the popup inside the viewport.
+    pub fn tooltip<'a, Message: 'a>(
+        content: impl Into<Element<'a, Message>>,
+        tooltip: impl Into<Element<'a, Message>>,
+        position: Position,
+    ) -> Tooltip<'a, Message> {
+        let tooltip = crate::widget::container(tooltip).padding(crate::theme::spacing().space_xxs);
+        Tooltip::new(content, tooltip, position)
+            .style(crate::theme::container::tooltip)
+            .gap(1)
+    }
+}
+
+pub use tooltip::{Tooltip, tooltip};
 pub mod icon {
     use std::{cell::RefCell, collections::HashMap};
 
