@@ -5692,6 +5692,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "springs"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7c2f0099b088365364789b43caa18be01d1e8e86330b9613d7d416ab1ce10eb0"
+
+[[package]]
 name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6401,6 +6407,7 @@ dependencies = [
  "cosmic-theme",
  "iced",
  "indexmap",
+ "springs",
 ]
 
 [[package]]

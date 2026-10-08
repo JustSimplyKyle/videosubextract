@@ -3,6 +3,9 @@
 pub use iced::widget::*;
 pub use iced::widget::{canvas, image, text_editor};
 
+pub mod switch;
+pub use switch::{Switch, switch};
+
 /// Creates a button using the default COSMIC button appearance.
 ///
 /// This intentionally shadows Iced's unstyled `button` helper while keeping

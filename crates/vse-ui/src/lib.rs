@@ -6,6 +6,7 @@ pub type Element<'a, Message> = iced::Element<'a, Message, theme::Theme>;
 pub use theme::Theme;
 
 pub mod components;
+pub mod motion;
 pub mod shell;
 pub mod theme;
 pub mod widget;
