@@ -1,13 +1,23 @@
-use iced::widget::{Component, column, component, container, row, text, toggler};
+use iced::widget::{Component, column, component, row, rule, text, toggler};
 use iced::{Alignment, Element, Fill, Length, Renderer};
 
 use crate::components::MessageEmitter;
+use crate::widget::text::title3;
 
 #[must_use]
 pub fn view_column<'a, Message: 'a>(
     items: Vec<Element<'a, Message>>,
 ) -> iced::widget::Column<'a, Message> {
-    column(items).spacing(24).width(Fill)
+    items
+        .into_iter()
+        .intersperse_with(|| {
+            rule::horizontal(1)
+                .style(crate::theme::rule::settings)
+                .into()
+        })
+        .collect::<iced::widget::Column<Message>>()
+        .spacing(crate::theme::spacing().space_m)
+        .width(Fill)
 }
 
 #[must_use]
@@ -39,26 +49,108 @@ impl<'a, Message> Section<'a, Message> {
 
 impl<'a, Message: 'a> From<Section<'a, Message>> for Element<'a, Message> {
     fn from(section: Section<'a, Message>) -> Self {
-        let content = container(column(section.items).spacing(12))
-            .padding(16)
-            .width(Fill)
-            .style(crate::theme::container::list);
+        let spacing = crate::theme::spacing();
+        let content = column(section.items).spacing(spacing.space_s).width(Fill);
         match section.title {
-            Some(title) => column![text(title).size(18), content].spacing(10).into(),
+            Some(title) => column![text(title).size(18), content]
+                .spacing(spacing.space_s)
+                .width(Fill)
+                .into(),
             None => content.into(),
         }
     }
 }
 
+/// A settings section whose contents can be hidden behind its title row.
+pub fn collapsible_section<'a, Message: Clone + 'a>(
+    title: impl Into<String>,
+    expanded: bool,
+    on_toggle: Message,
+    content: impl Into<Element<'a, Message>>,
+) -> ::iced::widget::Column<'a, Message> {
+    let spacing = crate::theme::spacing();
+    let indicator = if expanded {
+        "go-down-symbolic"
+    } else {
+        "go-next-symbolic"
+    };
+    let header = crate::widget::button(
+        row![
+            title3(title.into()),
+            iced::widget::Space::new().width(Fill),
+            crate::widget::icon::from_name(indicator),
+        ]
+        .align_y(Alignment::Center)
+        .width(Fill),
+    )
+    .on_press(on_toggle)
+    .padding([spacing.space_xxs, spacing.space_xs])
+    .style(crate::theme::button::navigation_inactive)
+    .width(Fill);
+
+    ::iced::widget::Column::with_capacity(2)
+        .push(header)
+        .push(if expanded {
+            content.into()
+        } else {
+            rule::horizontal(1)
+                .style(crate::theme::rule::settings)
+                .into()
+        })
+        .spacing(spacing.space_m)
+}
+
 pub fn item<'a, Message: 'a>(
     label: impl Into<String>,
     control: impl Into<Element<'a, Message>>,
-) -> Element<'a, Message> {
-    row![text(label.into()).width(Fill), control.into()]
-        .align_y(Alignment::Center)
-        .spacing(16)
-        .width(Length::Fill)
-        .into()
+) -> Item<'a, Message> {
+    Item {
+        label: label.into(),
+        control: control.into(),
+        axis: ItemAxis::Horizontal,
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+enum ItemAxis {
+    #[default]
+    Horizontal,
+    Vertical,
+}
+
+pub struct Item<'a, Message> {
+    label: String,
+    control: Element<'a, Message>,
+    axis: ItemAxis,
+}
+
+impl<Message> Item<'_, Message> {
+    /// Places the control below its label instead of beside it.
+    #[must_use]
+    pub const fn vertical(mut self) -> Self {
+        self.axis = ItemAxis::Vertical;
+        self
+    }
+}
+
+impl<'a, Message: 'a> From<Item<'a, Message>> for Element<'a, Message> {
+    fn from(item: Item<'a, Message>) -> Self {
+        let label = text(item.label)
+            .size(14)
+            .style(crate::theme::text::settings_label);
+
+        match item.axis {
+            ItemAxis::Horizontal => row![label.width(Fill), item.control]
+                .align_y(Alignment::Center)
+                .spacing(crate::theme::spacing().space_m)
+                .width(Fill)
+                .into(),
+            ItemAxis::Vertical => column![label, item.control]
+                .spacing(crate::theme::spacing().space_xs)
+                .width(Length::Fill)
+                .into(),
+        }
+    }
 }
 
 /// a builder for a simple togglable settings item row
@@ -132,17 +224,25 @@ impl<'a, Message: 'a> Component<'a, Message> for ToggleItem<'a, Message> {
             .map_or_else(
                 || column![text(self.label.clone())],
                 |description| {
-                    column![text(self.label.clone()), text(description.clone()).size(12)].spacing(2)
+                    column![
+                        text(self.label.clone()),
+                        text(description.clone())
+                            .size(12)
+                            .style(crate::theme::text::settings_label)
+                    ]
+                    .spacing(crate::theme::spacing().space_xxs)
                 },
             )
             .width(Fill);
 
         row![
             labels,
-            toggler(self.is_enabled).on_toggle(ToggleEvent::Changed)
+            toggler(self.is_enabled)
+                .on_toggle(ToggleEvent::Changed)
+                .style(crate::theme::toggler::standard)
         ]
         .align_y(Alignment::Center)
-        .spacing(16)
+        .spacing(crate::theme::spacing().space_m)
         .width(Fill)
         .into()
     }

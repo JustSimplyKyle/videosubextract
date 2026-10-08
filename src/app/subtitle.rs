@@ -49,6 +49,7 @@ use crate::config::{ProcessingResolution, SubtitleDetector};
 use crate::extraction::{self, OcrHandle, Request as ExtractionRequest, Subtitle};
 use crate::impl_report_residual;
 use crate::native_video_sub_finder::NativeSearchParams;
+use crate::ocr::OcrModel;
 use crate::video_player::CropRect;
 use cosmic::widget::text_editor;
 use cosmic::{Apply, Element};

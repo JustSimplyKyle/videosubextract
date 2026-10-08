@@ -20,6 +20,14 @@ pub fn icon_button<'a, Message>(
     iced::widget::button(content).style(crate::theme::button::icon)
 }
 
+/// Creates a text input using the COSMIC settings-control appearance.
+pub fn text_input<'a, Message: Clone>(
+    placeholder: impl iced::widget::text::IntoFragment<'a>,
+    value: impl iced::widget::text::IntoFragment<'a>,
+) -> iced::widget::TextInput<'a, Message, crate::Theme> {
+    iced::widget::text_input(placeholder, value).style(crate::theme::text_input::standard)
+}
+
 pub mod icon {
     use std::{cell::RefCell, collections::HashMap};
 
@@ -85,14 +93,17 @@ pub fn dropdown<'a, Message: Clone + 'a>(
     let options = options.into_iter().map(Into::into).collect::<Vec<_>>();
     let selected = selected.and_then(|index| options.get(index).cloned());
     let indexes = options.clone();
-    iced::widget::pick_list(selected, options, String::clone).on_select(move |value| {
-        on_select(
-            indexes
-                .iter()
-                .position(|candidate| candidate == &value)
-                .unwrap_or_default(),
-        )
-    })
+    iced::widget::pick_list(selected, options, String::clone)
+        .on_select(move |value| {
+            on_select(
+                indexes
+                    .iter()
+                    .position(|candidate| candidate == &value)
+                    .unwrap_or_default(),
+            )
+        })
+        .width(iced::Length::Fill)
+        .style(crate::theme::pick_list::standard)
 }
 
 /// A compact value control with decrement and increment buttons.
@@ -418,24 +429,34 @@ pub mod segmented_control {
     use iced::{Element, Renderer};
 
     pub fn horizontal<T>(model: &SingleSelectModel<T>) -> SegmentedControlBuilder<'_, T> {
-        SegmentedControlBuilder { model }
+        SegmentedControlBuilder { model, fill: false }
     }
 
     pub struct SegmentedControlBuilder<'a, T> {
         model: &'a SingleSelectModel<T>,
+        fill: bool,
     }
     pub struct SegmentedControl<'a, Message, T> {
         model: &'a SingleSelectModel<T>,
+        fill: bool,
         on_activate: crate::components::MessageEmitter<'a, Entity, Message>,
     }
 
     impl<'a, T> SegmentedControlBuilder<'a, T> {
+        /// Makes every segment share the available horizontal space equally.
+        #[must_use]
+        pub const fn fill(mut self) -> Self {
+            self.fill = true;
+            self
+        }
+
         pub fn on_activate<Message>(
             self,
             f: impl Fn(Entity) -> Message + 'a,
         ) -> SegmentedControl<'a, Message, T> {
             SegmentedControl {
                 model: self.model,
+                fill: self.fill,
                 on_activate: Box::new(f),
             }
         }
@@ -453,26 +474,38 @@ pub mod segmented_control {
             let labels = self.model.entries();
             let active = self.model.active();
             let last = labels.len().saturating_sub(1);
+            let fill = self.fill;
             labels
                 .into_iter()
                 .enumerate()
                 .map(|(index, (id, entry))| {
-                    button(text(entry.text()))
-                        .on_press(*id)
-                        .padding([6, 14])
-                        .style(move |theme, status| {
-                            crate::theme::segmented_button(
-                                theme,
-                                status,
-                                active == *id,
-                                index == 0,
-                                index == last,
-                            )
-                        })
-                        .into()
+                    let label = text(entry.text());
+                    let button =
+                        button(label)
+                            .on_press(*id)
+                            .padding([6, 14])
+                            .style(move |theme, status| {
+                                crate::theme::segmented_button(
+                                    theme,
+                                    status,
+                                    active == *id,
+                                    index == 0,
+                                    index == last,
+                                )
+                            });
+                    if fill {
+                        button.width(iced::Fill).into()
+                    } else {
+                        button.into()
+                    }
                 })
                 .apply(row)
                 .spacing(1)
+                .width(if fill {
+                    iced::Length::Fill
+                } else {
+                    iced::Length::Shrink
+                })
                 .into()
         }
     }
@@ -493,8 +526,12 @@ pub mod text {
         text(content).size(28)
     }
 
-    pub fn title3<'a>(content: impl text::IntoFragment<'a>) -> Text<'a> {
+    pub fn title2<'a>(content: impl text::IntoFragment<'a>) -> Text<'a> {
         text(content).size(20)
+    }
+
+    pub fn title3<'a>(content: impl text::IntoFragment<'a>) -> Text<'a> {
+        text(content).size(18)
     }
 
     pub fn body<'a>(content: impl text::IntoFragment<'a>) -> Text<'a> {

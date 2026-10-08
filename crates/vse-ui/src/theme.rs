@@ -246,6 +246,10 @@ pub mod container {
         container_style(COSMIC.secondary(false), COSMIC.corner_radii.radius_s)
     }
 
+    pub fn settings_sidebar(_: &Theme) -> ::iced::widget::container::Style {
+        container_style(COSMIC.primary(false), COSMIC.corner_radii.radius_l)
+    }
+
     pub fn list(_: &Theme) -> ::iced::widget::container::Style {
         let layer = COSMIC.background(false);
         container_style(
@@ -285,6 +289,160 @@ pub mod text {
     pub fn accent(_: &Theme) -> ::iced::widget::text::Style {
         ::iced::widget::text::Style {
             color: Some(color(COSMIC.accent_text_color())),
+        }
+    }
+
+    pub fn settings_label(_: &Theme) -> ::iced::widget::text::Style {
+        ::iced::widget::text::Style {
+            color: Some(color(COSMIC.palette.neutral_8)),
+        }
+    }
+}
+
+pub mod rule {
+    use super::*;
+
+    pub fn settings(_: &Theme) -> ::iced::widget::rule::Style {
+        ::iced::widget::rule::Style {
+            color: color(COSMIC.primary_container_divider()),
+            radius: 0.0.into(),
+            fill_mode: ::iced::widget::rule::FillMode::Full,
+            snap: true,
+        }
+    }
+}
+
+pub mod text_input {
+    use super::*;
+
+    pub fn standard(
+        _: &Theme,
+        status: ::iced::widget::text_input::Status,
+    ) -> ::iced::widget::text_input::Style {
+        use ::iced::widget::text_input::{Status, Style};
+
+        let field = &COSMIC.background(false).component;
+        let border_color = match status {
+            Status::Active => field.divider,
+            Status::Hovered => field.on,
+            Status::Focused { .. } => COSMIC.accent.base,
+            Status::Disabled => field.disabled_border,
+        };
+
+        Style {
+            background: Background::Color(color(match status {
+                Status::Disabled => field.disabled,
+                _ => COSMIC.bg_component_color(),
+            })),
+            border: Border {
+                radius: radius(COSMIC.corner_radii.radius_s),
+                width: 1.0,
+                color: color(border_color),
+            },
+            placeholder: color(COSMIC.palette.neutral_7),
+            value: color(match status {
+                Status::Disabled => field.on_disabled,
+                _ => field.on,
+            }),
+            selection: color(COSMIC.accent.base),
+        }
+    }
+}
+
+pub mod pick_list {
+    use super::*;
+
+    pub fn standard(
+        _: &Theme,
+        status: ::iced::widget::pick_list::Status,
+    ) -> ::iced::widget::pick_list::Style {
+        use ::iced::widget::pick_list::{Status, Style};
+
+        let field = &COSMIC.background(false).component;
+        let active = Style {
+            text_color: color(field.on),
+            placeholder_color: color(COSMIC.palette.neutral_7),
+            handle_color: color(field.on),
+            background: Background::Color(color(COSMIC.bg_component_color())),
+            border: Border {
+                radius: radius(COSMIC.corner_radii.radius_s),
+                width: 1.0,
+                color: color(field.divider),
+            },
+        };
+
+        match status {
+            Status::Active => active,
+            Status::Hovered | Status::Opened { .. } => Style {
+                border: Border {
+                    color: color(COSMIC.accent.base),
+                    ..active.border
+                },
+                ..active
+            },
+            Status::Disabled => Style {
+                text_color: color(field.on_disabled),
+                background: Background::Color(color(field.disabled)),
+                border: Border {
+                    color: color(field.disabled_border),
+                    ..active.border
+                },
+                ..active
+            },
+        }
+    }
+}
+
+pub mod toggler {
+    use super::*;
+
+    pub fn standard(
+        _: &Theme,
+        status: ::iced::widget::toggler::Status,
+    ) -> ::iced::widget::toggler::Style {
+        use ::iced::widget::toggler::{Status, Style};
+
+        let (is_toggled, hovered, disabled) = match status {
+            Status::Active { is_toggled } => (is_toggled, false, false),
+            Status::Hovered { is_toggled } => (is_toggled, true, false),
+            Status::Disabled { is_toggled } => (is_toggled, false, true),
+        };
+        let surface = COSMIC.primary(false);
+        let component = if disabled {
+            &surface.component
+        } else if is_toggled {
+            &COSMIC.accent
+        } else {
+            &surface.component
+        };
+        let background = if disabled {
+            surface.component.disabled
+        } else if hovered {
+            component.hover
+        } else if !is_toggled {
+            surface.small_widget
+        } else {
+            component.base
+        };
+
+        Style {
+            background: Background::Color(color(background)),
+            background_border_width: 1.0,
+            background_border_color: color(if disabled {
+                surface.component.disabled_border
+            } else {
+                component.border
+            }),
+            foreground: Background::Color(color(if disabled {
+                component.on_disabled
+            } else {
+                component.on
+            })),
+            foreground_border_width: 0.0,
+            foreground_border_color: Color::TRANSPARENT,
+            text_color: None,
+            border_radius: None,
+            padding_ratio: 0.15,
         }
     }
 }

@@ -1,4 +1,5 @@
 //! Upstream-iced presentation layer for VideoSubExtract.
+#![feature(iter_intersperse)]
 
 pub use iced;
 pub type Element<'a, Message> = iced::Element<'a, Message, theme::Theme>;
