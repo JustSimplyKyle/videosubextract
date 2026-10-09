@@ -68,7 +68,7 @@ pub fn collapsible_section<'a, Message: Clone + 'a>(
     expanded: bool,
     on_toggle: Message,
     content: impl Into<Element<'a, Message>>,
-) -> ::iced::widget::Column<'a, Message> {
+) -> iced::widget::Column<'a, Message> {
     let spacing = crate::theme::spacing();
     let indicator = if expanded {
         "go-down-symbolic"
@@ -89,7 +89,7 @@ pub fn collapsible_section<'a, Message: Clone + 'a>(
     .style(crate::theme::button::navigation_inactive)
     .width(Fill);
 
-    ::iced::widget::Column::with_capacity(2)
+    iced::widget::Column::with_capacity(2)
         .push(header)
         .push(if expanded {
             content.into()

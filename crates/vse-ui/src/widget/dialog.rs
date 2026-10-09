@@ -1,6 +1,7 @@
 //! Component-owned modal presentation. Keep this component mounted and change
 //! `open`; the content factory remains concrete and is called through the exit
-//! animation. Only the rendered child is removed after the spring settles.
+//! animation. The rendered child is removed when the exit becomes visually
+//! complete, without waiting for the spring's settling tail.
 
 use crate::{
     Apply,
@@ -20,7 +21,7 @@ pub fn dialog<'a, Message, Renderer: renderer::Renderer>(
     Dialog {
         open,
         content: Box::new(content),
-        config: presets::snappy(),
+        config: presets::quick(),
     }
 }
 
@@ -48,6 +49,17 @@ pub struct DialogState {
 impl DialogState {
     fn is_present(&self, open: bool) -> bool {
         open || self.motion.as_ref().is_some_and(Motion::is_animating)
+    }
+
+    fn finish_exit(&mut self) {
+        // Stop early so an underdamped spring cannot keep the panel mounted or bounce it back.
+        if self
+            .motion
+            .as_ref()
+            .is_some_and(|motion| motion.value() <= 0.01 && motion.velocity() <= 0.0)
+        {
+            self.motion = None;
+        }
     }
 }
 
@@ -91,6 +103,9 @@ impl<'a, Message: 'static, Renderer: renderer::Renderer + 'a>
             DialogEvent::Content(message) => self.open.then_some(message),
             DialogEvent::Frame(now) => {
                 state.motion.as_mut()?.advance(now);
+                if !self.open {
+                    state.finish_exit();
+                }
                 None
             }
         }
@@ -116,7 +131,10 @@ impl<'a, Message: 'static, Renderer: renderer::Renderer + 'a>
             .translate(move |_, _| Vector::new(0.0, offset))
             .apply(container)
             .center(Fill)
-            .style(move |_| container::background(Color::BLACK.scale_alpha(0.55 * progress)))
+            .style(move |_| {
+                // clamping because overshooting in color looks weird
+                container::background(Color::BLACK.scale_alpha(0.55 * progress.clamp(0.0, 1.0)))
+            })
             .apply(opaque)
     }
 }
@@ -234,6 +252,34 @@ mod tests {
     }
 
     #[test]
+    fn quick_exit_finishes_when_a_frame_arrives_after_overshoot() {
+        // 250 ms lands below zero with positive velocity; 450 ms skips the
+        // negative lobe entirely and lands above the removal threshold again.
+        for elapsed in [250, 450] {
+            let now = Instant::now();
+            let config = presets::quick();
+            let mut motion = Motion::new_with_config(1.0, now, config);
+            motion.retarget(0.0, now);
+            let mut state = DialogState {
+                motion: Some(motion),
+            };
+            let control = dialog::<u8, ()>(false, || Space::new().into()).with_config(config);
+
+            control.update(
+                &mut state,
+                DialogEvent::Frame(now + Duration::from_millis(elapsed)),
+                &(),
+            );
+
+            assert!(
+                !state.is_present(false),
+                "quick must finish its exit even when a frame arrives at {elapsed} ms"
+            );
+            assert_eq!(state.motion.as_ref().unwrap().value(), 0.0);
+        }
+    }
+
+    #[test]
     fn float_overlay_remains_drawable_and_opaque_through_exit() {
         let now = Instant::now();
         let mounts = Rc::new(Cell::new(0));
@@ -296,7 +342,7 @@ mod tests {
         send(
             &mut control,
             &mut tree,
-            frame(now + Duration::from_secs(10)),
+            frame(now + Duration::from_millis(5200)),
         );
         let layout = Layout::new(tree.size);
         let viewport = Rectangle::with_size(Size::new(600.0, 400.0));
@@ -312,8 +358,22 @@ mod tests {
                     viewport.size(),
                 )
                 .is_empty(),
-            "settled exits release the floating overlay"
+            "visually finished exits release the floating overlay within 200 ms"
         );
+        for elapsed in [5200, 5350, 5500, 6000] {
+            send(
+                &mut control,
+                &mut tree,
+                frame(now + Duration::from_millis(elapsed)),
+            );
+            let (captured, redraw, messages) = send(&mut control, &mut tree, click());
+            assert!(
+                !captured,
+                "completed exits release input without bouncing back"
+            );
+            assert!(matches!(redraw, window::RedrawRequest::Wait));
+            assert!(messages.is_empty());
+        }
     }
 
     #[test]

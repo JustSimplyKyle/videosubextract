@@ -454,7 +454,7 @@ pub mod segmented_control {
     use iced::widget::{Component, component, row, text};
     use iced::{Element, Renderer};
 
-    pub fn horizontal<T>(model: &SingleSelectModel<T>) -> SegmentedControlBuilder<'_, T> {
+    pub const fn horizontal<T>(model: &SingleSelectModel<T>) -> SegmentedControlBuilder<'_, T> {
         SegmentedControlBuilder { model, fill: false }
     }
 
@@ -488,23 +488,16 @@ pub mod segmented_control {
         }
     }
 
-    impl<'a, Message: 'a, T> Component<'a, Message> for SegmentedControl<'a, Message, T> {
-        type State = ();
-        type Event = Entity;
-
-        fn update(&self, _: &mut Self::State, event: Entity, _: &Renderer) -> Option<Message> {
-            Some((self.on_activate)(event))
-        }
-
-        fn view(&self, _: &Self::State) -> Element<'a, Self::Event> {
-            let labels = self.model.entries();
-            let active = self.model.active();
+    impl<'a, Message: 'a, T> From<SegmentedControl<'a, Message, T>> for Element<'a, Message> {
+        fn from(control: SegmentedControl<'a, Message, T>) -> Self {
+            let labels = control.model.entries();
+            let active = control.model.active();
             let last = labels.len().saturating_sub(1);
-            let fill = self.fill;
+            let fill = control.fill;
             labels
                 .into_iter()
                 .enumerate()
-                .map(|(index, (id, entry))| {
+                .map(move |(index, (id, entry))| {
                     let label = text(entry.text());
                     let button =
                         button(label)
@@ -520,10 +513,11 @@ pub mod segmented_control {
                                 )
                             });
                     if fill {
-                        button.width(iced::Fill).into()
+                        button.width(iced::Fill)
                     } else {
-                        button.into()
+                        button
                     }
+                    .into()
                 })
                 .apply(row)
                 .spacing(1)
@@ -532,13 +526,8 @@ pub mod segmented_control {
                 } else {
                     iced::Length::Shrink
                 })
-                .into()
-        }
-    }
-
-    impl<'a, Message: 'a, T> From<SegmentedControl<'a, Message, T>> for Element<'a, Message> {
-        fn from(control: SegmentedControl<'a, Message, T>) -> Self {
-            component(control)
+                .apply(Element::from)
+                .map(control.on_activate)
         }
     }
 }
