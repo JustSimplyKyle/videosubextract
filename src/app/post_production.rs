@@ -11,7 +11,10 @@ use iced::futures::SinkExt;
 use iced::{Alignment, Length, Subscription, Task};
 use rfd::AsyncFileDialog;
 use std::{fmt::Write, path::PathBuf, sync::Arc, time::Duration};
-use vse_ui::{self as cosmic, widget::segmented_button::SingleSelectModelBuilder};
+use vse_ui::{
+    self as cosmic,
+    widget::{AnimatedDropdown, segmented_button::SingleSelectModelBuilder},
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PreviewMode {
@@ -440,7 +443,8 @@ impl Model {
             Some(self.opencc_mode),
             Message::SelectOpenCcMode,
         )
-        .width(Length::Fixed(260.0));
+        .width(Length::Fixed(260.0))
+        .apply(AnimatedDropdown::from);
 
         let format_section = widget::settings::section()
             .title(fl!("format"))

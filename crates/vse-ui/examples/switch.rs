@@ -1,8 +1,8 @@
 //! Run with `cargo run -p vse-ui --example switch`.
-use iced::widget::{button, column, container, pick_list, row, text};
+use iced::widget::{column, container, pick_list, row, text};
 use iced::{Element, Fill, Task};
 use vse_ui::motion::{SpringConfig, presets};
-use vse_ui::widget::switch;
+use vse_ui::widget::{AnimatedDropdown, button, switch};
 
 fn main() -> iced::Result {
     iced::application(Demo::default, Demo::update, Demo::view)
@@ -74,8 +74,11 @@ impl Demo {
                 text("Spring switch").size(24),
                 row![
                     text("Spring preset").width(Fill),
-                    pick_list(Some(self.preset), Preset::ALL, Preset::to_string)
-                        .on_select(Message::PresetSelected),
+                    AnimatedDropdown::from(
+                        pick_list(Some(self.preset), Preset::ALL, Preset::to_string)
+                            .on_select(Message::PresetSelected),
+                    )
+                    .with_config(self.preset.config()),
                 ]
                 .align_y(iced::Alignment::Center),
                 row![

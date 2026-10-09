@@ -43,6 +43,9 @@ use iced::widget::Action;
 use iced::{Color, Event, window};
 use springs::Spring;
 
+mod style;
+pub use style::{AnimationState, Appearance, TransitionStyle};
+
 /// Configuration for the underlying analytical spring solver.
 ///
 /// `duration` controls natural response time, not a hard completion deadline.
@@ -55,6 +58,7 @@ pub use springs::SpringConfig;
 /// | --- | ---: | ---: | ---: | ---: |
 /// | [`gentle`] | 1 | 100 | 15 | 0.750 |
 /// | [`quick`] | 1 | 300 | 20 | 0.577 |
+/// | [`snappy`] | 1 | 1600 | 80 | 1.000 |
 /// | [`bouncy`] | 1 | 600 | 15 | 0.306 |
 /// | [`slow`] | 1 | 80 | 20 | 1.118 |
 ///
@@ -80,7 +84,7 @@ pub use springs::SpringConfig;
 ///
 /// Gentle, quick, and bouncy are underdamped and can overshoot. Clamp their output
 /// when driving bounded properties such as opacity, color weights, or progress.
-/// Slow is overdamped. The default [`Motion::new`] configuration remains critically
+/// Snappy is critically damped; slow is overdamped. The default [`Motion::new`] configuration remains critically
 /// damped; choose one of these presets explicitly when initializing motion.
 pub mod presets {
     use super::SpringConfig;
@@ -93,6 +97,12 @@ pub mod presets {
     /// A quicker response with overshoot: mass 1, stiffness 300, damping 20.
     pub fn quick() -> SpringConfig {
         SpringConfig::from_physical(1.0, 300.0, 20.0)
+    }
+
+    /// Fast color feedback without overshoot: mass 1, stiffness 1600, damping 80.
+    /// Reaches about 91% of the target in 100 ms and 99.7% in 200 ms.
+    pub fn snappy() -> SpringConfig {
+        SpringConfig::from_physical(1.0, 1600.0, 80.0)
     }
 
     /// A brisk, oscillating response: mass 1, stiffness 600, damping 15.
@@ -287,6 +297,20 @@ pub fn mix_oklab(from: Color, to: Color, t: f32) -> Color {
 mod tests {
     use super::*;
     use iced::time::Duration;
+
+    #[test]
+    fn snappy_gives_fast_feedback_without_overshoot() {
+        let now = Instant::now();
+        let mut motion = Motion::new_with_config(0.0, now, presets::snappy());
+        motion.retarget(1.0, now);
+        motion.advance(now + Duration::from_millis(100));
+        assert!(motion.value() > 0.9 && motion.value() < 1.0);
+        motion.advance(now + Duration::from_millis(200));
+        assert!(motion.value() > 0.99 && motion.value() <= 1.0);
+        motion.advance(now + Duration::from_secs(1));
+        assert_eq!(motion.value(), 1.0);
+        assert!(!motion.is_animating());
+    }
 
     #[test]
     fn reversal_preserves_position_and_velocity() {

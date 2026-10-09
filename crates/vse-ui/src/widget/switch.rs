@@ -10,12 +10,35 @@ use iced::time::Instant;
 use iced::widget::{Action, Component, Space, component, container, mouse_area, row};
 use iced::{Border, Color, Element, Event, Fill, Rectangle, Renderer, Theme};
 
-const WIDTH: f32 = 46.0;
-const HEIGHT: f32 = 28.0;
-const INSET: f32 = 3.0;
-const THUMB_SIZE: f32 = HEIGHT - 2.0 * INSET;
-// Inner track width minus thumb width: (WIDTH - 2 * INSET) - THUMB_SIZE.
-const THUMB_TRAVEL: f32 = WIDTH - 2.0 * INSET - THUMB_SIZE;
+#[derive(Default, Clone, Copy)]
+pub struct Size {
+    width: f32 = 46.0,
+    height: f32 = 28.0,
+    inset: f32 = 3.0,
+}
+
+impl Size {
+    pub const fn small() -> Self {
+        Self {
+            width: 46.0 * 0.75,
+            height: 28.0 * 0.75,
+            inset: 3.0 * 0.75,
+        }
+    }
+    pub const fn large() -> Self {
+        Self {
+            width: 46.0 * 1.25,
+            height: 28.0 * 1.25,
+            inset: 3.0 * 1.25,
+        }
+    }
+    const fn thumb_size(&self) -> f32 {
+        2.0_f32.mul_add(-self.inset, self.height)
+    }
+    const fn track_width(&self) -> f32 {
+        2.0_f32.mul_add(-self.inset, self.width) - self.thumb_size()
+    }
+}
 
 /// Creates a switch. Without an `on_toggle` callback it is disabled.
 pub fn switch<'a, Message>(is_enabled: bool) -> Switch<'a, Message> {
@@ -23,6 +46,7 @@ pub fn switch<'a, Message>(is_enabled: bool) -> Switch<'a, Message> {
         is_enabled,
         on_toggle: None,
         spring_config: crate::motion::presets::gentle(),
+        size: Default::default(),
     }
 }
 
@@ -31,18 +55,26 @@ pub struct Switch<'a, Message> {
     is_enabled: bool,
     on_toggle: Option<crate::components::MessageEmitter<'a, bool, Message>>,
     spring_config: springs::SpringConfig,
+    size: Size,
 }
 
 impl<'a, Message> Switch<'a, Message> {
     /// Emits the new logical value immediately when clicked or touched.
+    #[must_use]
     pub fn on_toggle(mut self, callback: impl Fn(bool) -> Message + 'a) -> Self {
         self.on_toggle = Some(Box::new(callback));
         self
     }
     /// Choose a spring preset. Changes apply to the existing motion, including
     /// during an animation, while preserving its current position and velocity.
-    pub fn with_config(mut self, config: springs::SpringConfig) -> Self {
+    #[must_use]
+    pub const fn with_config(mut self, config: springs::SpringConfig) -> Self {
         self.spring_config = config;
+        self
+    }
+    #[must_use]
+    pub const fn with_size(mut self, size: Size) -> Self {
+        self.size = size;
         self
     }
 }
@@ -121,26 +153,29 @@ impl<'a, Message: 'a> Component<'a, Message> for Switch<'a, Message> {
             .clamp(0.0, 1.0);
         let interactive = self.on_toggle.is_some();
         let alpha = if interactive { 1.0 } else { 0.45 };
+
+        let size = self.size;
+
         let thumb = container(Space::new())
-            .width(THUMB_SIZE)
-            .height(THUMB_SIZE)
+            .width(size.thumb_size())
+            .height(size.thumb_size())
             .style(move |_| container::Style {
                 background: Some(Color::WHITE.scale_alpha(alpha).into()),
                 border: Border {
-                    radius: (THUMB_SIZE / 2.0).into(),
+                    radius: (size.thumb_size() / 2.0).into(),
                     ..Border::default()
                 },
                 ..container::Style::default()
             });
 
-        let content = row![Space::new().width(THUMB_TRAVEL * progress), thumb]
+        let content = row![Space::new().width(size.track_width() * progress), thumb]
             .width(Fill)
             .height(Fill)
             .align_y(iced::Alignment::Center);
         let track = container(content)
-            .padding(INSET)
-            .width(WIDTH)
-            .height(HEIGHT)
+            .padding(size.inset)
+            .width(size.width)
+            .height(size.height)
             .style(move |theme: &Theme| container::Style {
                 background: Some(
                     mix_oklab(
@@ -152,7 +187,7 @@ impl<'a, Message: 'a> Component<'a, Message> for Switch<'a, Message> {
                     .into(),
                 ),
                 border: Border {
-                    radius: (HEIGHT / 2.0).into(),
+                    radius: (size.height / 2.0).into(),
                     ..Border::default()
                 },
                 ..container::Style::default()
@@ -190,7 +225,8 @@ mod tests {
 
         control.is_enabled = false;
         control.diff(&mut state);
-        let bounds = Rectangle::with_size(iced::Size::new(WIDTH, HEIGHT));
+        let size = Size::default();
+        let bounds = Rectangle::with_size(iced::Size::new(size.width, size.height));
         let frame_time = now + Duration::from_secs(5);
         let event = Event::Window(window::Event::RedrawRequested(frame_time));
         let (published, redraw, _) = control

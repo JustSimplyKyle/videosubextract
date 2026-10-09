@@ -2,6 +2,7 @@ use iced::widget::{Component, column, component, row, rule, text, toggler};
 use iced::{Alignment, Element, Fill, Length, Renderer};
 
 use crate::components::MessageEmitter;
+use crate::widget::switch;
 use crate::widget::text::title3;
 
 #[must_use]
@@ -15,7 +16,7 @@ pub fn view_column<'a, Message: 'a>(
                 .style(crate::theme::rule::settings)
                 .into()
         })
-        .collect::<iced::widget::Column<Message>>()
+        .collect::<iced::widget::Column<_>>()
         .spacing(crate::theme::spacing().space_m)
         .width(Fill)
 }
@@ -237,9 +238,9 @@ impl<'a, Message: 'a> Component<'a, Message> for ToggleItem<'a, Message> {
 
         row![
             labels,
-            toggler(self.is_enabled)
+            switch::switch(self.is_enabled)
                 .on_toggle(ToggleEvent::Changed)
-                .style(crate::theme::toggler::standard)
+                .with_size(switch::Size::small())
         ]
         .align_y(Alignment::Center)
         .spacing(crate::theme::spacing().space_m)

@@ -1,7 +1,11 @@
 //! Application shell built solely from upstream Iced primitives.
 
-use iced::widget::{button, column, container, row, text};
+use iced::widget::{Column, column, container, row, text};
 use iced::{Alignment, Element, Fill, Length};
+use springs::SpringConfig;
+
+use crate::Apply;
+use crate::widget::{animate, button};
 
 pub struct NavigationItem<Message> {
     pub label: String,
@@ -56,18 +60,22 @@ impl<'a, Message: 'a> Shell<'a, Message> {
 impl<'a, Message: Clone + 'a> From<Shell<'a, Message>> for Element<'a, Message> {
     fn from(shell: Shell<'a, Message>) -> Self {
         let navigation_open = !shell.navigation.is_empty();
-        let nav =
-            shell
-                .navigation
-                .into_iter()
-                .fold(column![].spacing(8).padding(12), |nav, item| {
-                    let button = button(text(item.label)).on_press(item.on_press).width(Fill);
-                    nav.push(if item.selected {
-                        button.style(crate::theme::button::navigation_active)
-                    } else {
-                        button.style(crate::theme::button::navigation_inactive)
-                    })
-                });
+        let nav = shell
+            .navigation
+            .into_iter()
+            .map(|item| {
+                let button = button(text(item.label)).on_press(item.on_press).width(Fill);
+                if item.selected {
+                    button.style(crate::theme::button::navigation_active)
+                } else {
+                    button.style(crate::theme::button::navigation_inactive)
+                }
+                .apply(animate)
+                .into()
+            })
+            .collect::<Column<_>>()
+            .spacing(8)
+            .padding(12);
 
         let header = shell.controls.map(|(toggle_navigation, open_settings)| {
             row![

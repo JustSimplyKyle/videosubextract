@@ -7,6 +7,7 @@ use iced::Color;
 use iced::font::Weight;
 use std::sync::LazyLock;
 use vse_ui::theme::WithRadius;
+use vse_ui::widget::AnimatedDropdown;
 
 use super::*;
 use cosmic::Element;
@@ -438,7 +439,8 @@ impl Model {
                         fl!("ocr-model"),
                         widget::dropdown(OcrModel::labels(config), selected_ocr, move |index| {
                             SettingsMessage::SetOcrModel(ocr_models[index].clone())
-                        }),
+                        })
+                        .apply(AnimatedDropdown::from),
                     ))
                     .add(
                         widget::settings::togglable(fl!("post-ocr-result-processing"))
@@ -467,7 +469,8 @@ impl Model {
                         Message::Settings(SettingsMessage::SetSubtitleDetector(
                             SubtitleDetector::ALL[index],
                         ))
-                    }),
+                    })
+                    .apply(AnimatedDropdown::from),
                 ))
                 .into(),
         ];

@@ -6,21 +6,19 @@ pub use iced::widget::{canvas, image, text_editor};
 pub mod switch;
 pub use switch::{Switch, switch};
 
-/// Creates a button using the default COSMIC button appearance.
-///
-/// This intentionally shadows Iced's unstyled `button` helper while keeping
-/// the rest of `iced::widget` re-exported from this module. Call `.style(...)`
-/// on the returned button to select a different semantic variant.
-pub fn button<'a, Message>(
-    content: impl Into<crate::Element<'a, Message>>,
-) -> iced::widget::Button<'a, Message, crate::Theme> {
-    iced::widget::button(content).style(crate::theme::button::standard)
-}
+pub mod button;
+pub use button::{Button, button};
+
+pub mod animate;
+pub use animate::{Animatable, Animated, StyleBinding, animate};
+
+pub mod dropdown;
+pub use dropdown::AnimatedDropdown;
 
 pub fn icon_button<'a, Message>(
     content: impl Into<crate::Element<'a, Message>>,
-) -> iced::widget::Button<'a, Message, crate::Theme> {
-    iced::widget::button(content).style(crate::theme::button::icon)
+) -> Button<'a, Message> {
+    button(content).style(crate::theme::button::icon)
 }
 
 /// Creates a text input using the COSMIC settings-control appearance.
@@ -449,7 +447,8 @@ pub mod segmented_control {
     use crate::Apply;
 
     use super::segmented_button::{Entity, SingleSelectModel};
-    use iced::widget::{Component, button, component, row, text};
+    use super::{animate, button};
+    use iced::widget::{Component, component, row, text};
     use iced::{Element, Renderer};
 
     pub fn horizontal<T>(model: &SingleSelectModel<T>) -> SegmentedControlBuilder<'_, T> {

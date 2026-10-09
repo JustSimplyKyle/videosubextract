@@ -20,6 +20,7 @@ pub(crate) use iced::{Alignment, Element, Length, Subscription, Task};
 use std::sync::LazyLock;
 use std::{sync::Arc, time::Duration};
 pub(crate) use vse_ui::widget;
+use vse_ui::widget::AnimatedDropdown;
 pub(crate) use vse_ui::widget::icon;
 use vse_ui::{Apply, shell, theme};
 
@@ -161,7 +162,8 @@ impl AppModel {
                     fl!("language"),
                     widget::dropdown(Language::labels(), selected_language, |index| {
                         Message::SetLanguage(Language::ALL[index])
-                    }),
+                    })
+                    .apply(AnimatedDropdown::from),
                 ))
                 .into(),
         ]))
