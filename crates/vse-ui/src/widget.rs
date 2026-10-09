@@ -6,6 +6,9 @@ pub use iced::widget::{canvas, image, text_editor};
 pub mod switch;
 pub use switch::{Switch, switch};
 
+pub mod dialog;
+pub use dialog::{Dialog, dialog};
+
 pub mod button;
 pub use button::{Button, button};
 

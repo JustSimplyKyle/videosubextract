@@ -2,7 +2,6 @@
 
 use iced::widget::{Column, column, container, row, text};
 use iced::{Alignment, Element, Fill, Length};
-use springs::SpringConfig;
 
 use crate::Apply;
 use crate::widget::{animate, button};
@@ -18,7 +17,7 @@ pub struct Shell<'a, Message> {
     content: Element<'a, Message>,
     controls: Option<(Message, Message)>,
     toasts: Vec<(String, Message)>,
-    dialog: Option<Element<'a, Message>>,
+    dialog: Element<'a, Message>,
 }
 
 impl<'a, Message: 'a> Shell<'a, Message> {
@@ -28,7 +27,7 @@ impl<'a, Message: 'a> Shell<'a, Message> {
             content: content.into(),
             controls: None,
             toasts: Vec::new(),
-            dialog: None,
+            dialog: iced::widget::Space::new().into(),
         }
     }
 
@@ -51,8 +50,8 @@ impl<'a, Message: 'a> Shell<'a, Message> {
     }
 
     #[must_use]
-    pub fn dialog(mut self, dialog: Option<impl Into<Element<'a, Message>>>) -> Self {
-        self.dialog = dialog.map(Into::into);
+    pub fn dialog(mut self, dialog: impl Into<Element<'a, Message>>) -> Self {
+        self.dialog = dialog.into();
         self
     }
 }
@@ -131,20 +130,9 @@ impl<'a, Message: Clone + 'a> From<Shell<'a, Message>> for Element<'a, Message> 
         let shell: Element<'a, Message> =
             iced::widget::stack![content, iced::widget::bottom_center(toasts)].into();
 
-        if let Some(dialog) = dialog {
-            iced::widget::stack![
-                shell,
-                container(dialog)
-                    .center(Length::Fill)
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .style(|_| container::background(iced::Color::from_rgba(0.0, 0.0, 0.0, 0.55))),
-            ]
+        iced::widget::stack![shell, dialog]
             .width(Length::Fill)
             .height(Length::Fill)
             .into()
-        } else {
-            shell
-        }
     }
 }

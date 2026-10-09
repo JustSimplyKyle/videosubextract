@@ -6,7 +6,7 @@ use iced::{Element, Fill, Length};
 /// Maps state emitted by a component into its parent's message type.
 pub type MessageEmitter<'a, State, Message> = Box<dyn Fn(State) -> Message + 'a>;
 
-/// A COSMIC-style modal surface. [`crate::shell::Shell`] owns overlay placement.
+/// A COSMIC-style dialog panel. [`crate::widget::dialog`] owns modal presentation.
 pub fn dialog<'a, Message: 'a>(
     title: impl Into<String>,
     body: impl Into<Element<'a, Message>>,

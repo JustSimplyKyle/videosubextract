@@ -92,7 +92,8 @@ pub static WARNING_CHANNEL: LazyLock<(Sender<String>, Receiver<String>)> =
 pub struct AppModel {
     active_page: Page,
     navigation_open: bool,
-    dialog_page: Option<DialogPage>,
+    dialog_page: DialogPage,
+    dialog_open: bool,
     next_toast_id: u64,
     toasts: Vec<(u64, String)>,
     config_handler: Arc<cosmic_config::Config>,
@@ -107,7 +108,8 @@ pub struct AppModel {
 #[derive(Debug, Clone)]
 pub enum Message {
     SelectPage(Page),
-    SelectDialogPage(Option<DialogPage>),
+    ShowDialog(DialogPage),
+    CloseDialog,
     ToggleNavigation,
     PushToast(String),
     CloseToast(u64),
@@ -204,7 +206,8 @@ impl AppModel {
             Self {
                 active_page: Page::Prepare,
                 navigation_open: true,
-                dialog_page: None,
+                dialog_page: DialogPage::Settings,
+                dialog_open: false,
                 next_toast_id: 0,
                 toasts: Vec::new(),
                 config_handler: Arc::new(config_handler),
@@ -284,8 +287,13 @@ impl AppModel {
                 self.navigation_open = !self.navigation_open;
                 Task::none()
             }
-            Message::SelectDialogPage(page) => {
+            Message::ShowDialog(page) => {
                 self.dialog_page = page;
+                self.dialog_open = true;
+                Task::none()
+            }
+            Message::CloseDialog => {
+                self.dialog_open = false;
                 Task::none()
             }
             Message::CloseToast(remove_id) => {
@@ -311,7 +319,8 @@ impl AppModel {
                     Task::batch([copy.discard(), update])
                 }
                 prepare::Event::OpenSettings => {
-                    self.dialog_page = Some(DialogPage::PrepareSettings);
+                    self.dialog_page = DialogPage::PrepareSettings;
+                    self.dialog_open = true;
                     Task::none()
                 }
                 prepare::Event::Error(error) => Task::done(Message::ErrorReported(Arc::new(error))),
@@ -360,7 +369,8 @@ impl AppModel {
             }
             Message::ErrorReported(error) => {
                 self.errors.push(error);
-                self.dialog_page = Some(DialogPage::Error);
+                self.dialog_page = DialogPage::Error;
+                self.dialog_open = true;
                 Task::none()
             }
             Message::PushToast(msg) => {
@@ -416,8 +426,8 @@ impl AppModel {
         } else {
             Vec::new()
         };
-        let dialog = self.dialog_page.map(|page| {
-            let (title, content) = match page {
+        let dialog = widget::dialog(self.dialog_open, || {
+            let (title, content) = match self.dialog_page {
                 DialogPage::Settings => (fl!("settings"), self.settings_view()),
                 DialogPage::PrepareSettings => (
                     fl!("settings"),
@@ -434,7 +444,7 @@ impl AppModel {
                 widget::button(icon::from_name("window-close-symbolic"))
                     .padding(theme::spacing().space_xxs)
                     .style(vse_ui::theme::button::icon)
-                    .on_press(Message::SelectDialogPage(None)),
+                    .on_press(Message::CloseDialog),
             )
         });
 
@@ -469,7 +479,7 @@ impl AppModel {
             .navigation(navigation)
             .header_controls(
                 Message::ToggleNavigation,
-                Message::SelectDialogPage(Some(DialogPage::Settings)),
+                Message::ShowDialog(DialogPage::Settings),
             )
             .toasts(
                 self.toasts
