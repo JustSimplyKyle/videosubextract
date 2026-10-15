@@ -21,8 +21,61 @@
 //!    may intentionally overshoot when using a bouncy configuration.
 //!
 //! No application-level frame subscription is needed. These helpers assume the
-//! component remains mounted during the animation. A disappearing dialog or toast
-//! needs a persistent host to keep it mounted until its exit motion settles.
+//! component remains mounted during the animation. For content that appears and
+//! disappears, such as a dialog or toast, prefer `transition` with an
+//! [`EarlyExitMotion`], below.
+//!
+//! # With `transition`
+//!
+//! Without a component, Iced's [`transition`](iced::widget::transition()) widget
+//! can own the spring instead. [`Motion`] implements its `Program`: the
+//! transition's value is the target, the widget tree keeps the motion across
+//! view rebuilds, and the widget schedules its own frames. The `view` closure
+//! runs every frame while animating, so keep it cheap.
+//!
+//! ```
+//! use iced::time::Instant;
+//! use iced::widget::{progress_bar, transition};
+//! use vse_ui::motion::{Motion, presets};
+//!
+//! fn smooth_progress<'a, Message: 'a>(progress: f32) -> iced::Element<'a, Message> {
+//!     transition(
+//!         progress,
+//!         || Motion::new_with_config(0.0, Instant::now(), presets::gentle()),
+//!         |motion: &Motion, _| progress_bar(0.0..=1.0, motion.value()),
+//!     )
+//!     .into()
+//! }
+//! ```
+//!
+//! For content that mounts and unmounts, drive an [`EarlyExitMotion`] between
+//! `1.0` and `0.0`. Keep the transition mounted, and render the content while
+//! the parent shows it or [`EarlyExitMotion::is_present`] holds:
+//!
+//! ```
+//! use iced::time::Instant;
+//! use iced::widget::{Space, text, transition};
+//! use iced::{Color, Element};
+//! use vse_ui::motion::{EarlyExitMotion, Motion, presets};
+//!
+//! fn toast<'a, Message: 'a>(visible: bool) -> Element<'a, Message> {
+//!     transition(
+//!         if visible { 1.0 } else { 0.0 },
+//!         || EarlyExitMotion::new(Motion::new_with_config(0.0, Instant::now(), presets::quick()), 0.01),
+//!         move |exit: &EarlyExitMotion, _| -> Element<'a, Message> {
+//!             if visible || exit.is_present() {
+//!                 let opacity = exit.motion().value().clamp(0.0, 1.0);
+//!                 text("Saved").color(Color::BLACK.scale_alpha(opacity)).into()
+//!             } else {
+//!                 Space::new().into()
+//!             }
+//!         },
+//!     )
+//!     .into()
+//! }
+//! ```
+//!
+//! # Example
 //!
 //! ```
 //! use iced::time::{Duration, Instant};
@@ -203,9 +256,29 @@ impl Motion {
         self.spring.value()
     }
 
+    /// Read the destination of the current trajectory.
+    pub fn target(&self) -> f32 {
+        self.spring.target()
+    }
+
     /// Read velocity in animated-value units per second.
     pub fn velocity(&self) -> f32 {
         self.spring.velocity()
+    }
+
+    /// Whether a spring heading to zero is visually gone: at or below
+    /// `threshold` and not moving back up. Underdamped springs reach this
+    /// before they settle.
+    pub fn is_exit_complete(&self, threshold: f32) -> bool {
+        self.value() <= threshold && self.velocity() <= 0.0
+    }
+
+    /// Come to rest at `value` immediately, discarding velocity.
+    ///
+    /// Use to end an animation once it is visually complete, so an underdamped
+    /// spring cannot keep oscillating around its target.
+    pub fn snap_to(&mut self, value: f32) {
+        self.spring.snap_to(value);
     }
 
     /// Change the destination while preserving current position and velocity.
@@ -218,6 +291,72 @@ impl Motion {
             self.advance(now);
             self.spring.set_target(target);
         }
+    }
+}
+
+/// Drives a [`transition`](iced::widget::transition()) with a spring. The
+/// transition's value is the target; retargeting keeps position and velocity.
+/// See the [module docs](self#with-transition).
+impl iced::widget::transition::Program for Motion {
+    type Value = f32;
+
+    fn go(&mut self, target: f32, now: Instant) {
+        self.retarget(target, now);
+        self.advance(now);
+    }
+
+    fn is_animating(&self, _: Instant) -> bool {
+        Motion::is_animating(self)
+    }
+}
+
+/// A [`Motion`] that comes to rest at zero once it falls to `threshold`,
+/// instead of oscillating there. Other targets keep their full motion,
+/// including overshoot.
+///
+/// Use it for content that mounts and unmounts: it ends the exit as soon as
+/// the content is visually gone, and cannot bounce it back into view.
+pub struct EarlyExitMotion {
+    motion: Motion,
+    threshold: f32,
+}
+
+impl EarlyExitMotion {
+    /// `threshold` is in the motion's units; `0.01` suits normalized progress.
+    pub fn new(motion: Motion, threshold: f32) -> Self {
+        Self { motion, threshold }
+    }
+
+    pub fn motion(&self) -> &Motion {
+        &self.motion
+    }
+
+    /// Whether content should stay mounted: heading anywhere but zero, or
+    /// still exiting.
+    ///
+    /// This reads the motion's target rather than the parent's visibility. A
+    /// rebuild right after hiding runs before the next frame retargets the
+    /// motion, and must not unmount content whose exit has not started yet.
+    pub fn is_present(&self) -> bool {
+        self.motion.target() != 0.0 || self.motion.is_animating()
+    }
+}
+
+impl iced::widget::transition::Program for EarlyExitMotion {
+    type Value = f32;
+
+    fn go(&mut self, target: f32, now: Instant) {
+        self.motion.go(target, now);
+        if target == 0.0
+            && self.motion.is_animating()
+            && self.motion.is_exit_complete(self.threshold)
+        {
+            self.motion.snap_to(0.0);
+        }
+    }
+
+    fn is_animating(&self, _: Instant) -> bool {
+        self.motion.is_animating()
     }
 }
 
@@ -297,20 +436,7 @@ pub fn mix_oklab(from: Color, to: Color, t: f32) -> Color {
 mod tests {
     use super::*;
     use iced::time::Duration;
-
-    #[test]
-    fn snappy_gives_fast_feedback_without_overshoot() {
-        let now = Instant::now();
-        let mut motion = Motion::new_with_config(0.0, now, presets::snappy());
-        motion.retarget(1.0, now);
-        motion.advance(now + Duration::from_millis(100));
-        assert!(motion.value() > 0.9 && motion.value() < 1.0);
-        motion.advance(now + Duration::from_millis(200));
-        assert!(motion.value() > 0.99 && motion.value() <= 1.0);
-        motion.advance(now + Duration::from_secs(1));
-        assert_eq!(motion.value(), 1.0);
-        assert!(!motion.is_animating());
-    }
+    use iced::widget::transition::Program;
 
     #[test]
     fn reversal_preserves_position_and_velocity() {
@@ -330,6 +456,40 @@ mod tests {
         motion.advance(now + Duration::from_secs(5));
         assert_eq!(motion.value(), 0.0);
         assert!(!motion.is_animating());
+    }
+
+    #[test]
+    fn quick_exit_snaps_to_zero_but_entry_keeps_its_overshoot() {
+        let now = Instant::now();
+        let mut exit =
+            EarlyExitMotion::new(Motion::new_with_config(0.0, now, presets::quick()), 0.01);
+        let frames =
+            |start: Instant| (1..=60).map(move |frame| start + Duration::from_millis(frame * 16));
+
+        exit.go(1.0, now);
+        let peak = frames(now)
+            .map(|now| {
+                exit.go(1.0, now);
+                exit.motion().value()
+            })
+            .fold(0.0, f32::max);
+        assert!(peak > 1.0, "entry is not clipped");
+
+        let closing = now + Duration::from_secs(5);
+        exit.go(1.0, closing);
+        exit.go(0.0, closing);
+        let finished = frames(closing)
+            .position(|now| {
+                exit.go(0.0, now);
+                !Program::is_animating(&exit, now)
+            })
+            .expect("the exit finishes");
+        assert!(finished * 16 <= 200, "finished after {} ms", finished * 16);
+        for now in frames(closing + Duration::from_secs(1)) {
+            exit.go(0.0, now);
+            assert!(!Program::is_animating(&exit, now));
+            assert_eq!(exit.motion().value(), 0.0);
+        }
     }
 
     #[test]

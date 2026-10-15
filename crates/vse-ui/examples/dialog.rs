@@ -37,7 +37,7 @@ impl Demo {
     fn view(&self) -> Element<'_, Message> {
         let page = container(
             column![
-                text("Component-owned dialog animation").size(24),
+                text("Animated dialog").size(24),
                 widget::button("Open dialog").on_press(Message::Open),
             ]
             .spacing(vse_ui::theme::spacing().space_m),
@@ -49,7 +49,7 @@ impl Demo {
                 components::dialog(
                     "Animated dialog",
                     column![
-                        text("The component retains this panel until closing settles."),
+                        text("The dialog keeps this panel mounted until its exit finishes."),
                         widget::text_input("Type here", &self.value).on_input(Message::Edit),
                     ]
                     .spacing(vse_ui::theme::spacing().space_s),

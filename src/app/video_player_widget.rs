@@ -260,10 +260,10 @@ impl Player {
 
     fn view(&self) -> Element<'_, PlayerMessage> {
         let image = self.image(0.);
-        let backward = widget::button(icon::from_name("media-seek-backward-symbolic"))
+        let backward = icon_button!("media-seek-backward-symbolic")
             .on_press(PlayerMessage::SeekBackward(Duration::from_secs(5)))
             .style(cosmic::theme::button::nav_toggle);
-        let forward = widget::button(icon::from_name("media-seek-forward-symbolic"))
+        let forward = icon_button!("media-seek-forward-symbolic")
             .on_press(PlayerMessage::SeekForward(Duration::from_secs(5)))
             .style(cosmic::theme::button::nav_toggle);
         let slider = self.slider();

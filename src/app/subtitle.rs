@@ -57,7 +57,7 @@ use iced::futures::StreamExt;
 use iced::widget::operation::Animation;
 use image::RgbaImage;
 use indexmap::IndexMap;
-use vse_ui as cosmic;
+use vse_ui::{self as cosmic, icon_button};
 
 use super::*;
 use std::time::Duration;
@@ -570,13 +570,13 @@ impl<'a> SubtitleTable<'a> {
             .apply(Element::from)
     }
     fn delete(id: SubtitleId) -> Element<'static, Message> {
-        widget::button(widget::icon::from_name("edit-delete-symbolic"))
+        widget::button(icon_button!("edit-delete-symbolic"))
             .on_press(Message::Delete(id))
             .style(cosmic::theme::button::destructive)
             .into()
     }
     fn merge_with_previous(id: SubtitleId) -> Element<'static, Message> {
-        widget::button(widget::icon::from_name("go-up-symbolic"))
+        widget::button(icon_button!("go-up-symbolic"))
             .on_press(Message::MergeWithPrevious(id))
             .style(cosmic::theme::button::icon)
             .into()
@@ -660,7 +660,7 @@ impl<'a> SubtitleView<'a> {
         let to_post_prod = widget::button(widget::text(fl!("post-production")))
             .style(cosmic::theme::button::suggested)
             .on_press_maybe((!self.model.search_active).then_some(Message::GoToPostProduction));
-        let undo_edit = widget::button(icon::from_name("edit-undo-symbolic"))
+        let undo_edit = icon_button!("edit-undo-symbolic")
             .style(cosmic::theme::button::icon)
             .on_press_maybe((!self.model.edit_history.is_empty()).then_some(Message::UndoEdit));
 
@@ -717,7 +717,7 @@ impl<'a> SubtitleView<'a> {
             widget::image(result.preview.clone())
                 .expand(true)
                 .content_fit(iced::ContentFit::Contain),
-            widget::button(icon::from_name("window-close-symbolic"))
+            icon_button!("window-close-symbolic")
                 .style(cosmic::theme::button::icon)
                 .on_press(Message::CloseSubtitlePreview),
         )

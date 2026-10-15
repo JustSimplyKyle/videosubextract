@@ -160,6 +160,8 @@ pub fn togglable(label: impl Into<String>) -> togglable::Builder {
 }
 
 pub mod togglable {
+    use std::rc::Rc;
+
     use super::*;
 
     pub(super) fn builder(label: impl Into<String>) -> Builder {
@@ -190,7 +192,7 @@ pub mod togglable {
                 label: self.label,
                 description: self.description,
                 is_enabled,
-                on_toggle: Box::new(on_toggle),
+                on_toggle: Rc::new(on_toggle),
             }
         }
     }

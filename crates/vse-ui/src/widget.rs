@@ -18,10 +18,20 @@ pub use animate::{Animatable, Animated, StyleBinding, animate};
 pub mod dropdown;
 pub use dropdown::AnimatedDropdown;
 
+pub use freedesktop_icon_assets::icon;
+pub use tooltip::{Tooltip, tooltip};
+
 pub fn icon_button<'a, Message>(
     content: impl Into<crate::Element<'a, Message>>,
 ) -> Button<'a, Message> {
     button(content).style(crate::theme::button::icon)
+}
+
+#[macro_export]
+macro_rules! icon_button {
+    ($x: expr) => {
+        $crate::widget::button(icon!($x)).style($crate::theme::button::icon)
+    };
 }
 
 /// Creates a text input using the COSMIC settings-control appearance.
@@ -51,9 +61,6 @@ pub mod tooltip {
             .gap(1)
     }
 }
-
-pub use freedesktop_icon_assets::icon;
-pub use tooltip::{Tooltip, tooltip};
 
 pub fn dropdown<'a, Message: Clone + 'a>(
     options: Vec<impl Into<String>>,
@@ -392,6 +399,8 @@ pub mod segmented_button {
 }
 
 pub mod segmented_control {
+    use std::rc::Rc;
+
     use crate::Apply;
 
     use super::segmented_button::{Entity, SingleSelectModel};
@@ -428,7 +437,7 @@ pub mod segmented_control {
             SegmentedControl {
                 model: self.model,
                 fill: self.fill,
-                on_activate: Box::new(f),
+                on_activate: Rc::new(f),
             }
         }
     }
@@ -472,7 +481,7 @@ pub mod segmented_control {
                     iced::Length::Shrink
                 })
                 .apply(Element::from)
-                .map(control.on_activate)
+                .map(move |x| (control.on_activate)(x))
         }
     }
 }

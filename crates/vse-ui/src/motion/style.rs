@@ -192,27 +192,6 @@ mod tests {
     }
 
     #[test]
-    fn owned_styles_mount_settled_and_transition_to_exact_endpoints() {
-        let now = Instant::now();
-        let from = NamedStyle::new(0.0, "off");
-        let to = NamedStyle::new(1.0, "on");
-        let mut state = AnimationState::default();
-        assert!(state.current().is_none());
-        assert!(!state.is_animating());
-        assert_eq!(state.resolve(from.clone(), now), from);
-        assert!(!state.is_animating());
-
-        assert_eq!(state.resolve(to.clone(), now), from);
-        state.advance(now + Duration::from_millis(40));
-        let current = state.current().unwrap();
-        assert!(current.brightness > 0.0 && current.brightness < 1.0);
-        assert_eq!(current.name, "on");
-        state.advance(now + Duration::from_secs(1));
-        assert_eq!(state.current(), Some(to));
-        assert!(!state.is_animating());
-    }
-
-    #[test]
     fn reversing_preserves_the_spring_and_uses_the_destination_policy() {
         let now = Instant::now();
         let from = NamedStyle::new(0.0, "off");

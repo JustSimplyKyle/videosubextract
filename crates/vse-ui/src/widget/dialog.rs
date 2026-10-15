@@ -1,16 +1,24 @@
-//! Component-owned modal presentation. Keep this component mounted and change
-//! `open`; the content factory remains concrete and is called through the exit
-//! animation. The rendered child is removed when the exit becomes visually
-//! complete, without waiting for the spring's settling tail.
+//! Modal presentation driven by Iced's `transition` widget. Keep the host
+//! mounted and change `open`; the widget tree owns the spring.
+//!
+//! The content factory stays concrete and is called through the exit
+//! animation, once per frame while animating. The rendered child is removed
+//! when the exit becomes visually complete, without waiting for the spring's
+//! settling tail.
 
 use crate::{
     Apply,
-    motion::{Motion, SpringConfig, frame_action, presets},
+    motion::{EarlyExitMotion, Motion, SpringConfig, presets},
 };
-use iced::advanced::{mouse, renderer};
+use iced::advanced::renderer;
 use iced::time::Instant;
-use iced::widget::{Action, Component, Space, component, container, float, opaque};
-use iced::{Color, Element, Event, Fill, Rectangle, Theme, Vector};
+use iced::widget::{Space, container, float, opaque};
+use iced::{Color, Element, Fill, Theme, Vector};
+
+mod gate;
+
+/// Exits below this progress are visually complete.
+const EXIT_THRESHOLD: f32 = 0.01;
 
 /// Build a persistent host from requested visibility and a concrete content
 /// factory. Rebuild the host on every application view, including while closed.
@@ -25,7 +33,8 @@ pub fn dialog<'a, Message, Renderer: renderer::Renderer>(
     }
 }
 
-/// The parent owns requested visibility; this component owns displayed visibility.
+/// The parent owns requested visibility; the transition's tree state owns
+/// displayed visibility.
 pub struct Dialog<'a, Message, Renderer = iced::Renderer> {
     open: bool,
     content: Box<dyn Fn() -> Element<'a, Message, Theme, Renderer> + 'a>,
@@ -33,6 +42,7 @@ pub struct Dialog<'a, Message, Renderer = iced::Renderer> {
 }
 
 impl<Message, Renderer> Dialog<'_, Message, Renderer> {
+    /// Applies on mount. The transition keeps its motion until it is reset.
     #[must_use]
     pub fn with_config(mut self, config: SpringConfig) -> Self {
         self.config = config;
@@ -40,446 +50,148 @@ impl<Message, Renderer> Dialog<'_, Message, Renderer> {
     }
 }
 
-#[doc(hidden)]
-#[derive(Default)]
-pub struct DialogState {
-    motion: Option<Motion>,
-}
-
-impl DialogState {
-    fn is_present(&self, open: bool) -> bool {
-        open || self.motion.as_ref().is_some_and(Motion::is_animating)
-    }
-
-    fn finish_exit(&mut self) {
-        // Stop early so an underdamped spring cannot keep the panel mounted or bounce it back.
-        if self
-            .motion
-            .as_ref()
-            .is_some_and(|motion| motion.value() <= 0.01 && motion.velocity() <= 0.0)
-        {
-            self.motion = None;
-        }
-    }
-}
-
-#[doc(hidden)]
-pub enum DialogEvent<Message> {
-    Content(Message),
-    Frame(Instant),
-}
-
-impl<'a, Message: 'static, Renderer: renderer::Renderer + 'a>
-    Component<'a, Message, Theme, Renderer> for Dialog<'a, Message, Renderer>
-{
-    type State = DialogState;
-    type Event = DialogEvent<Message>;
-
-    fn diff(&mut self, state: &mut DialogState) {
-        let now = Instant::now();
-        let motion = state
-            .motion
-            .get_or_insert_with(|| Motion::new_with_config(0.0, now, self.config));
-        motion.set_config(self.config, now);
-        motion.retarget(if self.open { 1.0 } else { 0.0 }, now);
-    }
-
-    fn listen(
-        &self,
-        state: &DialogState,
-        event: &Event,
-        _: Rectangle,
-        _: mouse::Cursor,
-    ) -> Action<Self::Event> {
-        frame_action(
-            event,
-            state.motion.as_ref().is_some_and(Motion::is_animating),
-            DialogEvent::Frame,
-        )
-    }
-
-    fn update(&self, state: &mut DialogState, event: Self::Event, _: &Renderer) -> Option<Message> {
-        match event {
-            DialogEvent::Content(message) => self.open.then_some(message),
-            DialogEvent::Frame(now) => {
-                state.motion.as_mut()?.advance(now);
-                if !self.open {
-                    state.finish_exit();
-                }
-                None
-            }
-        }
-    }
-
-    fn view(&self, state: &DialogState) -> Element<'a, Self::Event, Theme, Renderer> {
-        if !state.is_present(self.open) {
-            return Space::new().width(Fill).height(Fill).into();
-        }
-
-        let motion = state
-            .motion
-            .as_ref()
-            .expect("diff initializes dialog motion");
-        let progress = motion.value();
-        let offset = crate::theme::spacing().space_s * (1.0 - progress);
-
-        (self.content)()
-            .map(DialogEvent::Content)
-            .apply(opaque)
-            .apply(float)
-            .scale(0.05f32.mul_add(progress, 0.95).max(0.01))
-            .translate(move |_, _| Vector::new(0.0, offset))
-            .apply(container)
-            .center(Fill)
-            .style(move |_| {
-                // clamping because overshooting in color looks weird
-                container::background(Color::BLACK.scale_alpha(0.55 * progress.clamp(0.0, 1.0)))
-            })
-            .apply(opaque)
-    }
-}
-
-impl<'a, Message: 'static, Renderer: renderer::Renderer + 'a> From<Dialog<'a, Message, Renderer>>
+impl<'a, Message: 'a, Renderer: renderer::Renderer + 'a> From<Dialog<'a, Message, Renderer>>
     for Element<'a, Message, Theme, Renderer>
 {
     fn from(dialog: Dialog<'a, Message, Renderer>) -> Self {
-        component(dialog)
+        let Dialog {
+            open,
+            content,
+            config,
+        } = dialog;
+
+        iced::widget::transition(
+            if open { 1.0 } else { 0.0 },
+            move || {
+                EarlyExitMotion::new(
+                    Motion::new_with_config(0.0, Instant::now(), config),
+                    EXIT_THRESHOLD,
+                )
+            },
+            move |exit: &EarlyExitMotion, _| {
+                if open || exit.is_present() {
+                    present(content(), exit.motion().value(), open)
+                } else {
+                    Space::new().width(Fill).height(Fill).into()
+                }
+            },
+        )
+        .into()
     }
+}
+
+/// The modal backdrop and panel at `progress`. Closing content is muted so it
+/// cannot emit messages during the exit.
+fn present<'a, Message: 'a, Renderer: renderer::Renderer + 'a>(
+    content: Element<'a, Message, Theme, Renderer>,
+    progress: f32,
+    open: bool,
+) -> Element<'a, Message, Theme, Renderer> {
+    let offset = crate::theme::spacing().space_s * (1.0 - progress);
+
+    gate::gate(open, content)
+        .apply(opaque)
+        .apply(float)
+        .scale(0.05f32.mul_add(progress, 0.95).max(0.01))
+        .translate(move |_, _| Vector::new(0.0, offset))
+        .apply(container)
+        .center(Fill)
+        .style(move |_| {
+            // clamping because overshooting in color looks weird
+            container::background(Color::BLACK.scale_alpha(0.55 * progress.clamp(0.0, 1.0)))
+        })
+        .apply(opaque)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use iced::advanced::shell::{Bus, Waker};
-    use iced::advanced::widget::tree;
-    use iced::advanced::{Layout, Shell, Widget, layout, widget::Tree};
-    use iced::{Length, Point, Size, keyboard, time::Duration, window};
-    use std::{cell::Cell, rc::Rc};
+    use iced::widget::{button, column, container, stack, text_input};
+    use iced::{Event, time::Duration, window};
+    use iced_test::{Simulator, selector};
 
-    struct Probe(Rc<Cell<usize>>);
-
-    impl Widget<u8, Theme, ()> for Probe {
-        fn tag(&self) -> tree::Tag {
-            tree::Tag::of::<Probe>()
-        }
-
-        fn state(&self) -> tree::State {
-            self.0.set(self.0.get() + 1);
-            tree::State::None
-        }
-
-        fn size(&self) -> Size<Length> {
-            Size::new(100.into(), 80.into())
-        }
-
-        fn layout(&mut self, tree: &mut Tree, _: &(), _: &layout::Limits) {
-            tree.size = Size::new(100.0, 80.0);
-        }
-
-        fn draw(
-            &self,
-            _: &Tree,
-            _: &mut (),
-            _: &Theme,
-            _: &renderer::Style,
-            _: Layout,
-            _: mouse::Cursor,
-            _: &Rectangle,
-        ) {
-        }
-
-        fn update(
-            &mut self,
-            _: &mut Tree,
-            event: &Event,
-            _: Layout,
-            _: mouse::Cursor,
-            _: &(),
-            shell: &mut Shell<'_, u8>,
-            _: &Rectangle,
-        ) {
-            if matches!(event, Event::Mouse(_) | Event::Keyboard(_)) {
-                shell.publish(7);
-            }
-        }
+    #[derive(Debug, Clone, PartialEq)]
+    enum Message {
+        Page,
+        Inside,
+        Edit(String),
     }
 
-    fn host(open: bool, mounts: Rc<Cell<usize>>) -> Element<'static, u8, Theme, ()> {
-        dialog(open, move || Element::new(Probe(mounts.clone()))).into()
+    fn view(open: bool) -> Element<'static, Message> {
+        // A stack sizes its layers to the first one, so the page fills the window.
+        stack![
+            container(button("Page").on_press(Message::Page))
+                .width(Fill)
+                .height(Fill),
+            dialog(open, || {
+                column![
+                    text_input("Name", "").id("name").on_input(Message::Edit),
+                    button("Inside").on_press(Message::Inside),
+                ]
+                .into()
+            }),
+        ]
+        .into()
     }
 
-    fn reconcile(control: &mut Element<'_, u8, Theme, ()>, tree: &mut Tree) {
-        tree.diff(control.as_widget_mut());
-        control.as_widget_mut().layout(
-            tree,
-            &(),
-            &layout::Limits::new(Size::ZERO, Size::new(600.0, 400.0)),
-        );
+    fn frame(sim: &mut Simulator<'_, Message>, now: Instant) {
+        sim.simulate([Event::Window(window::Event::RedrawRequested(now))]);
     }
 
-    fn send(
-        control: &mut Element<'_, u8, Theme, ()>,
-        tree: &mut Tree,
-        event: Event,
-    ) -> (bool, window::RedrawRequest, Vec<u8>) {
-        let mut messages = Bus::new();
-        let mut shell = Shell::new(&window::Headless, Waker::new(|| {}), &mut messages);
-        control.as_widget_mut().update(
-            tree,
-            &event,
-            Layout::new(tree.size),
-            mouse::Cursor::Available(Point::new(300.0, 200.0)),
-            &(),
-            &mut shell,
-            &Rectangle::with_size(Size::new(600.0, 400.0)),
-        );
-        let captured = shell.is_event_captured();
-        let redraw = shell.redraw_request();
-        drop(shell);
-        (
-            captured,
-            redraw,
-            messages.drain().map(|(message, _)| message).collect(),
-        )
-    }
-
-    fn frame(now: Instant) -> Event {
-        Event::Window(window::Event::RedrawRequested(now))
-    }
-
-    fn click() -> Event {
-        Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left))
+    fn drain(sim: &mut Simulator<'_, Message>) -> Vec<Message> {
+        sim.drain().collect()
     }
 
     #[test]
-    fn quick_exit_finishes_when_a_frame_arrives_after_overshoot() {
-        // 250 ms lands below zero with positive velocity; 450 ms skips the
-        // negative lobe entirely and lands above the removal threshold again.
-        for elapsed in [250, 450] {
-            let now = Instant::now();
-            let config = presets::quick();
-            let mut motion = Motion::new_with_config(1.0, now, config);
-            motion.retarget(0.0, now);
-            let mut state = DialogState {
-                motion: Some(motion),
-            };
-            let control = dialog::<u8, ()>(false, || Space::new().into()).with_config(config);
+    fn mounts_lazily_mutes_while_closing_and_keeps_child_state_on_reversal() {
+        let start = Instant::now();
+        let at = |ms: u64| start + Duration::from_millis(ms);
 
-            control.update(
-                &mut state,
-                DialogEvent::Frame(now + Duration::from_millis(elapsed)),
-                &(),
-            );
+        let mut sim = Simulator::new(view(false));
+        frame(&mut sim, at(0));
+        assert!(sim.find("Inside").is_err(), "closed dialogs build nothing");
+        sim.click("Page").unwrap();
+        assert_eq!(drain(&mut sim), [Message::Page]);
 
-            assert!(
-                !state.is_present(false),
-                "quick must finish its exit even when a frame arrives at {elapsed} ms"
-            );
-            assert_eq!(state.motion.as_ref().unwrap().value(), 0.0);
+        let mut sim = sim.rebuild(view(true));
+        for ms in (16..=1000).step_by(16) {
+            frame(&mut sim, at(ms));
         }
-    }
-
-    #[test]
-    fn float_overlay_remains_drawable_and_opaque_through_exit() {
-        let now = Instant::now();
-        let mounts = Rc::new(Cell::new(0));
-        let mut control = host(true, mounts.clone());
-        let mut tree = Tree::new(control.as_widget());
-        reconcile(&mut control, &mut tree);
-
-        for closing in [false, true] {
-            if closing {
-                send(&mut control, &mut tree, frame(now + Duration::from_secs(5)));
-                control = host(false, mounts.clone());
-                reconcile(&mut control, &mut tree);
-                send(
-                    &mut control,
-                    &mut tree,
-                    frame(now + Duration::from_millis(5050)),
-                );
-            }
-            let layout = Layout::new(tree.size);
-            let viewport = Rectangle::with_size(Size::new(600.0, 400.0));
-            control.as_widget().draw(
-                &tree,
-                &mut (),
-                &Theme::Dark,
-                &renderer::Style::default(),
-                layout,
-                mouse::Cursor::Unavailable,
-                &viewport,
-            );
-            let mut overlays = control.as_widget_mut().overlay(
-                &mut tree,
-                layout,
-                &(),
-                &viewport,
-                Vector::ZERO,
-                viewport.size(),
-            );
-            assert_eq!(overlays.len(), 1, "Float supplies the animated panel");
-            let overlay = overlays[0].as_overlay_mut();
-            overlay.draw(
-                &mut (),
-                &Theme::Dark,
-                &renderer::Style::default(),
-                mouse::Cursor::Unavailable,
-            );
-            let mut messages = Bus::new();
-            let mut shell = Shell::new(&window::Headless, Waker::new(|| {}), &mut messages);
-            overlay.update(
-                &click(),
-                mouse::Cursor::Available(Point::new(300.0, 200.0)),
-                &(),
-                &mut shell,
-            );
-            assert!(shell.is_event_captured());
-            drop(shell);
-            let emitted: Vec<_> = messages.drain().map(|(message, _)| message).collect();
-            assert_eq!(emitted, if closing { vec![] } else { vec![7] });
-        }
-
-        send(
-            &mut control,
-            &mut tree,
-            frame(now + Duration::from_millis(5200)),
-        );
-        let layout = Layout::new(tree.size);
-        let viewport = Rectangle::with_size(Size::new(600.0, 400.0));
-        assert!(
-            control
-                .as_widget_mut()
-                .overlay(
-                    &mut tree,
-                    layout,
-                    &(),
-                    &viewport,
-                    Vector::ZERO,
-                    viewport.size(),
-                )
-                .is_empty(),
-            "visually finished exits release the floating overlay within 200 ms"
-        );
-        for elapsed in [5200, 5350, 5500, 6000] {
-            send(
-                &mut control,
-                &mut tree,
-                frame(now + Duration::from_millis(elapsed)),
-            );
-            let (captured, redraw, messages) = send(&mut control, &mut tree, click());
-            assert!(
-                !captured,
-                "completed exits release input without bouncing back"
-            );
-            assert!(matches!(redraw, window::RedrawRequest::Wait));
-            assert!(messages.is_empty());
-        }
-    }
-
-    #[test]
-    fn retains_child_state_through_exit_and_reversal_then_unmounts() {
-        let mounts = Rc::new(Cell::new(0));
-        let now = Instant::now();
-        let mut control = host(false, mounts.clone());
-        let mut tree = Tree::new(control.as_widget());
-        reconcile(&mut control, &mut tree);
-        assert_eq!(mounts.get(), 0, "closed hosts do not build content");
-
-        control = host(true, mounts.clone());
-        reconcile(&mut control, &mut tree);
-        let initial_mounts = mounts.get();
-        assert!(initial_mounts > 0);
-        send(&mut control, &mut tree, frame(now + Duration::from_secs(5)));
-        assert_eq!(send(&mut control, &mut tree, click()).2, vec![7]);
-
-        control = host(false, mounts.clone());
-        reconcile(&mut control, &mut tree);
-        assert_eq!(mounts.get(), initial_mounts);
-        let (captured, _, messages) = send(&mut control, &mut tree, click());
-        assert!(captured, "the closing dialog still shields the page");
-        assert!(
-            messages.is_empty(),
-            "closing content does not emit app messages"
-        );
-        send(
-            &mut control,
-            &mut tree,
-            frame(now + Duration::from_millis(5050)),
-        );
-
-        control = host(true, mounts.clone());
-        reconcile(&mut control, &mut tree);
-        send(
-            &mut control,
-            &mut tree,
-            frame(now + Duration::from_secs(10)),
-        );
+        sim.click("Inside").unwrap();
+        sim.click(selector::id("name")).unwrap();
+        sim.typewrite("a");
         assert_eq!(
-            mounts.get(),
-            initial_mounts,
-            "reversing an exit preserves child state"
+            drain(&mut sim),
+            [Message::Inside, Message::Edit("a".into())]
         );
 
-        control = host(false, mounts.clone());
-        reconcile(&mut control, &mut tree);
-        send(
-            &mut control,
-            &mut tree,
-            frame(now + Duration::from_secs(15)),
-        );
-        let (captured, redraw, messages) = send(&mut control, &mut tree, click());
-        assert!(!captured, "hidden hosts let the page receive input");
-        assert!(messages.is_empty());
-        assert!(matches!(redraw, window::RedrawRequest::Wait));
+        // Closing content still receives input but emits nothing.
+        let mut sim = sim.rebuild(view(false));
+        frame(&mut sim, at(1016));
+        frame(&mut sim, at(1032));
+        sim.typewrite("b");
+        assert_eq!(drain(&mut sim), []);
 
-        control = host(true, mounts.clone());
-        reconcile(&mut control, &mut tree);
+        // Reopening mid-exit keeps the input's focus, so its state survived.
+        let mut sim = sim.rebuild(view(true));
+        frame(&mut sim, at(1048));
+        sim.typewrite("c");
+        assert_eq!(drain(&mut sim), [Message::Edit("c".into())]);
+
+        let mut sim = sim.rebuild(view(false));
+        frame(&mut sim, at(2000));
+        frame(&mut sim, at(2016));
+        sim.click("Page").unwrap();
+        assert_eq!(drain(&mut sim), [], "the closing dialog shields the page");
+
+        for ms in (2032..=2400).step_by(16) {
+            frame(&mut sim, at(ms));
+        }
         assert!(
-            mounts.get() > initial_mounts,
-            "a completed exit releases the child tree"
+            sim.find("Inside").is_err(),
+            "finished exits unmount content"
         );
-    }
-
-    #[test]
-    fn opaque_captures_pointer_after_child_dispatch() {
-        let now = Instant::now();
-        let mut control = host(true, Rc::new(Cell::new(0)));
-        let mut tree = Tree::new(control.as_widget());
-        reconcile(&mut control, &mut tree);
-        assert!(send(&mut control, &mut tree, click()).0);
-        send(&mut control, &mut tree, frame(now + Duration::from_secs(5)));
-        let keyboard = Event::Keyboard(keyboard::Event::ModifiersChanged(
-            keyboard::Modifiers::empty(),
-        ));
-        let (captured, _, messages) = send(&mut control, &mut tree, click());
-        assert!(captured);
-        assert_eq!(messages, vec![7], "capture happens after child dispatch");
-        let (captured, _, messages) = send(&mut control, &mut tree, keyboard);
-        assert!(!captured, "opaque only captures pointer presses");
-        assert_eq!(messages, vec![7]);
-        let (_, redraw, _) = send(&mut control, &mut tree, frame(now + Duration::from_secs(6)));
-        assert!(matches!(redraw, window::RedrawRequest::Wait));
-    }
-
-    #[test]
-    fn interrupted_motion_preserves_position_and_velocity() {
-        let mut control = dialog::<u8, ()>(true, || Space::new().into());
-        let mut state = DialogState::default();
-        control.diff(&mut state);
-        assert_eq!(state.motion.as_ref().unwrap().value(), 0.0);
-        control.update(
-            &mut state,
-            DialogEvent::Frame(Instant::now() + Duration::from_millis(70)),
-            &(),
-        );
-        let motion = state.motion.as_ref().unwrap();
-        let position = motion.value();
-        let velocity = motion.velocity();
-        assert!(position > 0.0 && position < 1.0);
-        control.open = false;
-        control.diff(&mut state);
-        assert_eq!(state.motion.as_ref().unwrap().value(), position);
-        assert_eq!(state.motion.as_ref().unwrap().velocity(), velocity);
-        assert!(state.is_present(false));
+        sim.click("Page").unwrap();
+        assert_eq!(drain(&mut sim), [Message::Page]);
     }
 }

@@ -1,10 +1,12 @@
 //! Presentation components that have no direct upstream-Iced sibling.
 
+use std::rc::Rc;
+
 use iced::widget::{column, container, row, text};
 use iced::{Element, Fill, Length};
 
 /// Maps state emitted by a component into its parent's message type.
-pub type MessageEmitter<'a, State, Message> = Box<dyn Fn(State) -> Message + 'a>;
+pub type MessageEmitter<'a, State, Message> = Rc<dyn Fn(State) -> Message + 'a>;
 
 /// A COSMIC-style dialog panel. [`crate::widget::dialog`] owns modal presentation.
 pub fn dialog<'a, Message: 'a>(

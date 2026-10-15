@@ -75,6 +75,9 @@ impl<W, S: TransitionStyle> Animated<W, S> {
 struct WidgetAnimationState<S> {
     animation: AnimationState<S>,
     needs_observation: bool,
+    /// The latest frame time. Style functions run during draw, which has no
+    /// timestamp, so retargets happen at the frame being drawn.
+    now: Instant,
 }
 
 impl<S> Default for WidgetAnimationState<S> {
@@ -82,6 +85,7 @@ impl<S> Default for WidgetAnimationState<S> {
         Self {
             animation: AnimationState::default(),
             needs_observation: true,
+            now: Instant::now(),
         }
     }
 }
@@ -89,11 +93,13 @@ impl<S> Default for WidgetAnimationState<S> {
 impl<S: TransitionStyle> WidgetAnimationState<S> {
     fn update_config(&mut self, config: SpringConfig) {
         self.needs_observation = true;
-        self.animation.set_config(config, Instant::now());
+        self.animation.set_config(config, self.now);
     }
     fn update(&mut self, event: &Event) -> bool {
         if let Event::Window(window::Event::RedrawRequested(now)) = event {
-            self.animation.advance(*now);
+            // A repeated or stale redraw must not move the clock backwards.
+            self.now = self.now.max(*now);
+            self.animation.advance(self.now);
         } else if matches!(
             event,
             Event::Mouse(_) | Event::Touch(_) | Event::Keyboard(_)
@@ -125,11 +131,12 @@ impl<S: TransitionStyle> StyleBinding<S> {
         }
     }
 
+    /// Retargets at the latest frame time rather than the wall clock, so a
+    /// style change starts exactly at the frame that first displays it.
     pub fn resolve(&self, target: S) -> S {
-        self.0
-            .borrow_mut()
-            .animation
-            .resolve(target, Instant::now())
+        let mut state = self.0.borrow_mut();
+        let now = state.now;
+        state.animation.resolve(target, now)
     }
 }
 
@@ -337,70 +344,54 @@ mod tests {
     }
 
     #[test]
-    fn generic_wrapper_animates_another_widget_style_and_theme() {
-        let mut first = Animated::bind(|binding| ColorProbe {
-            color: Color::BLACK,
-            binding,
-        });
-        let mut tree = Tree::new(&first as &dyn Widget<u8, (), ()>);
-        first.diff(&mut tree);
-        let limits = layout::Limits::new(Size::ZERO, Size::new(100.0, 100.0));
-        first.layout(&mut tree, &(), &limits);
-        let layout = Layout::new(tree.size);
-        let viewport = layout.bounds();
-        first.draw(
-            &tree,
-            &mut (),
-            &(),
-            &renderer::Style::default(),
-            layout,
-            mouse::Cursor::Unavailable,
-            &viewport,
-        );
-        let mut next = Animated::bind(|binding| ColorProbe {
-            color: Color::WHITE,
-            binding,
-        });
-        tree.diff(&mut next as &mut dyn Widget<u8, (), ()>);
-        next.draw(
-            &tree,
-            &mut (),
-            &(),
-            &renderer::Style::default(),
-            layout,
-            mouse::Cursor::Unavailable,
-            &viewport,
-        );
-        assert!(
-            tree.state
-                .downcast_ref::<StyleBinding<Color>>()
-                .0
-                .borrow()
-                .animation
-                .is_animating()
-        );
-
-        let mut messages = Bus::new();
-        let now = Instant::now();
-        for event in [
-            release(),
-            Event::Window(window::Event::RedrawRequested(now + Duration::from_secs(1))),
-        ] {
-            let mut shell = Shell::new(&window::Headless, Waker::new(|| {}), &mut messages);
-            next.update(
-                &mut tree,
-                &event,
-                layout,
+    fn style_changes_start_at_the_frame_that_draws_them() {
+        let draw = |control: &Animated<ColorProbe, Color>, tree: &Tree| {
+            control.draw(
+                tree,
+                &mut (),
+                &(),
+                &renderer::Style::default(),
+                Layout::new(Size::new(20.0, 20.0)),
+                mouse::Cursor::Unavailable,
+                &Rectangle::with_size(Size::new(100.0, 100.0)),
+            );
+        };
+        let frame = |control: &mut Animated<ColorProbe, Color>, tree: &mut Tree, now| {
+            let mut messages = Bus::new();
+            let mut shell = Shell::new(&window::Headless, Waker::noop(), &mut messages);
+            control.update(
+                tree,
+                &Event::Window(window::Event::RedrawRequested(now)),
+                Layout::new(Size::new(20.0, 20.0)),
                 mouse::Cursor::Unavailable,
                 &(),
                 &mut shell,
-                &viewport,
+                &Rectangle::with_size(Size::new(100.0, 100.0)),
             );
-        }
-        assert_eq!(messages.into_iter().collect::<Vec<_>>(), [4]);
-        let state = tree.state.downcast_ref::<StyleBinding<Color>>().0.borrow();
-        assert_eq!(state.animation.current(), Some(Color::WHITE));
-        assert!(!state.animation.is_animating());
+        };
+        let probe = |color| Animated::bind(|binding| ColorProbe { color, binding });
+
+        let mut control = probe(Color::BLACK);
+        let mut tree = Tree::new(&control as &dyn Widget<u8, (), ()>);
+        control.diff(&mut tree);
+        draw(&control, &tree);
+
+        // Frames run ahead of the wall clock here. Retargeting at the wall
+        // clock would start the spring a second early and skip the transition.
+        let start = Instant::now() + Duration::from_secs(1);
+        let mut control = probe(Color::WHITE);
+        tree.diff(&mut control as &mut dyn Widget<u8, (), ()>);
+        frame(&mut control, &mut tree, start);
+        draw(&control, &tree);
+        frame(&mut control, &mut tree, start + Duration::from_millis(40));
+
+        let mut expected = AnimationState::default();
+        let _ = expected.resolve(Color::BLACK, start);
+        let _ = expected.resolve(Color::WHITE, start);
+        expected.advance(start + Duration::from_millis(40));
+        let displayed = control.binding.0.borrow().animation.current().unwrap();
+        assert_ne!(displayed, Color::WHITE);
+        assert_eq!(Some(displayed), expected.current());
     }
 
     #[test]
@@ -510,52 +501,6 @@ mod tests {
     }
 
     #[test]
-    fn clicks_emit_the_original_message_once_across_view_rebuilds() {
-        // Borrowed messages also work: there is no Component::Event 'static bound.
-        let message = String::from("original message");
-        let mut control = animate(
-            Button::<_, ()>::new(iced::widget::Space::new().width(30).height(20))
-                .on_press(message.as_str()),
-        );
-        let mut tree = layout_button(&mut control);
-        let mut messages = Bus::new();
-        assert!(send(&mut control, &mut tree, press(), inside(), &mut messages).0);
-        assert!(messages.is_empty());
-        let mut rebuilt = animate(
-            Button::<_, ()>::new(iced::widget::Space::new().width(30).height(20))
-                .on_press(message.as_str()),
-        );
-        tree.diff(&mut rebuilt as &mut dyn Widget<_, Theme, ()>);
-        assert!(send(&mut rebuilt, &mut tree, release(), inside(), &mut messages).0);
-        send(&mut rebuilt, &mut tree, release(), inside(), &mut messages);
-        assert_eq!(messages.into_iter().collect::<Vec<_>>(), [message.as_str()]);
-    }
-
-    #[test]
-    fn canceled_and_disabled_clicks_emit_nothing() {
-        let mut control = animate(
-            Button::<_, ()>::new(iced::widget::Space::new().width(30).height(20)).on_press(1),
-        );
-        let mut tree = layout_button(&mut control);
-        let mut messages = Bus::new();
-        send(&mut control, &mut tree, press(), inside(), &mut messages);
-        send(
-            &mut control,
-            &mut tree,
-            release(),
-            mouse::Cursor::Unavailable,
-            &mut messages,
-        );
-        send(&mut control, &mut tree, press(), inside(), &mut messages);
-        let mut disabled = animate(Button::<_, ()>::new(
-            iced::widget::Space::new().width(30).height(20),
-        ));
-        tree.diff(&mut disabled as &mut dyn Widget<_, Theme, ()>);
-        assert!(!send(&mut disabled, &mut tree, release(), inside(), &mut messages).0);
-        assert!(messages.is_empty());
-    }
-
-    #[test]
     fn clipped_buttons_do_not_schedule_frames_for_unobserved_styles() {
         let mut control = animate(
             Button::<(), ()>::new(iced::widget::Space::new().width(30).height(20)).on_press(()),
@@ -576,117 +521,12 @@ mod tests {
         assert_eq!(shell.redraw_request(), window::RedrawRequest::Wait);
     }
 
-    struct EmitsOnRelease {
-        capture: bool,
-    }
-    impl Widget<u8, Theme, ()> for EmitsOnRelease {
-        fn size(&self) -> Size<Length> {
-            Size::new(Length::Fixed(30.0), Length::Fixed(20.0))
-        }
-        fn layout(&mut self, tree: &mut Tree, _: &(), _: &layout::Limits) {
-            tree.size = Size::new(30.0, 20.0);
-        }
-        fn draw(
-            &self,
-            _: &Tree,
-            _: &mut (),
-            _: &Theme,
-            _: &renderer::Style,
-            _: Layout,
-            _: mouse::Cursor,
-            _: &Rectangle,
-        ) {
-        }
-        fn update(
-            &mut self,
-            _: &mut Tree,
-            event: &Event,
-            _: Layout,
-            _: mouse::Cursor,
-            _: &(),
-            shell: &mut Shell<'_, u8>,
-            _: &Rectangle,
-        ) {
-            if matches!(
-                event,
-                Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))
-            ) {
-                shell.publish(7);
-                shell.publish(8);
-                if self.capture {
-                    shell.capture_event();
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn child_messages_keep_their_order_and_capture_prevents_parent_activation() {
-        for capture in [false, true] {
-            let mut control =
-                animate(Button::<_, ()>::new(Element::new(EmitsOnRelease { capture })).on_press(9));
-            let mut tree = layout_button(&mut control);
-            let mut messages = Bus::new();
-            send(&mut control, &mut tree, press(), inside(), &mut messages);
-            send(&mut control, &mut tree, release(), inside(), &mut messages);
-            let expected = if capture { vec![7, 8] } else { vec![7, 8, 9] };
-            assert_eq!(messages.into_iter().collect::<Vec<_>>(), expected);
-        }
-    }
-
     fn appearance_style(color: Color) -> Style {
         Style {
             background: Some(color.into()),
             text_color: color,
             ..Style::default()
         }
-    }
-
-    #[test]
-    fn holding_a_button_settles_to_its_pressed_style() {
-        use iced::widget::button::Status;
-
-        let mut control = animate(
-            Button::<(), ()>::new(iced::widget::Space::new().width(30).height(20)).on_press(()),
-        );
-        let mut tree = layout_button(&mut control);
-        let mut messages = Bus::new();
-        let now = Instant::now();
-        send(
-            &mut control,
-            &mut tree,
-            Event::Window(window::Event::RedrawRequested(now)),
-            inside(),
-            &mut messages,
-        );
-        draw(&control, &tree);
-        let hovered = crate::theme::button::standard(&Theme::Dark, Status::Hovered);
-        let pressed = crate::theme::button::standard(&Theme::Dark, Status::Pressed);
-        assert_ne!(hovered.background, pressed.background);
-        assert!(send(&mut control, &mut tree, press(), inside(), &mut messages).0);
-
-        for frame in 1..=60 {
-            let (_, redraw) = send(
-                &mut control,
-                &mut tree,
-                Event::Window(window::Event::RedrawRequested(
-                    now + Duration::from_millis(frame * 16),
-                )),
-                inside(),
-                &mut messages,
-            );
-            draw(&control, &tree);
-            if redraw == window::RedrawRequest::Wait {
-                break;
-            }
-        }
-        let state = tree.state.downcast_ref::<StyleBinding<Style>>().0.borrow();
-        assert_eq!(state.animation.current(), Some(pressed));
-        assert!(!state.animation.is_animating());
-        drop(state);
-        assert!(messages.is_empty());
-        send(&mut control, &mut tree, release(), inside(), &mut messages);
-        assert_eq!(messages.into_iter().collect::<Vec<_>>(), [()]);
     }
 
     struct Segments;

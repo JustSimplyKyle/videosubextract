@@ -6,6 +6,7 @@ use crate::{app::ReportLike, apply_traits::ApplyConditional};
 use iced::Color;
 use iced::font::Weight;
 use std::sync::LazyLock;
+use vse_ui::icon_button;
 use vse_ui::theme::WithRadius;
 use vse_ui::widget::AnimatedDropdown;
 
@@ -675,20 +676,15 @@ impl Model {
     }
 
     fn video_controls(player: &video_player_widget::Player) -> Element<'_, Message> {
-        let icon = |name| {
-            widget::icon::from_name(name)
-                .apply(widget::icon_button)
-                .padding(theme::spacing().space_xs)
-        };
         let seek_duration = Duration::from_secs(5);
-        let pause = icon("media-playback-pause-symbolic");
-        let start = icon("media-playback-start-symbolic");
-        let forward = icon("media-seek-forward-symbolic").on_press(Message::VideoPlayer(
+        let pause = icon_button!("media-playback-pause-symbolic");
+        let start = icon_button!("media-playback-start-symbolic");
+        let forward = icon_button!("media-seek-forward-symbolic").on_press(Message::VideoPlayer(
             video_player_widget::Message::Playback(
                 video_player_widget::PlayerMessage::SeekForward(seek_duration),
             ),
         ));
-        let backward = icon("media-seek-backward-symbolic").on_press(Message::VideoPlayer(
+        let backward = icon_button!("media-seek-backward-symbolic").on_press(Message::VideoPlayer(
             video_player_widget::Message::Playback(
                 video_player_widget::PlayerMessage::SeekBackward(seek_duration),
             ),

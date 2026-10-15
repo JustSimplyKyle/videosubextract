@@ -22,7 +22,7 @@ use std::{sync::Arc, time::Duration};
 pub(crate) use vse_ui::widget;
 use vse_ui::widget::AnimatedDropdown;
 pub(crate) use vse_ui::widget::icon;
-use vse_ui::{Apply, shell, theme};
+use vse_ui::{Apply, icon_button, shell, theme};
 
 trait Composition {
     type Message: 'static;
@@ -441,7 +441,7 @@ impl AppModel {
             vse_ui::components::dialog(
                 title,
                 content,
-                widget::button(icon::from_name("window-close-symbolic"))
+                icon_button!("window-close-symbolic")
                     .padding(theme::spacing().space_xxs)
                     .style(vse_ui::theme::button::icon)
                     .on_press(Message::CloseDialog),
