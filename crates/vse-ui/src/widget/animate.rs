@@ -1,10 +1,15 @@
-//! Generic style animation around a native widget.
+//! Generic value animation around a native widget, usually of its style.
 //!
 //! Build the widget first, then wrap it with `animate(widget)`. Input, messages,
 //! layout, operations, and overlays remain the responsibility of that widget.
 //! Use `Animated::bind` to connect other widgets' style functions directly.
+//!
+//! `bind` hands its builder a single-use [`Animate`] that can only wrap a
+//! function, so the animation state cannot be shared or fed values from
+//! elsewhere. Debug builds also assert that the wrapped function runs exactly
+//! once per draw, which catches a wrapper that was never installed.
 
-use crate::motion::{AnimationState, SpringConfig, TransitionStyle, presets};
+use crate::motion::{AnimationState, Mix, SpringConfig, presets};
 use iced::advanced::{
     Layout, Shell, Widget, layout, mouse, overlay, renderer,
     widget::{Operation, Tree, tree},
@@ -15,25 +20,25 @@ use std::{cell::RefCell, rc::Rc};
 
 /// Connects a widget's style function to the generic animation wrapper.
 pub trait Animatable {
-    type Style: TransitionStyle + 'static;
+    type Value: Mix + 'static;
     type Widget;
-    fn into_animated(self) -> Animated<Self::Widget, Self::Style>;
+    fn into_animated(self) -> Animated<Self::Widget, Self::Value>;
 }
 
-pub fn animate<W: Animatable>(widget: W) -> Animated<W::Widget, W::Style> {
+pub fn animate<Control: Animatable>(widget: Control) -> Animated<Control::Widget, Control::Value> {
     widget.into_animated()
 }
 
 /// A native widget plus its style animation and redraw scheduling.
-pub struct Animated<W, S> {
-    inner: W,
-    binding: StyleBinding<S>,
+pub struct Animated<Inner, Value> {
+    inner: Inner,
+    binding: Binding<Value>,
     config: SpringConfig,
 }
 
-impl<W, S> Animated<W, S> {
+impl<Inner, Value> Animated<Inner, Value> {
     /// The inner widget's style function must call this binding's `resolve`.
-    pub fn new(inner: W, binding: StyleBinding<S>) -> Self {
+    pub(crate) fn new(inner: Inner, binding: Binding<Value>) -> Self {
         Self {
             inner,
             binding,
@@ -48,49 +53,87 @@ impl<W, S> Animated<W, S> {
     }
 }
 
-impl<W, S: TransitionStyle> Animated<W, S> {
-    /// Builds a widget with a shared style binding and redraw scheduling.
+impl<Inner, Value: Mix> Animated<Inner, Value> {
+    /// Builds a widget that animates the output of one of its functions,
+    /// usually its style function.
     ///
-    /// Resolve the style function's result through the supplied binding. Its
-    /// arguments are unrestricted: the widget can pass a theme, status, both,
-    /// or any other inputs.
+    /// The builder receives an [`Animate`] and must install the function it
+    /// returns on the widget:
     ///
     /// ```
     /// use vse_ui::{theme, widget::{Animated, dropdown}};
     ///
     /// let control = dropdown(vec!["First", "Second"], Some(0), |index| index);
-    /// let animated = Animated::bind(|binding| {
-    ///     control.style(move |theme, status| {
-    ///         binding.resolve(theme::pick_list::standard(theme, status))
-    ///     })
+    /// let animated = Animated::bind(|animate| {
+    ///     control.style(animate.wrap(theme::pick_list::standard))
     /// });
     /// ```
-    pub fn bind(build: impl FnOnce(StyleBinding<S>) -> W) -> Self {
-        let binding = StyleBinding::default();
-        let inner = build(binding.clone());
+    ///
+    /// [`Animate`] is consumed by wrapping, so one binding animates exactly
+    /// one function:
+    ///
+    /// ```compile_fail,E0382
+    /// use vse_ui::{theme, widget::{Animated, dropdown}};
+    ///
+    /// let first = dropdown(vec!["First"], Some(0), |index| index);
+    /// let second = dropdown(vec!["Second"], Some(0), |index| index);
+    /// let animated = Animated::bind(|animate| {
+    ///     let _ = second.style(animate.wrap(theme::pick_list::standard));
+    ///     first.style(animate.wrap(theme::pick_list::standard))
+    /// });
+    /// ```
+    pub fn bind(build: impl FnOnce(Animate<Value>) -> Inner) -> Self {
+        let binding = Binding::default();
+        let inner = build(Animate(binding.clone()));
         Self::new(inner, binding)
     }
 }
 
-struct WidgetAnimationState<S> {
-    animation: AnimationState<S>,
+/// The single-use handle [`Animated::bind`] gives its builder.
+pub struct Animate<Value>(Binding<Value>);
+
+impl<Value: Mix> Animate<Value> {
+    /// Wraps a two-argument function, such as a `(theme, status)` style
+    /// function. Its output becomes the animation target; the wrapped
+    /// function returns the displayed value instead.
+    pub fn wrap<First: ?Sized, Second>(
+        self,
+        function: impl Fn(&First, Second) -> Value,
+    ) -> impl Fn(&First, Second) -> Value {
+        move |first, second| self.0.resolve(function(first, second))
+    }
+
+    /// Wraps a one-argument function, such as a theme-only style function.
+    pub fn wrap_unary<First: ?Sized>(
+        self,
+        function: impl Fn(&First) -> Value,
+    ) -> impl Fn(&First) -> Value {
+        move |first| self.0.resolve(function(first))
+    }
+}
+
+struct WidgetAnimationState<Value> {
+    animation: AnimationState<Value>,
     needs_observation: bool,
     /// The latest frame time. Style functions run during draw, which has no
     /// timestamp, so retargets happen at the frame being drawn.
     now: Instant,
+    /// Resolves since the current draw began, for the debug assertion.
+    resolves: usize,
 }
 
-impl<S> Default for WidgetAnimationState<S> {
+impl<Value> Default for WidgetAnimationState<Value> {
     fn default() -> Self {
         Self {
             animation: AnimationState::default(),
             needs_observation: true,
             now: Instant::now(),
+            resolves: 0,
         }
     }
 }
 
-impl<S: TransitionStyle> WidgetAnimationState<S> {
+impl<Value: Mix> WidgetAnimationState<Value> {
     fn update_config(&mut self, config: SpringConfig) {
         self.needs_observation = true;
         self.animation.set_config(config, self.now);
@@ -111,17 +154,17 @@ impl<S: TransitionStyle> WidgetAnimationState<S> {
     }
 }
 
-/// Animation state shared by the style function and its widget wrapper.
+/// Animation state shared by the wrapped function and its widget wrapper.
 #[derive(Clone)]
-pub struct StyleBinding<S>(Rc<RefCell<WidgetAnimationState<S>>>);
+pub(crate) struct Binding<Value>(Rc<RefCell<WidgetAnimationState<Value>>>);
 
-impl<S> Default for StyleBinding<S> {
+impl<Value> Default for Binding<Value> {
     fn default() -> Self {
         Self(Rc::new(RefCell::new(WidgetAnimationState::default())))
     }
 }
 
-impl<S: TransitionStyle> StyleBinding<S> {
+impl<Value: Mix> Binding<Value> {
     fn restore_state(&self, persisted: &mut Self) {
         if !Rc::ptr_eq(&self.0, &persisted.0) {
             // A rebuilt style closure already shares this builder's cell.
@@ -133,28 +176,30 @@ impl<S: TransitionStyle> StyleBinding<S> {
 
     /// Retargets at the latest frame time rather than the wall clock, so a
     /// style change starts exactly at the frame that first displays it.
-    pub fn resolve(&self, target: S) -> S {
+    pub(crate) fn resolve(&self, target: Value) -> Value {
         let mut state = self.0.borrow_mut();
+        state.resolves += 1;
         let now = state.now;
         state.animation.resolve(target, now)
     }
 }
 
-impl<Message, Theme, Renderer, W, S> Widget<Message, Theme, Renderer> for Animated<W, S>
+impl<Message, Theme, Renderer, Inner, Value> Widget<Message, Theme, Renderer>
+    for Animated<Inner, Value>
 where
-    W: Widget<Message, Theme, Renderer>,
-    S: TransitionStyle + 'static,
+    Inner: Widget<Message, Theme, Renderer>,
+    Value: Mix + 'static,
     Renderer: renderer::Renderer,
 {
     fn tag(&self) -> tree::Tag {
-        tree::Tag::of::<StyleBinding<S>>()
+        tree::Tag::of::<Binding<Value>>()
     }
     fn state(&self) -> tree::State {
         tree::State::new(self.binding.clone())
     }
     fn diff(&mut self, tree: &mut Tree) {
         self.binding
-            .restore_state(tree.state.downcast_mut::<StyleBinding<S>>());
+            .restore_state(tree.state.downcast_mut::<Binding<Value>>());
         self.binding.0.borrow_mut().update_config(self.config);
         tree.diff_children_custom(
             std::slice::from_mut(&mut self.inner),
@@ -201,7 +246,7 @@ where
         );
         let redraw = tree
             .state
-            .downcast_ref::<StyleBinding<S>>()
+            .downcast_ref::<Binding<Value>>()
             .0
             .borrow_mut()
             .update(event);
@@ -220,6 +265,7 @@ where
         cursor: mouse::Cursor,
         viewport: &Rectangle,
     ) {
+        self.binding.0.borrow_mut().resolves = 0;
         self.inner.draw(
             &tree.children[0],
             renderer,
@@ -231,11 +277,13 @@ where
         );
         // A redraw update can run repeatedly before draw. Only drawing resolves
         // the new style, so keep reserving a frame until it has been observed.
-        tree.state
-            .downcast_ref::<StyleBinding<S>>()
-            .0
-            .borrow_mut()
-            .needs_observation = false;
+        let mut state = self.binding.0.borrow_mut();
+        state.needs_observation = false;
+        debug_assert_eq!(
+            state.resolves, 1,
+            "an animated function must run exactly once per draw; \
+             install the function from `Animate::wrap` on the wrapped widget",
+        );
     }
     fn mouse_interaction(
         &self,
@@ -268,16 +316,16 @@ where
     }
 }
 
-impl<'a, Message, Theme, Renderer, W, S> From<Animated<W, S>>
+impl<'a, Message, Theme, Renderer, Inner, Value> From<Animated<Inner, Value>>
     for Element<'a, Message, Theme, Renderer>
 where
-    W: Widget<Message, Theme, Renderer> + 'a,
-    S: TransitionStyle + 'static,
+    Inner: Widget<Message, Theme, Renderer> + 'a,
+    Value: Mix + 'static,
     Message: 'a,
     Theme: 'a,
     Renderer: renderer::Renderer + 'a,
 {
-    fn from(animated: Animated<W, S>) -> Self {
+    fn from(animated: Animated<Inner, Value>) -> Self {
         Element::new(animated)
     }
 }
@@ -293,11 +341,11 @@ mod tests {
     // A different widget, style, and theme exercise the generic wrapper.
     struct ColorProbe {
         color: Color,
-        binding: StyleBinding<Color>,
+        binding: Binding<Color>,
     }
 
     impl Animatable for ColorProbe {
-        type Style = Color;
+        type Value = Color;
         type Widget = Self;
         fn into_animated(self) -> Animated<Self, Color> {
             let binding = self.binding.clone();
@@ -369,7 +417,12 @@ mod tests {
                 &Rectangle::with_size(Size::new(100.0, 100.0)),
             );
         };
-        let probe = |color| Animated::bind(|binding| ColorProbe { color, binding });
+        let probe = |color| {
+            Animated::bind(|animate| ColorProbe {
+                color,
+                binding: animate.0,
+            })
+        };
 
         let mut control = probe(Color::BLACK);
         let mut tree = Tree::new(&control as &dyn Widget<u8, (), ()>);
@@ -395,10 +448,51 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "exactly once per draw")]
+    fn debug_builds_reject_a_style_function_that_was_never_installed() {
+        struct Unstyled;
+        impl Widget<u8, (), ()> for Unstyled {
+            fn size(&self) -> Size<Length> {
+                Size::new(Length::Fixed(20.0), Length::Fixed(20.0))
+            }
+            fn layout(&mut self, tree: &mut Tree, _: &(), _: &layout::Limits) {
+                tree.size = Size::new(20.0, 20.0);
+            }
+            fn draw(
+                &self,
+                _: &Tree,
+                _: &mut (),
+                _: &(),
+                _: &renderer::Style,
+                _: Layout,
+                _: mouse::Cursor,
+                _: &Rectangle,
+            ) {
+            }
+        }
+
+        let mut control = Animated::<_, Color>::bind(|animate| {
+            let _unused = animate.wrap_unary(|color: &Color| *color);
+            Unstyled
+        });
+        let mut tree = Tree::new(&control as &dyn Widget<u8, (), ()>);
+        control.diff(&mut tree);
+        control.draw(
+            &tree,
+            &mut (),
+            &(),
+            &renderer::Style::default(),
+            Layout::new(Size::new(20.0, 20.0)),
+            mouse::Cursor::Unavailable,
+            &Rectangle::with_size(Size::new(100.0, 100.0)),
+        );
+    }
+
+    #[test]
     fn repeated_diffs_and_rebuilds_preserve_an_in_flight_trajectory() {
         let mut first = animate(ColorProbe {
             color: Color::WHITE,
-            binding: StyleBinding::default(),
+            binding: Binding::default(),
         });
         let mut tree = Tree::new(&first as &dyn Widget<u8, (), ()>);
         first.diff(&mut tree);
@@ -418,7 +512,7 @@ mod tests {
 
         let mut rebuilt = animate(ColorProbe {
             color: Color::WHITE,
-            binding: StyleBinding::default(),
+            binding: Binding::default(),
         });
         tree.diff(&mut rebuilt as &mut dyn Widget<u8, (), ()>);
         // Re-diffing the same builder must neither borrow its cell twice nor
@@ -628,7 +722,7 @@ mod tests {
             }
             let state = tree.children[0].children[index]
                 .state
-                .downcast_ref::<StyleBinding<Style>>()
+                .downcast_ref::<Binding<Style>>()
                 .0
                 .borrow();
             let pressed = crate::theme::segmented_button(
@@ -688,7 +782,7 @@ mod tests {
         draw(&rebuilt, &tree);
         assert!(
             tree.state
-                .downcast_ref::<StyleBinding<Style>>()
+                .downcast_ref::<Binding<Style>>()
                 .0
                 .borrow()
                 .animation
@@ -706,7 +800,7 @@ mod tests {
         draw(&rebuilt, &tree);
         let style = tree
             .state
-            .downcast_ref::<StyleBinding<Style>>()
+            .downcast_ref::<Binding<Style>>()
             .0
             .borrow()
             .animation

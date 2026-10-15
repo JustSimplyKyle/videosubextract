@@ -1,7 +1,7 @@
 //! COSMIC button builders. `animate(button)` adds style transitions.
 
-use super::animate::{Animatable, Animated, StyleBinding};
-use crate::motion::{TransitionStyle, mix_oklab};
+use super::animate::{Animatable, Animated, Binding};
+use crate::motion::{Mix, mix_oklab};
 use iced::advanced::renderer;
 pub use iced::widget::button::*;
 use iced::{Background, Element, Length, Padding, Theme};
@@ -16,14 +16,14 @@ where
     Renderer: renderer::Renderer,
 {
     inner: iced::widget::Button<'a, Message, Theme, Renderer>,
-    binding: StyleBinding<Style>,
+    binding: Binding<Style>,
 }
 
 impl<'a, Message, Renderer: renderer::Renderer> Button<'a, Message, Renderer> {
     pub fn new(content: impl Into<Element<'a, Message, Theme, Renderer>>) -> Self {
         Self {
             inner: iced::widget::Button::new(content),
-            binding: StyleBinding::default(),
+            binding: Binding::default(),
         }
         .style(crate::theme::button::standard)
     }
@@ -82,7 +82,7 @@ impl<'a, Message, Renderer: renderer::Renderer> Button<'a, Message, Renderer> {
     }
 }
 
-impl TransitionStyle for Style {
+impl Mix for Style {
     fn mix(&self, to: &Self, progress: f32) -> Self {
         let background = match (self.background, to.background) {
             (Some(Background::Color(from)), Some(Background::Color(to))) => {
@@ -113,10 +113,10 @@ impl TransitionStyle for Style {
 }
 
 impl<'a, Message, Renderer: renderer::Renderer> Animatable for Button<'a, Message, Renderer> {
-    type Style = Style;
+    type Value = Style;
     type Widget = iced::widget::Button<'a, Message, Theme, Renderer>;
 
-    fn into_animated(self) -> Animated<Self::Widget, Self::Style> {
+    fn into_animated(self) -> Animated<Self::Widget, Self::Value> {
         Animated::new(self.inner, self.binding)
     }
 }

@@ -1,7 +1,7 @@
 //! Apply COSMIC color transitions to a fully configured native pick list.
 
 use super::animate::Animated;
-use crate::motion::{TransitionStyle, mix_oklab};
+use crate::motion::{Mix, mix_oklab};
 use iced::widget::pick_list::{PickList, Style};
 use iced::{Background, Theme};
 use std::borrow::Borrow;
@@ -18,15 +18,11 @@ where
     Message: Clone,
 {
     fn from(dropdown: PickList<'a, T, L, V, Message, Theme>) -> Self {
-        Animated::bind(|binding| {
-            dropdown.style(move |theme, status| {
-                binding.resolve(crate::theme::pick_list::standard(theme, status))
-            })
-        })
+        Animated::bind(|animate| dropdown.style(animate.wrap(crate::theme::pick_list::standard)))
     }
 }
 
-impl TransitionStyle for Style {
+impl Mix for Style {
     fn mix(&self, to: &Self, progress: f32) -> Self {
         let background = match (self.background, to.background) {
             (Background::Color(from), Background::Color(to)) => {

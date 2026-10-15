@@ -13,7 +13,7 @@ pub mod button;
 pub use button::{Button, button};
 
 pub mod animate;
-pub use animate::{Animatable, Animated, StyleBinding, animate};
+pub use animate::{Animatable, Animate, Animated, animate};
 
 pub mod dropdown;
 pub use dropdown::AnimatedDropdown;

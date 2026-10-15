@@ -96,8 +96,8 @@ use iced::widget::Action;
 use iced::{Color, Event, window};
 use springs::Spring;
 
-mod style;
-pub use style::{AnimationState, Appearance, TransitionStyle};
+mod blend;
+pub use blend::{AnimationState, Blend, Mix};
 
 /// Configuration for the underlying analytical spring solver.
 ///
@@ -384,11 +384,11 @@ impl iced::widget::transition::Program for EarlyExitMotion {
 /// parent message. Publishing an internal event alone is insufficient to sustain
 /// the redraw loop. This action does not capture input; handle clicks or touches
 /// separately before calling it.
-pub fn frame_action<T>(
+pub fn frame_action<FrameEvent>(
     event: &Event,
     is_animating: bool,
-    frame_event: impl FnOnce(Instant) -> T,
-) -> Action<T> {
+    frame_event: impl FnOnce(Instant) -> FrameEvent,
+) -> Action<FrameEvent> {
     if !is_animating {
         return Action::none();
     }

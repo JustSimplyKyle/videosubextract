@@ -1,20 +1,21 @@
-//! Style transitions driven by one scalar [`Motion`].
+//! Transitions between values driven by one scalar [`Motion`].
 //!
-//! Widgets resolve their target style and schedule redraws. These types only
-//! own interpolation, spring configuration, and animation time.
+//! The values are usually widget styles, but any [`Mix`] type works. Widgets
+//! resolve their target and schedule redraws. These types only own
+//! interpolation, spring configuration, and animation time.
 
 use super::{Motion, SpringConfig, mix_oklab, presets};
 use iced::{Color, time::Instant};
 
-/// The interpolation policy for a style.
+/// How to interpolate between two values of a type.
 ///
 /// `progress` is clamped to `[0, 1]`. The transition returns exact endpoint
-/// styles itself; implementations only need to handle intermediate values.
-pub trait TransitionStyle: Clone + PartialEq {
+/// values itself; implementations only need to handle intermediate values.
+pub trait Mix: Clone + PartialEq {
     fn mix(&self, to: &Self, progress: f32) -> Self;
 }
 
-impl TransitionStyle for Color {
+impl Mix for Color {
     fn mix(&self, to: &Self, progress: f32) -> Self {
         mix_oklab(*self, *to, progress)
     }
@@ -27,7 +28,7 @@ enum Endpoint {
 }
 
 /// Two style endpoints and a single spring for their blend progress.
-pub struct Appearance<Style> {
+pub struct Blend<Style> {
     from: Style,
     to: Style,
     destination: Endpoint,
@@ -35,9 +36,9 @@ pub struct Appearance<Style> {
     config: SpringConfig,
 }
 
-impl<S: TransitionStyle> Appearance<S> {
+impl<Value: Mix> Blend<Value> {
     /// Mount at the supplied style, already settled.
-    pub fn new(style: S, now: Instant, config: SpringConfig) -> Self {
+    pub fn new(style: Value, now: Instant, config: SpringConfig) -> Self {
         Self {
             from: style.clone(),
             to: style,
@@ -47,7 +48,7 @@ impl<S: TransitionStyle> Appearance<S> {
         }
     }
 
-    pub fn target(&self) -> &S {
+    pub fn target(&self) -> &Value {
         match self.destination {
             Endpoint::From => &self.from,
             Endpoint::To => &self.to,
@@ -56,7 +57,7 @@ impl<S: TransitionStyle> Appearance<S> {
 
     /// Reverse to an existing endpoint without resetting position or velocity.
     /// A third style starts a new blend from the currently displayed style.
-    pub fn retarget(&mut self, target: S, now: Instant) {
+    pub fn retarget(&mut self, target: Value, now: Instant) {
         if &target == self.target() {
             return;
         }
@@ -76,7 +77,7 @@ impl<S: TransitionStyle> Appearance<S> {
         }
     }
 
-    pub fn current(&self) -> S {
+    pub fn current(&self) -> Value {
         let progress = self.progress.value().clamp(0.0, 1.0);
         if progress <= 0.0 {
             self.from.clone()
@@ -105,18 +106,18 @@ impl<S: TransitionStyle> Appearance<S> {
 }
 
 /// only deals with spring movement, parent decides when to "update" the spring
-pub struct AnimationState<S> {
-    appearance: Option<Appearance<S>>,
+pub struct AnimationState<Value> {
+    appearance: Option<Blend<Value>>,
     config: SpringConfig,
 }
 
-impl<S> Default for AnimationState<S> {
+impl<Value> Default for AnimationState<Value> {
     fn default() -> Self {
         Self::new(presets::snappy())
     }
 }
 
-impl<S> AnimationState<S> {
+impl<Value> AnimationState<Value> {
     pub fn new(config: SpringConfig) -> Self {
         Self {
             appearance: None,
@@ -125,19 +126,19 @@ impl<S> AnimationState<S> {
     }
 }
 
-impl<S: TransitionStyle> AnimationState<S> {
+impl<Value: Mix> AnimationState<Value> {
     /// Initialize or retarget to a resolved style, returning its displayed value.
-    pub fn resolve(&mut self, target: S, now: Instant) -> S {
+    pub fn resolve(&mut self, target: Value, now: Instant) -> Value {
         match &mut self.appearance {
             Some(appearance) => appearance.retarget(target, now),
-            None => self.appearance = Some(Appearance::new(target, now, self.config)),
+            None => self.appearance = Some(Blend::new(target, now, self.config)),
         }
         self.appearance.as_ref().unwrap().current()
     }
 
     /// The displayed style, or `None` before the first style is resolved.
-    pub fn current(&self) -> Option<S> {
-        self.appearance.as_ref().map(Appearance::current)
+    pub fn current(&self) -> Option<Value> {
+        self.appearance.as_ref().map(Blend::current)
     }
 
     pub fn set_config(&mut self, config: SpringConfig, now: Instant) {
@@ -154,9 +155,7 @@ impl<S: TransitionStyle> AnimationState<S> {
     }
 
     pub fn is_animating(&self) -> bool {
-        self.appearance
-            .as_ref()
-            .is_some_and(Appearance::is_animating)
+        self.appearance.as_ref().is_some_and(Blend::is_animating)
     }
 }
 
@@ -182,7 +181,7 @@ mod tests {
         }
     }
 
-    impl TransitionStyle for NamedStyle {
+    impl Mix for NamedStyle {
         fn mix(&self, to: &Self, progress: f32) -> Self {
             Self {
                 brightness: self.brightness + (to.brightness - self.brightness) * progress,
@@ -196,7 +195,7 @@ mod tests {
         let now = Instant::now();
         let from = NamedStyle::new(0.0, "off");
         let to = NamedStyle::new(1.0, "on");
-        let mut appearance = Appearance::new(from.clone(), now, presets::snappy());
+        let mut appearance = Blend::new(from.clone(), now, presets::snappy());
         appearance.retarget(to, now);
         let later = now + Duration::from_millis(40);
         appearance.advance(later);
