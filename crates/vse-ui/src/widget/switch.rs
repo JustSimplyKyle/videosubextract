@@ -6,7 +6,7 @@
 //! This example handles pointer and touch input; keyboard focus is not implemented.
 
 use crate::Apply;
-use crate::motion::{Motion, mix_oklab};
+use crate::motion::{Motion, Motions, mix_oklab, presets};
 use iced::advanced::{mouse, renderer};
 use iced::time::Instant;
 use iced::widget::{Container, Space, container, mouse_area, row, transition};
@@ -68,8 +68,9 @@ impl<'a, Message> Switch<'a, Message> {
         self.on_toggle = Some(Rc::new(callback));
         self
     }
-    /// Choose a spring preset. Applies on mount; the transition keeps its
-    /// motion afterwards.
+    /// Choose the thumb's spring preset; bouncy presets overshoot into the
+    /// track's padding. The track color always uses a critically damped
+    /// spring. Changes apply on the next frame, keeping the thumb's motion.
     #[must_use]
     pub const fn with_config(mut self, config: springs::SpringConfig) -> Self {
         self.spring_config = config;
@@ -93,20 +94,25 @@ impl<'a, Message: 'a, Renderer: renderer::Renderer + 'a> From<Switch<'a, Message
             size,
         } = switch;
         let target = if is_enabled { 1.0 } else { 0.0 };
-        let on_toggle: Option<Rc<dyn Fn(bool) -> Message + 'a>> = on_toggle.map(Rc::from);
 
         transition(
-            target,
+            [(target, spring_config), (target, presets::snappy())],
             // Mount at the incoming value rather than animating from zero.
-            move || Motion::new_with_config(target, Instant::now(), spring_config),
-            move |motion: &Motion, _| -> Element<'a, Message, Theme, Renderer> {
-                let progress = motion.value().clamp(0.0, 1.0);
+            move || {
+                let now = Instant::now();
+                Motions([Motion::new(target, now), Motion::new(target, now)])
+            },
+            move |Motions([thumb, color]): &Motions<2>,
+                  _|
+                  -> Element<'a, Message, Theme, Renderer> {
+                let thumb = thumb.value();
+                let color = color.value();
                 let Some(on_toggle) = on_toggle.clone() else {
-                    return track(size, progress, false).into();
+                    return track(size, thumb, color, false).into();
                 };
 
                 let on_toggle = on_toggle.clone();
-                mouse_area(track(size, progress, true))
+                mouse_area(track(size, thumb, color, true))
                     .on_press(())
                     .interaction(mouse::Interaction::Pointer)
                     .apply(Element::from)
@@ -117,15 +123,18 @@ impl<'a, Message: 'a, Renderer: renderer::Renderer + 'a> From<Switch<'a, Message
     }
 }
 
-/// The track and thumb at `progress`, with the track color blended in Oklab.
+/// The track with its thumb at `thumb` progress and its color blended in Oklab
+/// at `color` progress. The thumb may overshoot into the padding, but never
+/// past the track's edge.
 fn track<'a, Message: 'a, Renderer: renderer::Renderer + 'a>(
     size: Size,
-    progress: f32,
+    thumb: f32,
+    color: f32,
     interactive: bool,
 ) -> Container<'a, Message, Theme, Renderer> {
     let alpha = if interactive { 1.0 } else { 0.45 };
 
-    let thumb = container(Space::new())
+    let knob = container(Space::new())
         .width(size.thumb_size())
         .height(size.thumb_size())
         .style(move |_| container::Style {
@@ -137,12 +146,16 @@ fn track<'a, Message: 'a, Renderer: renderer::Renderer + 'a>(
             ..container::Style::default()
         });
 
-    let content = row![Space::new().width(size.track_width() * progress), thumb]
+    let offset = size
+        .track_width()
+        .mul_add(thumb, size.inset)
+        .clamp(0.0, 2.0f32.mul_add(size.inset, size.track_width()));
+    let content = row![Space::new().width(offset), knob]
         .width(Fill)
         .height(Fill)
         .align_y(iced::Alignment::Center);
     container(content)
-        .padding(size.inset)
+        .padding([size.inset, 0.0])
         .width(size.width)
         .height(size.height)
         .style(move |theme: &Theme| container::Style {
@@ -150,7 +163,7 @@ fn track<'a, Message: 'a, Renderer: renderer::Renderer + 'a>(
                 mix_oklab(
                     theme.palette().background.strong.color,
                     theme.palette().primary.base.color,
-                    progress,
+                    color.clamp(0.0, 1.0),
                 )
                 .scale_alpha(alpha)
                 .into(),

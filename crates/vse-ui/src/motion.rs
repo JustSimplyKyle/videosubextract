@@ -29,9 +29,11 @@
 //!
 //! Without a component, Iced's [`transition`](iced::widget::transition()) widget
 //! can own the spring instead. [`Motion`] implements its `Program`: the
-//! transition's value is the target, the widget tree keeps the motion across
-//! view rebuilds, and the widget schedules its own frames. The `view` closure
-//! runs every frame while animating, so keep it cheap.
+//! transition's value is a `(target, config)` pair, the widget tree keeps the
+//! motion across view rebuilds, and the widget schedules its own frames. The
+//! `init` closure only runs on mount, so pass the configuration in the value:
+//! a changed one applies on the next frame, keeping position and velocity.
+//! The `view` closure runs every frame while animating, so keep it cheap.
 //!
 //! ```
 //! use iced::time::Instant;
@@ -40,8 +42,8 @@
 //!
 //! fn smooth_progress<'a, Message: 'a>(progress: f32) -> iced::Element<'a, Message> {
 //!     transition(
-//!         progress,
-//!         || Motion::new_with_config(0.0, Instant::now(), presets::gentle()),
+//!         (progress, presets::gentle()),
+//!         || Motion::new(0.0, Instant::now()),
 //!         |motion: &Motion, _| progress_bar(0.0..=1.0, motion.value()),
 //!     )
 //!     .into()
@@ -60,8 +62,8 @@
 //!
 //! fn toast<'a, Message: 'a>(visible: bool) -> Element<'a, Message> {
 //!     transition(
-//!         if visible { 1.0 } else { 0.0 },
-//!         || EarlyExitMotion::new(Motion::new_with_config(0.0, Instant::now(), presets::quick()), 0.01),
+//!         (if visible { 1.0 } else { 0.0 }, presets::quick()),
+//!         || EarlyExitMotion::new(Motion::new(0.0, Instant::now()), 0.01),
 //!         move |exit: &EarlyExitMotion, _| -> Element<'a, Message> {
 //!             if visible || exit.is_present() {
 //!                 let opacity = exit.motion().value().clamp(0.0, 1.0);
@@ -295,18 +297,64 @@ impl Motion {
 }
 
 /// Drives a [`transition`](iced::widget::transition()) with a spring. The
-/// transition's value is the target; retargeting keeps position and velocity.
-/// See the [module docs](self#with-transition).
+/// transition's value is `(target, config)`; changing either keeps position
+/// and velocity. See the [module docs](self#with-transition).
 impl iced::widget::transition::Program for Motion {
-    type Value = f32;
+    type Value = (f32, SpringConfig);
 
-    fn go(&mut self, target: f32, now: Instant) {
+    fn go(&mut self, (target, config): Self::Value, now: Instant) {
+        self.set_config(config, now);
         self.retarget(target, now);
         self.advance(now);
     }
 
     fn is_animating(&self, _: Instant) -> bool {
         Motion::is_animating(self)
+    }
+}
+
+/// Several motions as one `transition` program, each with its own
+/// `(target, config)`.
+///
+/// Give each motion its own configuration to animate properties differently,
+/// for example a bouncy spring for geometry and a critically damped one for
+/// color.
+///
+/// ```
+/// use iced::time::Instant;
+/// use iced::widget::{column, progress_bar, transition};
+/// use vse_ui::motion::{Motion, Motions, presets};
+///
+/// fn bars<'a, Message: 'a>(target: f32) -> iced::Element<'a, Message> {
+///     transition(
+///         [(target, presets::bouncy()), (target, presets::snappy())],
+///         move || {
+///             let now = Instant::now();
+///             Motions([Motion::new(target, now), Motion::new(target, now)])
+///         },
+///         |Motions([position, opacity]): &Motions<2>, _| {
+///             column![
+///                 progress_bar(0.0..=1.0, position.value()),
+///                 progress_bar(0.0..=1.0, opacity.value()),
+///             ]
+///         },
+///     )
+///     .into()
+/// }
+/// ```
+pub struct Motions<const N: usize>(pub [Motion; N]);
+
+impl<const N: usize> iced::widget::transition::Program for Motions<N> {
+    type Value = [(f32, SpringConfig); N];
+
+    fn go(&mut self, values: Self::Value, now: Instant) {
+        for (motion, value) in self.0.iter_mut().zip(values) {
+            motion.go(value, now);
+        }
+    }
+
+    fn is_animating(&self, _: Instant) -> bool {
+        self.0.iter().any(Motion::is_animating)
     }
 }
 
@@ -343,10 +391,10 @@ impl EarlyExitMotion {
 }
 
 impl iced::widget::transition::Program for EarlyExitMotion {
-    type Value = f32;
+    type Value = (f32, SpringConfig);
 
-    fn go(&mut self, target: f32, now: Instant) {
-        self.motion.go(target, now);
+    fn go(&mut self, (target, config): Self::Value, now: Instant) {
+        self.motion.go((target, config), now);
         if target == 0.0
             && self.motion.is_animating()
             && self.motion.is_exit_complete(self.threshold)
@@ -459,34 +507,60 @@ mod tests {
     }
 
     #[test]
+    fn transition_values_change_config_without_losing_position_or_velocity() {
+        let now = Instant::now();
+        let later = now + Duration::from_millis(60);
+        let mut gentle = Motion::new(0.0, now);
+        let mut changed = Motion::new(0.0, now);
+        for motion in [&mut gentle, &mut changed] {
+            motion.go((1.0, presets::gentle()), now);
+            motion.go((1.0, presets::gentle()), later);
+        }
+        let (position, velocity) = (changed.value(), changed.velocity());
+
+        // The init closure only runs on mount; later views pass configs here.
+        changed.go((1.0, presets::snappy()), later);
+        assert_eq!(changed.value(), position);
+        assert_eq!(changed.velocity(), velocity);
+        let next = later + Duration::from_millis(16);
+        gentle.go((1.0, presets::gentle()), next);
+        changed.go((1.0, presets::snappy()), next);
+        assert_ne!(
+            changed.value(),
+            gentle.value(),
+            "the new config drives the next frame"
+        );
+    }
+
+    #[test]
     fn quick_exit_snaps_to_zero_but_entry_keeps_its_overshoot() {
         let now = Instant::now();
-        let mut exit =
-            EarlyExitMotion::new(Motion::new_with_config(0.0, now, presets::quick()), 0.01);
+        let quick = presets::quick();
+        let mut exit = EarlyExitMotion::new(Motion::new(0.0, now), 0.01);
         let frames =
             |start: Instant| (1..=60).map(move |frame| start + Duration::from_millis(frame * 16));
 
-        exit.go(1.0, now);
+        exit.go((1.0, quick), now);
         let peak = frames(now)
             .map(|now| {
-                exit.go(1.0, now);
+                exit.go((1.0, quick), now);
                 exit.motion().value()
             })
             .fold(0.0, f32::max);
         assert!(peak > 1.0, "entry is not clipped");
 
         let closing = now + Duration::from_secs(5);
-        exit.go(1.0, closing);
-        exit.go(0.0, closing);
+        exit.go((1.0, quick), closing);
+        exit.go((0.0, quick), closing);
         let finished = frames(closing)
             .position(|now| {
-                exit.go(0.0, now);
+                exit.go((0.0, quick), now);
                 !Program::is_animating(&exit, now)
             })
             .expect("the exit finishes");
         assert!(finished * 16 <= 200, "finished after {} ms", finished * 16);
         for now in frames(closing + Duration::from_secs(1)) {
-            exit.go(0.0, now);
+            exit.go((0.0, quick), now);
             assert!(!Program::is_animating(&exit, now));
             assert_eq!(exit.motion().value(), 0.0);
         }

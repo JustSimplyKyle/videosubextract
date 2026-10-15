@@ -42,7 +42,7 @@ pub struct Dialog<'a, Message, Renderer = iced::Renderer> {
 }
 
 impl<Message, Renderer> Dialog<'_, Message, Renderer> {
-    /// Applies on mount. The transition keeps its motion until it is reset.
+    /// Changes apply on the next frame, keeping the current motion.
     #[must_use]
     pub fn with_config(mut self, config: SpringConfig) -> Self {
         self.config = config;
@@ -61,13 +61,8 @@ impl<'a, Message: 'a, Renderer: renderer::Renderer + 'a> From<Dialog<'a, Message
         } = dialog;
 
         iced::widget::transition(
-            if open { 1.0 } else { 0.0 },
-            move || {
-                EarlyExitMotion::new(
-                    Motion::new_with_config(0.0, Instant::now(), config),
-                    EXIT_THRESHOLD,
-                )
-            },
+            (if open { 1.0 } else { 0.0 }, config),
+            || EarlyExitMotion::new(Motion::new(0.0, Instant::now()), EXIT_THRESHOLD),
             move |exit: &EarlyExitMotion, _| {
                 if open || exit.is_present() {
                     present(content(), exit.motion().value(), open)
