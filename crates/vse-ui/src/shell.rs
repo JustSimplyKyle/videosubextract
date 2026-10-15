@@ -78,17 +78,15 @@ impl<'a, Message: Clone + 'a> From<Shell<'a, Message>> for Element<'a, Message> 
 
         let header = shell.controls.map(|(toggle_navigation, open_settings)| {
             row![
-                button(crate::widget::icon::from_name("open-menu-symbolic"))
+                button(crate::widget::icon!("open-menu-symbolic"))
                     .padding(8)
                     .style(crate::theme::button::icon)
                     .on_press(toggle_navigation),
                 iced::widget::Space::new().width(Fill),
-                button(crate::widget::icon::from_name(
-                    "preferences-system-symbolic"
-                ))
-                .padding(8)
-                .style(crate::theme::button::icon)
-                .on_press(open_settings),
+                button(crate::widget::icon!("preferences-system-symbolic"))
+                    .padding(8)
+                    .style(crate::theme::button::icon)
+                    .on_press(open_settings),
             ]
             .align_y(Alignment::Center)
             .width(Fill)
@@ -111,7 +109,7 @@ impl<'a, Message: Clone + 'a> From<Shell<'a, Message>> for Element<'a, Message> 
             container(
                 row![
                     text(message),
-                    button(crate::widget::icon::from_name("window-close-symbolic"))
+                    button(crate::widget::icon!("window-close-symbolic"))
                         .padding(4)
                         .style(crate::theme::button::icon)
                         .on_press(close),

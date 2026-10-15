@@ -71,15 +71,15 @@ pub fn collapsible_section<'a, Message: Clone + 'a>(
 ) -> iced::widget::Column<'a, Message> {
     let spacing = crate::theme::spacing();
     let indicator = if expanded {
-        "go-down-symbolic"
+        crate::widget::icon!("go-down-symbolic")
     } else {
-        "go-next-symbolic"
+        crate::widget::icon!("go-next-symbolic")
     };
     let header = crate::widget::button(
         row![
             title3(title.into()),
             iced::widget::Space::new().width(Fill),
-            crate::widget::icon::from_name(indicator),
+            indicator,
         ]
         .align_y(Alignment::Center)
         .width(Fill),

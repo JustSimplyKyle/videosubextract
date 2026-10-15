@@ -1,6 +1,8 @@
 //! Upstream-iced presentation layer for VideoSubExtract.
 #![feature(iter_intersperse, default_field_values)]
 
+extern crate self as vse_ui;
+
 pub use iced;
 pub type Element<'a, Message> = iced::Element<'a, Message, theme::Theme>;
 pub use theme::Theme;

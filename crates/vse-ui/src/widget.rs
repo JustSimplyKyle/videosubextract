@@ -52,63 +52,8 @@ pub mod tooltip {
     }
 }
 
+pub use freedesktop_icon_assets::icon;
 pub use tooltip::{Tooltip, tooltip};
-pub mod icon {
-    use std::{cell::RefCell, collections::HashMap};
-
-    use iced::{Element, Length, widget::svg};
-
-    thread_local! {
-        static ICON_CACHE: RefCell<HashMap<&'static str, Option<svg::Handle>>> = RefCell::new(HashMap::new());
-    }
-    fn icon_lookup(name: &'static str, symbolic: bool) -> Option<svg::Handle> {
-        let extra_paths = std::env::var_os("COSMIC_ICONS")
-            .map(std::path::PathBuf::from)
-            .into_iter()
-            .collect::<Vec<_>>();
-        let lookup = |candidate: &str| {
-            // the `with_cache()` doesn't work with extra paths sent in by COSMIC_ICONS
-            let lookup = freedesktop_icons::lookup(candidate)
-                .with_theme("Cosmic")
-                .with_extra_paths(&extra_paths)
-                .with_size(16)
-                .with_cache();
-            if symbolic {
-                lookup.force_svg().find()
-            } else {
-                lookup.find()
-            }
-        };
-
-        let path = lookup(name).or_else(|| {
-            name.rmatch_indices('-')
-                .find_map(|(position, _)| lookup(&name[..position]))
-        });
-
-        path.map(iced::widget::svg::Handle::from_path)
-    }
-    pub fn from_name<'a, Message: 'a>(name: &'static str) -> Element<'a, Message> {
-        let symbolic = name.ends_with("-symbolic");
-        let handle = ICON_CACHE.with(move |x| {
-            x.borrow_mut()
-                .entry(name)
-                .or_insert_with(move || icon_lookup(name, symbolic))
-                .clone()
-        });
-        handle.map_or_else(
-            || iced::widget::space().width(16).height(16).into(),
-            |x| {
-                iced::widget::svg(x)
-                    .style(move |_, _| iced::widget::svg::Style {
-                        color: symbolic.then(crate::theme::icon_color),
-                    })
-                    .width(Length::Fixed(16.0))
-                    .height(Length::Fixed(16.0))
-                    .into()
-            },
-        )
-    }
-}
 
 pub fn dropdown<'a, Message: Clone + 'a>(
     options: Vec<impl Into<String>>,
@@ -163,7 +108,7 @@ where
         value + step
     };
 
-    let decrement_button = button(icon::from_name("list-remove-symbolic"))
+    let decrement_button = button(icon!("list-remove-symbolic"))
         .padding(6)
         .style(crate::theme::button::icon);
     let decrement_button = if value > min {
@@ -172,7 +117,7 @@ where
         decrement_button
     };
 
-    let increment_button = button(icon::from_name("list-add-symbolic"))
+    let increment_button = button(icon!("list-add-symbolic"))
         .padding(6)
         .style(crate::theme::button::icon);
     let increment_button = if value < max {

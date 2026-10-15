@@ -84,7 +84,8 @@ pub fn iced_theme() -> Theme {
 pub fn color(value: Srgba) -> Color {
     Color::from_rgba(value.red, value.green, value.blue, value.alpha)
 }
-pub(crate) fn icon_color() -> Color {
+/// The semantic foreground color for symbolic icons.
+pub fn icon_color() -> Color {
     color(COSMIC.icon_button.on)
 }
 fn radius(value: [f32; 4]) -> ::iced::border::Radius {

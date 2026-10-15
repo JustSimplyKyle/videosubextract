@@ -7,9 +7,15 @@ publish = false
 
 [dependencies]
 iced = { workspace = true }
+freedesktop-icon-assets = { path = "../../../pagecut/crates/freedesktop-icon-assets" }
 cosmic-theme = { path = "../../../libcosmic/cosmic-theme", default-features = false }
 indexmap = "2.14.2"
 springs = "0.1.2"
 
-[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
-freedesktop-icons = { package = "cosmic-freedesktop-icons", git = "https://github.com/pop-os/freedesktop-icons" }
+# Keep desktop configuration out of browser builds.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+cosmic-theme = { path = "../../../libcosmic/cosmic-theme", default-features = false, features = ["config"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+manganis = "=0.7.10"
+dioxus-cli-config = { version = "=0.7.10", features = ["web"] }
