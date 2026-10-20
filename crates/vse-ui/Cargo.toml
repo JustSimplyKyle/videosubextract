@@ -20,6 +20,11 @@ cosmic-theme = { path = "../../../libcosmic/cosmic-theme", default-features = fa
 manganis = "=0.7.10"
 dioxus-cli-config = { version = "=0.7.10", features = ["web"] }
 
+# `icon!` reads the SVGs dx bundles into the APK.
+[target.'cfg(target_os = "android")'.dependencies]
+manganis = "=0.7.10"
+dioxus-asset-resolver = { version = "=0.7.10", features = ["native"] }
+
 [dev-dependencies]
 # Headless widget tests; tiny-skia lets them run without a GPU adapter.
 iced = { workspace = true, features = ["tiny-skia"] }
