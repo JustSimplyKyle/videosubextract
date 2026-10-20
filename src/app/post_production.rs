@@ -380,20 +380,22 @@ impl Model {
             |name| name.to_string_lossy().into_owned(),
         );
         let details = fl!("subtitle-count", count = subtitles.results().len());
-        let (status, state) = if subtitles.search_active {
-            (fl!("processing"), fl!("subtitle-extraction-in-progress"))
-        } else if subtitles.done {
-            let state = if subtitles.results().is_empty() {
-                fl!("no-subtitles-ready")
-            } else {
-                fl!("subtitles-ready-for-export")
-            };
-            (fl!("completed"), state)
-        } else {
-            (
+        let (status, state) = match subtitles.state {
+            subtitle::State::Empty => (
                 fl!("not-completed"),
                 fl!("subtitle-extraction-not-completed"),
-            )
+            ),
+            subtitle::State::SearchActive => {
+                (fl!("processing"), fl!("subtitle-extraction-in-progress"))
+            }
+            subtitle::State::Finished => {
+                let state = if subtitles.results().is_empty() {
+                    fl!("no-subtitles-ready")
+                } else {
+                    fl!("subtitles-ready-for-export")
+                };
+                (fl!("completed"), state)
+            }
         };
 
         widget::row![
@@ -535,7 +537,7 @@ impl Model {
         video_path: Option<&'a PathBuf>,
     ) -> Element<'a, Message> {
         let spacing = cosmic::theme::spacing();
-        let content = self.export_view(subtitles, subtitles.search_active);
+        let content = self.export_view(subtitles, subtitles.state.is_search_active());
 
         widget::column![Self::video_summary(subtitles, video_path), content]
             .spacing(spacing.space_s)

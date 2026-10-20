@@ -57,6 +57,7 @@ use iced::futures::StreamExt;
 use iced::widget::operation::Animation;
 use image::RgbaImage;
 use indexmap::IndexMap;
+use vse_ui::widget::Viewport;
 use vse_ui::{self as cosmic, icon_button};
 
 use super::*;
@@ -267,7 +268,7 @@ impl std::ops::Index<usize> for SubtitleResults {
 
 #[derive(Default)]
 pub struct Model {
-    pub search_active: bool,
+    pub state: State,
     pub search_gen: usize,
     pub search_path: Option<std::path::PathBuf>,
     pub search_selection: Option<iced::Rectangle>,
@@ -279,7 +280,6 @@ pub struct Model {
     results: SubtitleResults,
     // pub preview: Option<widget::image::Handle>,
     pub current_timestamp: Duration,
-    pub done: bool,
     pub progress_bar: ProgressBar,
     scrollbar_jump_status: ScrollbarJumpStatus,
     next_result_id: u64,
@@ -287,6 +287,40 @@ pub struct Model {
     result_viewport_height: f32,
     zoomed_result_id: Option<SubtitleId>,
     edit_history: Vec<SubtitleEdit>,
+}
+
+#[derive(Default)]
+pub enum State {
+    #[default]
+    Empty,
+    SearchActive,
+    Finished,
+}
+
+impl State {
+    /// Returns `true` if the state is [`Empty`].
+    ///
+    /// [`Empty`]: State::Empty
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        matches!(self, Self::Empty)
+    }
+
+    /// Returns `true` if the state is [`SearchActive`].
+    ///
+    /// [`SearchActive`]: State::SearchActive
+    #[must_use]
+    pub const fn is_search_active(&self) -> bool {
+        matches!(self, Self::SearchActive)
+    }
+
+    /// Returns `true` if the state is [`Finished`].
+    ///
+    /// [`Finished`]: State::Finished
+    #[must_use]
+    pub const fn is_finished(&self) -> bool {
+        matches!(self, Self::Finished)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -429,6 +463,7 @@ impl<'a> SubtitleTable<'a> {
 
     fn active_subtitles(
         &self,
+        viewport: Viewport,
         active_range: std::ops::Range<usize>,
     ) -> impl Iterator<Item = (VirtualRowKey, Element<'a, Message>)> {
         self.results
@@ -440,7 +475,8 @@ impl<'a> SubtitleTable<'a> {
                 let index = SubtitleIndex(active_range.start + relative_index);
                 (
                     VirtualRowKey::Row { id: result.id },
-                    self.subtitle_row(index, result).apply(Self::wrap_row),
+                    self.subtitle_row(viewport, index, result)
+                        .apply(Self::wrap_row),
                 )
             })
     }
@@ -475,12 +511,15 @@ impl<'a> SubtitleTable<'a> {
     }
     fn subtitle_row(
         &self,
+        viewport: Viewport,
         index: SubtitleIndex,
         result: &'a SubtitleResult,
     ) -> Element<'a, Message> {
         let spacing = cosmic::theme::spacing();
 
-        let leading: Element<'a, Message> = if self.config.show_id_instead_of_preview {
+        let is_small = !viewport.at_least(widget::Breakpoint::Expanded);
+
+        let leading: Element<'a, Message> = if self.config.show_id_instead_of_preview || is_small {
             widget::text::title3((index.0 + 1).to_string())
                 .apply(widget::container)
                 .width(Length::Fixed(24.0))
@@ -582,19 +621,21 @@ impl<'a> SubtitleTable<'a> {
             .into()
     }
     fn view(self) -> Element<'a, Message> {
-        let visible_range = self.visible_result_range(self.results.len());
-        let active_subtitles = self.active_subtitles(visible_range.clone());
-
-        let top_spacer = Self::spacer(visible_range.start);
-        let bottom_spacer = Self::spacer(self.results.len().saturating_sub(visible_range.end));
-
         // we need a keyed column here because without it, state such as "is text_editor selected" will be lost in scrolling since iced treats every "first row" as the same.
-        iced::widget::keyed::column::Column::with_capacity(visible_range.len() + 2)
-            .push(VirtualRowKey::TopSpacer, top_spacer)
-            .extend(active_subtitles)
-            .push(VirtualRowKey::BottomSpacer, bottom_spacer)
-            .width(Length::Fill)
-            .into()
+        widget::adaptive(move |viewport| {
+            let visible_range = self.visible_result_range(self.results.len());
+            let active_subtitles = self.active_subtitles(viewport, visible_range.clone());
+
+            let top_spacer = Self::spacer(visible_range.start);
+            let bottom_spacer = Self::spacer(self.results.len().saturating_sub(visible_range.end));
+
+            iced::widget::keyed::column::Column::with_capacity(visible_range.len() + 2)
+                .push(VirtualRowKey::TopSpacer, top_spacer)
+                .extend(active_subtitles)
+                .push(VirtualRowKey::BottomSpacer, bottom_spacer)
+                .width(Length::Fill)
+                .into()
+        })
     }
 }
 
@@ -617,54 +658,63 @@ impl<'a> SubtitleView<'a> {
         }
     }
 
-    fn status(&self) -> Element<'a, Message> {
+    fn status(&self, viewport: Viewport) -> Element<'a, Message> {
         self.model
             .progress_bar
             .set_length(self.video_duration.as_millis() as u64);
 
-        if self.model.done {
-            widget::text(fl!(
+        if matches!(self.model.state, State::Empty) {
+            return widget::text(fl!("no-active-search"))
+                .style(cosmic::theme::text::accent)
+                .into();
+        }
+
+        if matches!(self.model.state, State::Finished) {
+            return widget::text(fl!(
                 "complete-subtitles-found",
                 count = self.model.results.len()
             ))
             .style(cosmic::theme::text::accent)
-            .into()
-        } else if self.model.search_active {
-            let status_text = widget::text(fl!(
+            .into();
+        }
+
+        let status_text = if viewport.is_expanded() {
+            widget::text(fl!(
                 "elapsed-status",
                 elapsed = self.model.progress_bar.elapsed().apply(format_duration),
                 igt = self.model.current_timestamp.apply(format_duration),
                 eta = self.model.progress_bar.eta().apply(Self::format_eta)
             ))
-            .style(cosmic::theme::text::accent);
-
-            let progress_bar = widget::progress_bar(
-                0.0..=1.0,
-                self.model.current_timestamp.as_secs_f32() / self.video_duration.as_secs_f32(),
-            )
-            .length(Length::Fill);
-
-            widget::row!(status_text, progress_bar)
-                .spacing(cosmic::theme::spacing().space_s)
-                .align_y(Alignment::Center)
-                .width(Length::Fill)
-                .into()
+            .style(cosmic::theme::text::accent)
         } else {
-            widget::text(fl!("no-active-search"))
+            widget::text(self.model.progress_bar.elapsed().apply(format_duration))
                 .style(cosmic::theme::text::accent)
-                .into()
-        }
+        };
+
+        let progress_bar = widget::progress_bar(
+            0.0..=1.0,
+            self.model.current_timestamp.as_secs_f32() / self.video_duration.as_secs_f32(),
+        )
+        .length(Length::Fill);
+
+        widget::row!(status_text, progress_bar)
+            .spacing(cosmic::theme::spacing().space_s)
+            .align_y(Alignment::Center)
+            .width(Length::Fill)
+            .into()
     }
 
-    fn controls(&self) -> Element<'a, Message> {
+    fn controls(&self, viewport: Viewport) -> Element<'a, Message> {
         let to_post_prod = widget::button(widget::text(fl!("post-production")))
             .style(cosmic::theme::button::suggested)
-            .on_press_maybe((!self.model.search_active).then_some(Message::GoToPostProduction));
+            .on_press_maybe(
+                (self.model.state.is_finished()).then_some(Message::GoToPostProduction),
+            );
         let undo_edit = icon_button!("edit-undo-symbolic")
             .style(cosmic::theme::button::icon)
             .on_press_maybe((!self.model.edit_history.is_empty()).then_some(Message::UndoEdit));
 
-        widget::row![self.status(), undo_edit, to_post_prod]
+        widget::row![self.status(viewport), undo_edit, to_post_prod]
             .spacing(cosmic::theme::spacing().space_s)
             .align_y(Alignment::Center)
             .into()
@@ -727,21 +777,23 @@ impl<'a> SubtitleView<'a> {
         .into()
     }
 
-    fn view(&self) -> Element<'a, Message> {
-        let content: Element<'a, Message> =
-            widget::column![self.header(), self.controls(), self.results()]
-                .spacing(cosmic::theme::spacing().space_s)
-                .into();
+    fn view(self) -> Element<'a, Message> {
+        widget::adaptive(move |viewport| {
+            let content: Element<'a, Message> =
+                widget::column![self.header(), self.controls(viewport), self.results()]
+                    .spacing(cosmic::theme::spacing().space_s)
+                    .into();
 
-        let zoomed_result = self
-            .model
-            .zoomed_result_id
-            .and_then(|id| self.model.results.get(id));
+            let zoomed_result = self
+                .model
+                .zoomed_result_id
+                .and_then(|id| self.model.results.get(id));
 
-        std::iter::once(content)
-            .chain(zoomed_result.map(Self::zoomed_preview))
-            .apply(iced::widget::Stack::with_children)
-            .into()
+            std::iter::once(content)
+                .chain(zoomed_result.map(Self::zoomed_preview))
+                .apply(iced::widget::Stack::with_children)
+                .into()
+        })
     }
 }
 
@@ -799,7 +851,7 @@ impl Model {
         selection: Option<iced::Rectangle>,
         config: &Config,
     ) {
-        self.search_active = true;
+        self.state = State::SearchActive;
         self.search_gen += 1;
         self.search_path = Some(path);
         self.search_selection = selection;
@@ -810,7 +862,6 @@ impl Model {
         self.processing_resolution = config.processing_resolution;
         let _ = self.results.with_mut(IndexMap::clear);
         self.current_timestamp = Duration::ZERO;
-        self.done = false;
         self.edit_history.clear();
         self.progress_bar.reset();
         self.scrollbar_jump_status = ScrollbarJumpStatus::NoShow;
@@ -853,12 +904,11 @@ impl Model {
                 Event::SyncWithPostProduction(changed)
             }
             Message::SearchDone => {
-                self.search_active = false;
-                self.done = true;
+                self.state = State::Finished;
                 Event::None
             }
             Message::SearchError(e) => {
-                self.search_active = false;
+                self.state = State::Empty;
                 Event::Error(eyre::eyre!("subtitle search failed: {e}"))
             }
             Message::GoToPostProduction => Event::GoToPostProduction,
@@ -1061,7 +1111,7 @@ impl Model {
 
     fn subscription(&self, video_frame_rate: f64) -> Subscription<Message> {
         let mut subscriptions = vec![];
-        if self.search_active
+        if self.state.is_search_active()
             && let Some(path) = &self.search_path
             && let Some(ocr) = &self.search_ocr
         {

@@ -5,6 +5,7 @@ use crate::motion::{Mix, mix_oklab};
 use iced::advanced::renderer;
 pub use iced::widget::button::*;
 use iced::{Background, Element, Length, Padding, Theme};
+use springs::SpringConfig;
 
 pub fn button<'a, Message>(content: impl Into<Element<'a, Message>>) -> Button<'a, Message> {
     Button::new(content)
@@ -17,6 +18,7 @@ where
 {
     inner: iced::widget::Button<'a, Message, Theme, Renderer>,
     binding: Binding<Style>,
+    config: Option<SpringConfig>,
 }
 
 impl<'a, Message, Renderer: renderer::Renderer> Button<'a, Message, Renderer> {
@@ -24,6 +26,7 @@ impl<'a, Message, Renderer: renderer::Renderer> Button<'a, Message, Renderer> {
         Self {
             inner: iced::widget::Button::new(content),
             binding: Binding::default(),
+            config: None,
         }
         .style(crate::theme::button::standard)
     }
@@ -65,6 +68,11 @@ impl<'a, Message, Renderer: renderer::Renderer> Button<'a, Message, Renderer> {
     #[must_use]
     pub fn on_press_maybe_with(mut self, callback: Option<impl Fn() -> Message + 'a>) -> Self {
         self.inner = self.inner.on_press_maybe_with(callback);
+        self
+    }
+    #[must_use]
+    pub fn with_config(mut self, spring: SpringConfig) -> Self {
+        self.config = Some(spring);
         self
     }
     /// Sets the appearance; wrap the button with `animate` to transition colors.
@@ -117,7 +125,11 @@ impl<'a, Message, Renderer: renderer::Renderer> Animatable for Button<'a, Messag
     type Widget = iced::widget::Button<'a, Message, Theme, Renderer>;
 
     fn into_animated(self) -> Animated<Self::Widget, Self::Value> {
-        Animated::new(self.inner, self.binding)
+        let animated = Animated::new(self.inner, self.binding);
+        match self.config {
+            Some(config) => animated.with_config(config),
+            None => animated,
+        }
     }
 }
 

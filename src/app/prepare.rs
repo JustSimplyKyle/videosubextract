@@ -8,7 +8,7 @@ use iced::font::Weight;
 use std::sync::LazyLock;
 use vse_ui::icon_button;
 use vse_ui::theme::WithRadius;
-use vse_ui::widget::AnimatedDropdown;
+use vse_ui::widget::{AnimatedDropdown, Breakpoint};
 
 use super::*;
 use cosmic::Element;
@@ -297,16 +297,32 @@ impl Model {
     }
 
     fn view<'a>(&'a self, config: &'a Config) -> Element<'a, Message> {
-        widget::responsive(move |size| -> Element<'a, Message> {
+        widget::adaptive(move |viewport| {
             let spacing = theme::spacing();
-            let settings_width = (size.width * 7.0 / 17.0).clamp(400.0, 500.0);
-            let video_width = size.width - settings_width - spacing.space_m;
             let settings = widget::container(self.settings_view(config))
                 .padding(spacing.space_l)
                 .style(theme::container::settings_sidebar);
             let controls = self.video_player.as_ref().map(Self::video_controls);
 
-            if video_width <= settings_width {
+            if viewport.at_least(Breakpoint::Expanded) {
+                // Match the stacked branch's container/column structure so
+                // the selection canvas retains its state across the switch.
+                let video = widget::container(
+                    widget::column![self.video_preview(), controls].spacing(spacing.space_s),
+                )
+                .width(Length::Fill)
+                .height(Length::Fill);
+                let settings_width = (viewport.size.width * 7.0 / 17.0).clamp(400.0, 500.0);
+                let settings = settings
+                    .width(Length::Fixed(settings_width))
+                    .height(Length::Fill);
+
+                widget::row![video, settings]
+                    .spacing(spacing.space_m)
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .into()
+            } else {
                 const MIN_SETTINGS_HEIGHT: f32 = 240.0;
                 let video = widget::container(widget::column![self.video_preview()])
                     .width(Length::Fill)
@@ -336,26 +352,8 @@ impl Model {
                     .width(Length::Fill)
                     .height(Length::Fill)
                     .into()
-            } else {
-                // Match the stacked branch's container/column structure so
-                // the selection canvas retains its state across the switch.
-                let video = widget::container(
-                    widget::column![self.video_preview(), controls].spacing(spacing.space_s),
-                )
-                .width(Length::Fill)
-                .height(Length::Fill);
-                let settings = settings
-                    .width(Length::Fixed(settings_width))
-                    .height(Length::Fill);
-
-                widget::row![video, settings]
-                    .spacing(spacing.space_m)
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .into()
             }
         })
-        .into()
     }
 
     fn video_preview(&self) -> Element<'_, Message> {

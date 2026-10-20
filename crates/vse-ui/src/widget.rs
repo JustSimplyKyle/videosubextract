@@ -18,6 +18,17 @@ pub use animate::{Animatable, Animate, Animated, animate};
 pub mod dropdown;
 pub use dropdown::AnimatedDropdown;
 
+pub mod adaptive;
+pub use adaptive::{Breakpoint, Viewport, adaptive};
+
+pub mod bottom_sheet;
+
+pub mod pager;
+pub use bottom_sheet::{BottomSheet, bottom_sheet};
+
+pub mod swipe_helper;
+pub use swipe_helper::{SwipeHelper, swipe_helper};
+
 pub use freedesktop_icon_assets::icon;
 pub use tooltip::{Tooltip, tooltip};
 
@@ -394,6 +405,53 @@ pub mod segmented_button {
         }
         pub const fn entries(&self) -> &IndexMap<Entity, Entry<T>> {
             &self.entries
+        }
+
+        /// The entry after the active one, or `None` when the last is active.
+        pub fn next_entity(&self) -> Option<Entity> {
+            let index = self.entries.get_index_of(&self.active)?;
+            self.entries.get_index(index + 1).map(|(id, _)| *id)
+        }
+
+        /// The entry before the active one, or `None` when the first is active.
+        pub fn previous_entity(&self) -> Option<Entity> {
+            let index = self.entries.get_index_of(&self.active)?;
+            self.entries
+                .get_index(index.checked_sub(1)?)
+                .map(|(id, _)| *id)
+        }
+
+        /// Activates the next entry, stopping at the last one. Returns whether
+        /// the selection changed.
+        ///
+        /// ```
+        /// use vse_ui::widget::segmented_button::SingleSelectModelBuilder;
+        ///
+        /// let mut model = SingleSelectModelBuilder::from_array([("A", 0), ("B", 1)])
+        ///     .with_first_as_active()
+        ///     .build();
+        /// assert!(model.activate_next());
+        /// assert!(!model.activate_next());
+        /// assert_eq!(*model.active_data(), 1);
+        /// assert!(model.activate_previous());
+        /// assert!(model.is_first());
+        /// ```
+        pub fn activate_next(&mut self) -> bool {
+            self.next_entity().map(|id| self.active = id).is_some()
+        }
+
+        /// Activates the previous entry, stopping at the first one. Returns
+        /// whether the selection changed.
+        pub fn activate_previous(&mut self) -> bool {
+            self.previous_entity().map(|id| self.active = id).is_some()
+        }
+
+        pub fn is_first(&self) -> bool {
+            self.previous_entity().is_none()
+        }
+
+        pub fn is_last(&self) -> bool {
+            self.next_entity().is_none()
         }
     }
 }
