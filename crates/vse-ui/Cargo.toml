@@ -12,8 +12,8 @@ cosmic-theme = { path = "../../../libcosmic/cosmic-theme", default-features = fa
 indexmap = "2.14.2"
 springs = "0.1.2"
 
-# Keep desktop configuration out of browser builds.
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Keep desktop configuration out of browser and Android builds.
+[target.'cfg(not(any(target_arch = "wasm32", target_os = "android")))'.dependencies]
 cosmic-theme = { path = "../../../libcosmic/cosmic-theme", default-features = false, features = ["config"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
