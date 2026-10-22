@@ -57,7 +57,7 @@ impl_with_radius!(
 /// ```
 /// use vse_ui::{theme::{self, WithRadius}, widget};
 ///
-/// let container: widget::Container<'_, ()> = widget::container(widget::text("Content"))
+/// let container: widget::Container<'_, widget::Text<'_>> = widget::container(widget::text("Content"))
 ///     .style(|theme| theme::container::card(theme).with_radius(4.0));
 /// ```
 pub fn with_radius<T, Status, Style: WithRadius>(
@@ -302,12 +302,14 @@ pub mod text {
     pub fn accent(_: &Theme) -> ::iced::widget::text::Style {
         ::iced::widget::text::Style {
             color: Some(color(COSMIC.accent_text_color())),
+            selection: None,
         }
     }
 
     pub fn settings_label(_: &Theme) -> ::iced::widget::text::Style {
         ::iced::widget::text::Style {
             color: Some(color(COSMIC.palette.neutral_8)),
+            selection: None,
         }
     }
 }

@@ -2,7 +2,7 @@
 
 use iced::Size;
 
-use crate::Element;
+use iced::widget::Widget;
 
 /// Width classes, following Material's window size classes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -64,8 +64,8 @@ impl Viewport {
 }
 
 /// Builds content from the available space, classified into a [`Breakpoint`].
-pub fn adaptive<'a, Message: 'a>(
-    view: impl Fn(Viewport) -> Element<'a, Message> + 'a,
-) -> Element<'a, Message> {
-    iced::widget::responsive(move |size| view(Viewport::new(size))).into()
+pub fn adaptive<'a, Message: 'a, W: Widget<Message> + 'a>(
+    view: impl Fn(Viewport) -> W + 'a,
+) -> impl Widget<Message> + 'a {
+    iced::widget::responsive(move |size| view(Viewport::new(size)))
 }

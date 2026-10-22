@@ -3,6 +3,9 @@
 pub use iced::widget::*;
 pub use iced::widget::{canvas, image, text_editor};
 
+pub mod auto_widget;
+pub use auto_widget::{AutoWidget, IntoWidget};
+
 pub mod switch;
 pub use switch::{Switch, switch};
 
@@ -32,9 +35,11 @@ pub use swipe_helper::{SwipeHelper, swipe_helper};
 pub use freedesktop_icon_assets::icon;
 pub use tooltip::{Tooltip, tooltip};
 
-pub fn icon_button<'a, Message>(
-    content: impl Into<crate::Element<'a, Message>>,
-) -> Button<'a, Message> {
+pub fn icon_button<'a, Message, W>(content: W) -> Button<'a, Message, W>
+where
+    Message: Clone + 'a,
+    W: iced::advanced::Widget<Message, crate::Theme, iced::Renderer>,
+{
     button(content).style(crate::theme::button::icon)
 }
 
@@ -55,17 +60,14 @@ pub fn text_input<'a, Message: Clone>(
 
 /// COSMIC tooltip defaults, adapted from libcosmic's widget helper.
 pub mod tooltip {
-    use crate::Element;
+    use iced::widget::Container;
 
     pub use iced::widget::tooltip::Position;
-    pub type Tooltip<'a, Message> = iced::widget::Tooltip<'a, Message, crate::Theme>;
+    pub type Tooltip<'a, W, V> =
+        iced::widget::Tooltip<'a, W, Container<'a, V, crate::Theme>, crate::Theme>;
 
     /// Fit tooltip contents automatically and keep the popup inside the viewport.
-    pub fn tooltip<'a, Message: 'a>(
-        content: impl Into<Element<'a, Message>>,
-        tooltip: impl Into<Element<'a, Message>>,
-        position: Position,
-    ) -> Tooltip<'a, Message> {
+    pub fn tooltip<'a, W, V>(content: W, tooltip: V, position: Position) -> Tooltip<'a, W, V> {
         let tooltip = crate::widget::container(tooltip).padding(crate::theme::spacing().space_xxs);
         Tooltip::new(content, tooltip, position)
             .style(crate::theme::container::tooltip)
@@ -103,7 +105,7 @@ pub fn spin_button<'a, T, Message>(
     min: T,
     max: T,
     on_press: impl Fn(T) -> Message + 'a,
-) -> iced::Element<'a, Message>
+) -> impl iced::widget::Widget<Message> + 'a
 where
     T: Copy + std::ops::Add<Output = T> + std::ops::Sub<Output = T> + PartialOrd + 'a,
     Message: Clone + 'a,
@@ -152,7 +154,6 @@ where
         increment_button,
     ]
     .align_y(iced::Alignment::Center)
-    .into()
 }
 
 pub mod segmented_button {
@@ -457,14 +458,11 @@ pub mod segmented_button {
 }
 
 pub mod segmented_control {
-    use std::rc::Rc;
-
     use crate::Apply;
 
+    use super::button;
     use super::segmented_button::{Entity, SingleSelectModel};
-    use super::{animate, button};
-    use iced::widget::{Component, component, row, text};
-    use iced::{Element, Renderer};
+    use iced::widget::{Widget, row, text};
 
     pub const fn horizontal<T>(model: &SingleSelectModel<T>) -> SegmentedControlBuilder<'_, T> {
         SegmentedControlBuilder { model, fill: false }
@@ -473,11 +471,6 @@ pub mod segmented_control {
     pub struct SegmentedControlBuilder<'a, T> {
         model: &'a SingleSelectModel<T>,
         fill: bool,
-    }
-    pub struct SegmentedControl<'a, Message, T> {
-        model: &'a SingleSelectModel<T>,
-        fill: bool,
-        on_activate: crate::components::MessageEmitter<'a, Entity, Message>,
     }
 
     impl<'a, T> SegmentedControlBuilder<'a, T> {
@@ -488,48 +481,35 @@ pub mod segmented_control {
             self
         }
 
-        pub fn on_activate<Message>(
+        pub fn on_activate<Message: 'static>(
             self,
             f: impl Fn(Entity) -> Message + 'a,
-        ) -> SegmentedControl<'a, Message, T> {
-            SegmentedControl {
-                model: self.model,
-                fill: self.fill,
-                on_activate: Rc::new(f),
-            }
-        }
-    }
-
-    impl<'a, Message: 'a, T> From<SegmentedControl<'a, Message, T>> for Element<'a, Message> {
-        fn from(control: SegmentedControl<'a, Message, T>) -> Self {
-            let labels = control.model.entries();
-            let active = control.model.active();
+        ) -> impl Widget<Message> + 'a {
+            let labels = self.model.entries();
+            let active = self.model.active();
             let last = labels.len().saturating_sub(1);
-            let fill = control.fill;
+            let fill = self.fill;
             labels
                 .into_iter()
                 .enumerate()
                 .map(move |(index, (id, entry))| {
-                    let label = text(entry.text());
-                    let button =
-                        button(label)
-                            .on_press(*id)
-                            .padding([6, 14])
-                            .style(move |theme, status| {
-                                crate::theme::segmented_button(
-                                    theme,
-                                    status,
-                                    active == *id,
-                                    index == 0,
-                                    index == last,
-                                )
-                            });
+                    let button = button(text(entry.text()))
+                        .on_press(*id)
+                        .padding([6, 14])
+                        .style(move |theme, status| {
+                            crate::theme::segmented_button(
+                                theme,
+                                status,
+                                active == *id,
+                                index == 0,
+                                index == last,
+                            )
+                        });
                     if fill {
                         button.width(iced::Fill)
                     } else {
                         button
                     }
-                    .into()
                 })
                 .apply(row)
                 .spacing(1)
@@ -538,8 +518,7 @@ pub mod segmented_control {
                 } else {
                     iced::Length::Shrink
                 })
-                .apply(Element::from)
-                .map(move |x| (control.on_activate)(x))
+                .map(f)
         }
     }
 }

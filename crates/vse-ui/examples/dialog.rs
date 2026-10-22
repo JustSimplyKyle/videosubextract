@@ -1,6 +1,6 @@
 //! Run with `cargo run -p vse-ui --example dialog`.
 use iced::widget::{column, container, text};
-use iced::{Element, Fill, Task};
+use iced::{Fill, Task, Widget};
 use vse_ui::{components, shell::Shell, widget};
 
 fn main() -> iced::Result {
@@ -34,7 +34,7 @@ impl Demo {
         Task::none()
     }
 
-    fn view(&self) -> Element<'_, Message> {
+    fn view(&self) -> impl Widget<Message> {
         let page = container(
             column![
                 text("Animated dialog").size(24),
@@ -44,18 +44,16 @@ impl Demo {
         )
         .center(Fill);
 
-        Shell::new(page)
-            .dialog(widget::dialog(self.open, || {
-                components::dialog(
-                    "Animated dialog",
-                    column![
-                        text("The dialog keeps this panel mounted until its exit finishes."),
-                        widget::text_input("Type here", &self.value).on_input(Message::Edit),
-                    ]
-                    .spacing(vse_ui::theme::spacing().space_s),
-                    widget::button("Close").on_press(Message::Close),
-                )
-            }))
-            .into()
+        Shell::new(page).dialog(widget::dialog(self.open, || {
+            components::dialog(
+                "Animated dialog",
+                column![
+                    text("The dialog keeps this panel mounted until its exit finishes."),
+                    widget::text_input("Type here", &self.value).on_input(Message::Edit),
+                ]
+                .spacing(vse_ui::theme::spacing().space_s),
+                widget::button("Close").on_press(Message::Close),
+            )
+        }))
     }
 }

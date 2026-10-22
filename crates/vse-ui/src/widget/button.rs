@@ -1,88 +1,137 @@
-//! COSMIC button builders. `animate(button)` adds style transitions.
+//! COSMIC button builders. Buttons always animate their style transitions.
+
+use std::marker::PhantomData;
 
 use super::animate::{Animatable, Animated, Binding};
+use super::auto_widget::{AutoWidget, IntoWidget};
 use crate::motion::{Mix, mix_oklab};
-use iced::advanced::renderer;
+use iced::advanced::{Widget, renderer};
 pub use iced::widget::button::*;
 use iced::{Background, Element, Length, Padding, Theme};
 use springs::SpringConfig;
 
-pub fn button<'a, Message>(content: impl Into<Element<'a, Message>>) -> Button<'a, Message> {
+pub fn button<'a, Message, W>(content: W) -> Button<'a, Message, W>
+where
+    Message: Clone + 'a,
+    W: Widget<Message, Theme, iced::Renderer>,
+{
     Button::new(content)
 }
 
-/// Iced's button with COSMIC styling and an optional animation hook.
-pub struct Button<'a, Message, Renderer = iced::Renderer>
-where
-    Renderer: renderer::Renderer,
-{
-    inner: iced::widget::Button<'a, Message, Theme, Renderer>,
+/// Iced's button with COSMIC styling and an animated style.
+pub type Button<'a, Message, W = Element<'a, Message>, Renderer = iced::Renderer> =
+    AutoWidget<Builder<'a, Message, W, Renderer>>;
+
+pub struct Builder<'a, Message, W, Renderer> {
+    inner: iced::widget::Button<'a, Message, W, Theme>,
     binding: Binding<Style>,
     config: Option<SpringConfig>,
+    renderer: PhantomData<fn() -> Renderer>,
 }
 
-impl<'a, Message, Renderer: renderer::Renderer> Button<'a, Message, Renderer> {
-    pub fn new(content: impl Into<Element<'a, Message, Theme, Renderer>>) -> Self {
-        Self {
+impl<'a, Message, W, Renderer> Builder<'a, Message, W, Renderer> {
+    fn into_animated(self) -> Animated<iced::widget::Button<'a, Message, W, Theme>, Style> {
+        let animated = Animated::new(self.inner, self.binding);
+        match self.config {
+            Some(config) => animated.with_config(config),
+            None => animated,
+        }
+    }
+}
+
+impl<'a, Message, W, Renderer> IntoWidget for Builder<'a, Message, W, Renderer>
+where
+    Message: Clone + 'a,
+    W: Widget<Message, Theme, Renderer>,
+    Renderer: renderer::Renderer,
+{
+    type Message = Message;
+    type Theme = Theme;
+    type Renderer = Renderer;
+    type Widget = Animated<iced::widget::Button<'a, Message, W, Theme>, Style>;
+
+    fn into_widget(self) -> Self::Widget {
+        self.into_animated()
+    }
+}
+
+impl<'a, Message, W, Renderer> Button<'a, Message, W, Renderer>
+where
+    Message: Clone + 'a,
+    W: Widget<Message, Theme, Renderer>,
+    Renderer: renderer::Renderer,
+{
+    pub fn new(content: W) -> Self {
+        AutoWidget::from_builder(Builder {
             inner: iced::widget::Button::new(content),
             binding: Binding::default(),
             config: None,
-        }
+            renderer: PhantomData,
+        })
         .style(crate::theme::button::standard)
     }
+
+    fn map_inner(
+        self,
+        f: impl FnOnce(
+            iced::widget::Button<'a, Message, W, Theme>,
+        ) -> iced::widget::Button<'a, Message, W, Theme>,
+    ) -> Self {
+        self.map_builder(|mut builder| {
+            builder.inner = f(builder.inner);
+            builder
+        })
+    }
+
     #[must_use]
-    pub fn width(mut self, width: impl Into<Length>) -> Self {
-        self.inner = self.inner.width(width);
-        self
+    pub fn width(self, width: impl Into<Length>) -> Self {
+        self.map_inner(|inner| inner.width(width))
     }
     #[must_use]
-    pub fn height(mut self, height: impl Into<Length>) -> Self {
-        self.inner = self.inner.height(height);
-        self
+    pub fn height(self, height: impl Into<Length>) -> Self {
+        self.map_inner(|inner| inner.height(height))
     }
     #[must_use]
-    pub fn padding(mut self, padding: impl Into<Padding>) -> Self {
-        self.inner = self.inner.padding(padding);
-        self
+    pub fn padding(self, padding: impl Into<Padding>) -> Self {
+        self.map_inner(|inner| inner.padding(padding))
     }
     #[must_use]
-    pub fn clip(mut self, clip: bool) -> Self {
-        self.inner = self.inner.clip(clip);
-        self
+    pub fn clip(self, clip: bool) -> Self {
+        self.map_inner(|inner| inner.clip(clip))
     }
     #[must_use]
-    pub fn on_press(mut self, message: Message) -> Self {
-        self.inner = self.inner.on_press(message);
-        self
+    pub fn on_press(self, message: Message) -> Self {
+        self.map_inner(|inner| inner.on_press(message))
     }
     #[must_use]
-    pub fn on_press_maybe(mut self, message: Option<Message>) -> Self {
-        self.inner = self.inner.on_press_maybe(message);
-        self
+    pub fn on_press_maybe(self, message: Option<Message>) -> Self {
+        self.map_inner(|inner| inner.on_press_maybe(message))
     }
     #[must_use]
-    pub fn on_press_with(mut self, callback: impl Fn() -> Message + 'a) -> Self {
-        self.inner = self.inner.on_press_with(callback);
-        self
+    pub fn on_press_with(self, callback: impl Fn() -> Message + 'a) -> Self {
+        self.map_inner(|inner| inner.on_press_with(callback))
     }
     #[must_use]
-    pub fn on_press_maybe_with(mut self, callback: Option<impl Fn() -> Message + 'a>) -> Self {
-        self.inner = self.inner.on_press_maybe_with(callback);
-        self
+    pub fn on_press_maybe_with(self, callback: Option<impl Fn() -> Message + 'a>) -> Self {
+        self.map_inner(|inner| inner.on_press_maybe_with(callback))
     }
     #[must_use]
-    pub fn with_config(mut self, spring: SpringConfig) -> Self {
-        self.config = Some(spring);
-        self
+    pub fn with_config(self, spring: SpringConfig) -> Self {
+        self.map_builder(|mut builder| {
+            builder.config = Some(spring);
+            builder
+        })
     }
-    /// Sets the appearance; wrap the button with `animate` to transition colors.
+    /// Sets the target appearance; the displayed style springs toward it.
     #[must_use]
-    pub fn style(mut self, style: impl Fn(&Theme, Status) -> Style + 'a) -> Self {
-        let binding = self.binding.clone();
-        self.inner = self
-            .inner
-            .style(move |theme, status| binding.resolve(style(theme, status)));
-        self
+    pub fn style(self, style: impl Fn(&Theme, Status) -> Style + 'a) -> Self {
+        self.map_builder(|mut builder| {
+            let binding = builder.binding.clone();
+            builder.inner = builder
+                .inner
+                .style(move |theme, status| binding.resolve(style(theme, status)));
+            builder
+        })
     }
     #[must_use]
     pub fn class(self, class: impl Into<StyleFn<'a, Theme>>) -> Self {
@@ -120,31 +169,24 @@ impl Mix for Style {
     }
 }
 
-impl<'a, Message, Renderer: renderer::Renderer> Animatable for Button<'a, Message, Renderer> {
+impl<'a, Message, W, Renderer> Animatable for Button<'a, Message, W, Renderer>
+where
+    Message: Clone + 'a,
+    W: Widget<Message, Theme, Renderer>,
+    Renderer: renderer::Renderer,
+{
     type Value = Style;
-    type Widget = iced::widget::Button<'a, Message, Theme, Renderer>;
+    type Widget = iced::widget::Button<'a, Message, W, Theme>;
 
     fn into_animated(self) -> Animated<Self::Widget, Self::Value> {
-        let animated = Animated::new(self.inner, self.binding);
-        match self.config {
-            Some(config) => animated.with_config(config),
-            None => animated,
-        }
+        self.into_builder().into_animated()
     }
 }
 
-impl<'a, Message: Clone + 'a, Renderer: renderer::Renderer + 'a> From<Button<'a, Message, Renderer>>
-    for Element<'a, Message, Theme, Renderer>
+impl<'a, Message: Clone + 'a, W> From<iced::widget::Button<'a, Message, W>>
+    for Animated<iced::widget::Button<'a, Message, W>, iced::widget::button::Style>
 {
-    fn from(button: Button<'a, Message, Renderer>) -> Self {
-        button.into_animated().into()
-    }
-}
-
-impl<'a, Message: Clone + 'a> From<iced::widget::Button<'a, Message>>
-    for Animated<iced::widget::Button<'a, Message>, iced::widget::button::Style>
-{
-    fn from(button: iced::widget::Button<'a, Message>) -> Self {
+    fn from(button: iced::widget::Button<'a, Message, W>) -> Self {
         Animated::bind(|animate| button.style(animate.wrap(crate::theme::button::standard)))
     }
 }

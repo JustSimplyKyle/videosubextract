@@ -2,45 +2,46 @@
 //! the content itself still receives events and would emit messages.
 
 use iced::advanced::shell::Bus;
-use iced::advanced::widget::{Operation, Tree, tree};
+use iced::advanced::widget::{Meta, Operation, Tree, tree};
 use iced::advanced::{Layout, Shell, Widget, layout, mouse, overlay, renderer};
-use iced::{Element, Event, Length, Rectangle, Size, Theme, Vector};
+use iced::{Event, Length, Rectangle, Size, Theme, Vector};
 
 /// Passes events to `content` but drops its messages and overlays while closed.
 /// The tree is the content's own, so toggling the gate keeps child state.
-pub(super) fn gate<'a, Message: 'a, Renderer: renderer::Renderer + 'a>(
-    is_open: bool,
-    content: Element<'a, Message, Theme, Renderer>,
-) -> Element<'a, Message, Theme, Renderer> {
-    Element::new(Gate { is_open, content })
+pub(super) fn gate<W: Meta>(is_open: bool, content: W) -> Gate<W> {
+    Gate { is_open, content }
 }
 
-struct Gate<'a, Message, Renderer> {
+pub(super) struct Gate<W: Meta> {
     is_open: bool,
-    content: Element<'a, Message, Theme, Renderer>,
+    content: W,
 }
 
-impl<Message, Renderer: renderer::Renderer> Widget<Message, Theme, Renderer>
-    for Gate<'_, Message, Renderer>
+impl<W: Meta> Meta for Gate<W> {}
+
+impl<W, Message, Renderer> Widget<Message, Theme, Renderer> for Gate<W>
+where
+    W: Widget<Message, Theme, Renderer>,
+    Renderer: renderer::Renderer,
 {
     fn tag(&self) -> tree::Tag {
-        self.content.as_widget().tag()
+        self.content.tag()
     }
 
     fn state(&self) -> tree::State {
-        self.content.as_widget().state()
+        self.content.state()
     }
 
     fn diff(&mut self, tree: &mut Tree) {
-        self.content.as_widget_mut().diff(tree);
+        self.content.diff(tree);
     }
 
     fn size(&self) -> Size<Length> {
-        self.content.as_widget().size()
+        self.content.size()
     }
 
     fn layout(&mut self, tree: &mut Tree, renderer: &Renderer, limits: &layout::Limits) {
-        self.content.as_widget_mut().layout(tree, renderer, limits);
+        self.content.layout(tree, renderer, limits);
     }
 
     fn draw(
@@ -54,7 +55,6 @@ impl<Message, Renderer: renderer::Renderer> Widget<Message, Theme, Renderer>
         viewport: &Rectangle,
     ) {
         self.content
-            .as_widget()
             .draw(tree, renderer, theme, style, layout, cursor, viewport);
     }
 
@@ -67,7 +67,6 @@ impl<Message, Renderer: renderer::Renderer> Widget<Message, Theme, Renderer>
         operation: &mut dyn Operation,
     ) {
         self.content
-            .as_widget_mut()
             .operate(tree, layout, viewport, renderer, operation);
     }
 
@@ -83,7 +82,6 @@ impl<Message, Renderer: renderer::Renderer> Widget<Message, Theme, Renderer>
     ) {
         if self.is_open {
             self.content
-                .as_widget_mut()
                 .update(tree, event, layout, cursor, renderer, shell, viewport);
             return;
         }
@@ -92,7 +90,6 @@ impl<Message, Renderer: renderer::Renderer> Widget<Message, Theme, Renderer>
         let mut muted = Bus::new();
         let mut local = shell.local(&mut muted);
         self.content
-            .as_widget_mut()
             .update(tree, event, layout, cursor, renderer, &mut local, viewport);
         if local.is_event_captured() {
             shell.capture_event();
@@ -112,7 +109,6 @@ impl<Message, Renderer: renderer::Renderer> Widget<Message, Theme, Renderer>
         renderer: &Renderer,
     ) -> mouse::Interaction {
         self.content
-            .as_widget()
             .mouse_interaction(tree, layout, cursor, viewport, renderer)
     }
 
@@ -130,7 +126,6 @@ impl<Message, Renderer: renderer::Renderer> Widget<Message, Theme, Renderer>
             return Vec::new();
         }
         self.content
-            .as_widget_mut()
             .overlay(tree, layout, renderer, viewport, translation, window)
     }
 }

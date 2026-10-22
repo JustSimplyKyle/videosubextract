@@ -6,13 +6,16 @@
 //! when the exit becomes visually complete, without waiting for the spring's
 //! settling tail.
 
+use std::marker::PhantomData;
+
+use super::auto_widget::{AutoWidget, IntoWidget};
 use crate::{
     Apply,
     motion::{EarlyExitMotion, Motion, SpringConfig, presets},
 };
-use iced::advanced::renderer;
+use iced::advanced::{Widget, renderer};
 use iced::time::Instant;
-use iced::widget::{Space, container, float, opaque};
+use iced::widget::{Space, Widget as _, container, float, opaque};
 use iced::{Color, Element, Fill, Theme, Vector};
 
 mod gate;
@@ -22,66 +25,94 @@ const EXIT_THRESHOLD: f32 = 0.01;
 
 /// Build a persistent host from requested visibility and a concrete content
 /// factory. Rebuild the host on every application view, including while closed.
-pub fn dialog<'a, Message, Renderer: renderer::Renderer>(
+pub fn dialog<'a, Message, W, C, Renderer>(
     open: bool,
-    content: impl Fn() -> Element<'a, Message, Theme, Renderer> + 'a,
-) -> Dialog<'a, Message, Renderer> {
-    Dialog {
+    content: C,
+) -> Dialog<'a, Message, C, Renderer>
+where
+    Message: 'a,
+    C: Fn() -> W + 'a,
+    W: Widget<Message, Theme, Renderer> + 'a,
+    Renderer: renderer::Renderer + 'a,
+{
+    AutoWidget::from_builder(Builder {
         open,
-        content: Box::new(content),
+        content,
         config: presets::quick(),
-    }
+        types: PhantomData,
+    })
 }
 
 /// The parent owns requested visibility; the transition's tree state owns
 /// displayed visibility.
-pub struct Dialog<'a, Message, Renderer = iced::Renderer> {
+pub type Dialog<'a, Message, C, Renderer = iced::Renderer> =
+    AutoWidget<Builder<'a, Message, C, Renderer>>;
+
+pub struct Builder<'a, Message, C, Renderer> {
     open: bool,
-    content: Box<dyn Fn() -> Element<'a, Message, Theme, Renderer> + 'a>,
+    content: C,
     config: SpringConfig,
+    types: PhantomData<fn() -> (&'a (), Message, Renderer)>,
 }
 
-impl<Message, Renderer> Dialog<'_, Message, Renderer> {
+impl<'a, Message, W, C, Renderer> Dialog<'a, Message, C, Renderer>
+where
+    Message: 'a,
+    C: Fn() -> W + 'a,
+    W: Widget<Message, Theme, Renderer> + 'a,
+    Renderer: renderer::Renderer + 'a,
+{
     /// Changes apply on the next frame, keeping the current motion.
     #[must_use]
-    pub fn with_config(mut self, config: SpringConfig) -> Self {
-        self.config = config;
-        self
+    pub fn with_config(self, config: SpringConfig) -> Self {
+        self.map_builder(|mut dialog| {
+            dialog.config = config;
+            dialog
+        })
     }
 }
 
-impl<'a, Message: 'a, Renderer: renderer::Renderer + 'a> From<Dialog<'a, Message, Renderer>>
-    for Element<'a, Message, Theme, Renderer>
+impl<'a, Message, W, C, Renderer> IntoWidget for Builder<'a, Message, C, Renderer>
+where
+    Message: 'a,
+    C: Fn() -> W + 'a,
+    W: Widget<Message, Theme, Renderer> + 'a,
+    Renderer: renderer::Renderer + 'a,
 {
-    fn from(dialog: Dialog<'a, Message, Renderer>) -> Self {
-        let Dialog {
+    type Message = Message;
+    type Theme = Theme;
+    type Renderer = Renderer;
+    type Widget = impl Widget<Message, Theme, Renderer> + 'a;
+
+    fn into_widget(self) -> Self::Widget {
+        let Builder {
             open,
             content,
             config,
-        } = dialog;
+            ..
+        } = self;
 
         iced::widget::transition(
             (if open { 1.0 } else { 0.0 }, config),
             || EarlyExitMotion::new(Motion::new(0.0, Instant::now()), EXIT_THRESHOLD),
-            move |exit: &EarlyExitMotion, _| {
+            move |exit: &EarlyExitMotion, _| -> Element<'a, Message, Theme, Renderer> {
                 if open || exit.is_present() {
-                    present(content(), exit.motion().value(), open)
+                    present(content(), exit.motion().value(), open).boxed()
                 } else {
-                    Space::new().width(Fill).height(Fill).into()
+                    Space::new().width(Fill).height(Fill).boxed()
                 }
             },
         )
-        .into()
     }
 }
 
 /// The modal backdrop and panel at `progress`. Closing content is muted so it
 /// cannot emit messages during the exit.
 fn present<'a, Message: 'a, Renderer: renderer::Renderer + 'a>(
-    content: Element<'a, Message, Theme, Renderer>,
+    content: impl Widget<Message, Theme, Renderer> + 'a,
     progress: f32,
     open: bool,
-) -> Element<'a, Message, Theme, Renderer> {
+) -> impl Widget<Message, Theme, Renderer> + 'a {
     let offset = crate::theme::spacing().space_s * (1.0 - progress);
 
     gate::gate(open, content)
@@ -112,7 +143,7 @@ mod tests {
         Edit(String),
     }
 
-    fn view(open: bool) -> Element<'static, Message> {
+    fn view(open: bool) -> impl iced::widget::Widget<Message> {
         // A stack sizes its layers to the first one, so the page fills the window.
         stack![
             container(button("Page").on_press(Message::Page))
@@ -123,10 +154,8 @@ mod tests {
                     text_input("Name", "").id("name").on_input(Message::Edit),
                     button("Inside").on_press(Message::Inside),
                 ]
-                .into()
             }),
         ]
-        .into()
     }
 
     fn frame(sim: &mut Simulator<'_, Message>, now: Instant) {

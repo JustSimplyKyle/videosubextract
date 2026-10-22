@@ -40,13 +40,12 @@
 //! use iced::widget::{progress_bar, transition};
 //! use vse_ui::motion::{Motion, presets};
 //!
-//! fn smooth_progress<'a, Message: 'a>(progress: f32) -> iced::Element<'a, Message> {
+//! fn smooth_progress<Message: 'static>(progress: f32) -> impl iced::Widget<Message> {
 //!     transition(
 //!         (progress, presets::gentle()),
 //!         || Motion::new(0.0, Instant::now()),
 //!         |motion: &Motion, _| progress_bar(0.0..=1.0, motion.value()),
 //!     )
-//!     .into()
 //! }
 //! ```
 //!
@@ -56,24 +55,22 @@
 //!
 //! ```
 //! use iced::time::Instant;
-//! use iced::widget::{Space, text, transition};
-//! use iced::{Color, Element};
+//! use iced::widget::{text, transition};
+//! use iced::{Color, Widget};
 //! use vse_ui::motion::{EarlyExitMotion, Motion, presets};
 //!
-//! fn toast<'a, Message: 'a>(visible: bool) -> Element<'a, Message> {
+//! fn toast<Message: 'static>(visible: bool) -> impl Widget<Message> {
 //!     transition(
 //!         (if visible { 1.0 } else { 0.0 }, presets::quick()),
 //!         || EarlyExitMotion::new(Motion::new(0.0, Instant::now()), 0.01),
-//!         move |exit: &EarlyExitMotion, _| -> Element<'a, Message> {
-//!             if visible || exit.is_present() {
+//!         move |exit: &EarlyExitMotion, _| {
+//!             // A void `None` unmounts the content once the exit is done.
+//!             (visible || exit.is_present()).then(|| {
 //!                 let opacity = exit.motion().value().clamp(0.0, 1.0);
-//!                 text("Saved").color(Color::BLACK.scale_alpha(opacity)).into()
-//!             } else {
-//!                 Space::new().into()
-//!             }
+//!                 text("Saved").color(Color::BLACK.scale_alpha(opacity))
+//!             })
 //!         },
 //!     )
-//!     .into()
 //! }
 //! ```
 //!
@@ -326,7 +323,7 @@ impl iced::widget::transition::Program for Motion {
 /// use iced::widget::{column, progress_bar, transition};
 /// use vse_ui::motion::{Motion, Motions, presets};
 ///
-/// fn bars<'a, Message: 'a>(target: f32) -> iced::Element<'a, Message> {
+/// fn bars<Message: 'static>(target: f32) -> impl iced::Widget<Message> {
 ///     transition(
 ///         [(target, presets::bouncy()), (target, presets::snappy())],
 ///         move || {
@@ -340,7 +337,6 @@ impl iced::widget::transition::Program for Motion {
 ///             ]
 ///         },
 ///     )
-///     .into()
 /// }
 /// ```
 pub struct Motions<const N: usize>(pub [Motion; N]);

@@ -1,5 +1,5 @@
 //! Upstream-iced presentation layer for VideoSubExtract.
-#![feature(iter_intersperse, default_field_values)]
+#![feature(iter_intersperse, default_field_values, impl_trait_in_assoc_type)]
 
 extern crate self as vse_ui;
 

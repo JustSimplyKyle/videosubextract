@@ -1,6 +1,6 @@
 //! Run with `cargo run -p vse-ui --example pager`.
 use iced::widget::{self, column, container, row, text};
-use iced::{Element, Fill, Task};
+use iced::{Element, Fill, Task, Widget};
 use vse_ui::Apply;
 use vse_ui::widget::segmented_button::{Entity, SingleSelectModel, SingleSelectModelBuilder};
 use vse_ui::widget::{button, pager};
@@ -29,15 +29,15 @@ impl<'a> Demo<'a> {
         let builder: [(&'static str, Box<dyn Fn() -> Element<'a, Message>>); 3] = [
             (
                 "Cut Position",
-                Box::new(|| widget::text("5432 px").size(24).into()),
+                Box::new(|| widget::text("5432 px").size(24).boxed()),
             ),
             (
                 "Page Preview",
-                Box::new(|| widget::text("10870 px").size(24).into()),
+                Box::new(|| widget::text("10870 px").size(24).boxed()),
             ),
             (
                 "Page Setup",
-                Box::new(|| widget::text("14102 px").size(24).into()),
+                Box::new(|| widget::text("14102 px").size(24).boxed()),
             ),
         ];
         Self {
@@ -60,7 +60,7 @@ impl<'a> Demo<'a> {
         Task::none()
     }
 
-    fn view(&self) -> Element<'_, Message> {
+    fn view(&self) -> impl Widget<Message> {
         let first = self.pages.is_first();
         let last = self.pages.is_last();
         let pager = pager::horizontal(&self.pages).on_activate(Message::SelectPage);
@@ -79,6 +79,5 @@ impl<'a> Demo<'a> {
         .apply(container)
         .padding(28)
         .center(Fill)
-        .into()
     }
 }

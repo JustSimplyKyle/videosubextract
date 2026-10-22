@@ -5,14 +5,15 @@
 //! Run the demo with `cargo run -p vse-ui --example switch`.
 //! This example handles pointer and touch input; keyboard focus is not implemented.
 
-use crate::Apply;
+use super::auto_widget::{AutoWidget, IntoWidget};
 use crate::motion::{Motion, Motions, mix_oklab, presets};
 use crate::widget::Animated;
-use iced::advanced::renderer;
+use iced::advanced::{Widget, renderer};
 use iced::time::Instant;
-use iced::widget::{Container, Space, button, container, row, stack, transition};
+use iced::widget::{Space, Widget as _, button, container, row, stack, transition};
 use iced::{Border, Color, Element, Fill, Theme};
 use std::cell::Cell;
+use std::marker::PhantomData;
 use std::rc::Rc;
 
 #[derive(Default, Clone, Copy)]
@@ -48,55 +49,74 @@ impl Size {
 }
 
 /// Creates a switch. Without an `on_toggle` callback it is disabled.
-pub fn switch<'a, Message>(is_enabled: bool) -> Switch<'a, Message> {
-    Switch {
+pub fn switch<'a, Message: 'static, Renderer: renderer::Renderer + 'static>(
+    is_enabled: bool,
+) -> Switch<'a, Message, Renderer> {
+    AutoWidget::from_builder(Builder {
         is_enabled,
         on_toggle: None,
         spring_config: crate::motion::presets::gentle(),
         size: Default::default(),
-    }
+        renderer: PhantomData,
+    })
 }
 
 /// An interruptible switch whose track color interpolates in Oklab.
-pub struct Switch<'a, Message> {
+pub type Switch<'a, Message, Renderer = iced::Renderer> =
+    AutoWidget<Builder<'a, Message, Renderer>>;
+
+pub struct Builder<'a, Message, Renderer> {
     is_enabled: bool,
     on_toggle: Option<crate::components::MessageEmitter<'a, bool, Message>>,
     spring_config: springs::SpringConfig,
     size: Size,
+    renderer: PhantomData<fn() -> Renderer>,
 }
 
-impl<'a, Message> Switch<'a, Message> {
+impl<'a, Message: 'static, Renderer: renderer::Renderer + 'static> Switch<'a, Message, Renderer> {
     /// Emits the new logical value immediately when clicked or touched.
     #[must_use]
-    pub fn on_toggle(mut self, callback: impl Fn(bool) -> Message + 'a) -> Self {
-        self.on_toggle = Some(Rc::new(callback));
-        self
+    pub fn on_toggle(self, callback: impl Fn(bool) -> Message + 'a) -> Self {
+        self.map_builder(|mut switch| {
+            switch.on_toggle = Some(Rc::new(callback));
+            switch
+        })
     }
     /// Choose the thumb's spring preset; bouncy presets overshoot into the
     /// track's padding. The track color always uses a critically damped
     /// spring. Changes apply on the next frame, keeping the thumb's motion.
     #[must_use]
-    pub const fn with_config(mut self, config: springs::SpringConfig) -> Self {
-        self.spring_config = config;
-        self
+    pub fn with_config(self, config: springs::SpringConfig) -> Self {
+        self.map_builder(|mut switch| {
+            switch.spring_config = config;
+            switch
+        })
     }
     #[must_use]
-    pub const fn with_size(mut self, size: Size) -> Self {
-        self.size = size;
-        self
+    pub fn with_size(self, size: Size) -> Self {
+        self.map_builder(|mut switch| {
+            switch.size = size;
+            switch
+        })
     }
 }
 
-impl<'a, Message: 'a, Renderer: renderer::Renderer + 'a> From<Switch<'a, Message>>
-    for Element<'a, Message, Theme, Renderer>
+impl<'a, Message: 'static, Renderer: renderer::Renderer + 'static> IntoWidget
+    for Builder<'a, Message, Renderer>
 {
-    fn from(switch: Switch<'a, Message>) -> Self {
-        let Switch {
+    type Message = Message;
+    type Theme = Theme;
+    type Renderer = Renderer;
+    type Widget = impl Widget<Message, Theme, Renderer> + 'a;
+
+    fn into_widget(self) -> Self::Widget {
+        let Builder {
             is_enabled,
             on_toggle,
             spring_config,
             size,
-        } = switch;
+            ..
+        } = self;
         let target = if is_enabled { 1.0 } else { 0.0 };
 
         transition(
@@ -108,11 +128,11 @@ impl<'a, Message: 'a, Renderer: renderer::Renderer + 'a> From<Switch<'a, Message
             },
             move |Motions([thumb, color]): &Motions<2>,
                   _|
-                  -> Element<'a, Message, Theme, Renderer> {
+                  -> iced::Element<'a, Message, Theme, Renderer> {
                 let thumb = thumb.value();
                 let color = color.value();
                 let Some(on_toggle) = on_toggle.clone() else {
-                    return track(size, thumb, color, false, None).into();
+                    return track(size, thumb, color, false, None).boxed();
                 };
 
                 // The button reports its status only to its style function, which
@@ -135,11 +155,10 @@ impl<'a, Message: 'a, Renderer: renderer::Renderer + 'a> From<Switch<'a, Message
                     ));
                     button::Style::default()
                 })
-                .apply(Element::from)
                 .map(move |()| on_toggle(!is_enabled))
+                .boxed()
             },
         )
-        .into()
     }
 }
 
@@ -153,7 +172,7 @@ fn track<'a, Message: 'a, Renderer: renderer::Renderer + 'a>(
     color: f32,
     interactive: bool,
     hint: Option<Element<'a, Message, Theme, Renderer>>,
-) -> Container<'a, Message, Theme, Renderer> {
+) -> impl Widget<Message, Theme, Renderer> + 'a {
     let alpha = if interactive { 1.0 } else { 0.45 };
 
     let knob = container(Space::new())
@@ -176,7 +195,7 @@ fn track<'a, Message: 'a, Renderer: renderer::Renderer + 'a>(
         .width(Fill)
         .height(Fill)
         .align_y(iced::Alignment::Center);
-    container(stack(hint.into_iter().chain([content.into()])))
+    container(stack(hint.into_iter().chain([content.boxed()])))
         .width(size.width)
         .height(size.height)
         .style(move |theme: &Theme| container::Style {
@@ -225,7 +244,7 @@ fn hint<'a, Message: 'a, Renderer: renderer::Renderer + 'a>(
         .width(Fill)
         .height(Fill)
         .align_y(iced::Alignment::Center)
-        .into()
+        .boxed()
 }
 
 #[cfg(test)]
@@ -236,7 +255,7 @@ mod tests {
     use iced::advanced::{Layout, Shell, layout, mouse};
     use iced::{Event, Point, Rectangle, time::Duration, window};
 
-    type Control = Element<'static, bool, Theme, ()>;
+    type Control = iced::Element<'static, bool, Theme, ()>;
 
     fn send(
         control: &mut Control,
@@ -245,7 +264,7 @@ mod tests {
     ) -> (window::RedrawRequest, Vec<bool>) {
         let mut messages = Bus::new();
         let mut shell = Shell::new(&window::Headless, Waker::noop(), &mut messages);
-        control.as_widget_mut().update(
+        control.update(
             tree,
             &event,
             Layout::new(tree.size),
@@ -263,8 +282,8 @@ mod tests {
     }
 
     fn reconcile(control: &mut Control, tree: &mut Tree) {
-        tree.diff(control.as_widget_mut());
-        control.as_widget_mut().layout(
+        tree.diff(control);
+        control.layout(
             tree,
             &(),
             &layout::Limits::new(iced::Size::ZERO, iced::Size::new(100.0, 100.0)),
@@ -278,7 +297,7 @@ mod tests {
     /// Animated styles resolve while drawing, as after each frame of a real
     /// event loop.
     fn draw(control: &Control, tree: &Tree) {
-        control.as_widget().draw(
+        control.draw(
             tree,
             &mut (),
             &Theme::Light,
@@ -292,15 +311,15 @@ mod tests {
     #[test]
     fn mounts_settled_animates_changes_and_redraws_stop() {
         let now = Instant::now();
-        let mut control: Control = switch(true).on_toggle(|value| value).into();
-        let mut tree = Tree::new(control.as_widget());
+        let mut control: Control = switch(true).on_toggle(|value| value).boxed();
+        let mut tree = Tree::new(&control);
         reconcile(&mut control, &mut tree);
         draw(&control, &tree);
         // Initially mounted switches start at their supplied value.
         let (redraw, _) = send(&mut control, &mut tree, frame(now));
         assert!(matches!(redraw, window::RedrawRequest::Wait));
 
-        control = switch(false).on_toggle(|value| value).into();
+        control = switch(false).on_toggle(|value| value).boxed();
         reconcile(&mut control, &mut tree);
         let (redraw, _) = send(
             &mut control,

@@ -1,10 +1,10 @@
 //! Application shell built solely from upstream Iced primitives.
 
-use iced::widget::{Column, column, container, row, text};
-use iced::{Alignment, Element, Fill, Length};
+use iced::advanced::Widget;
+use iced::widget::{Column, Stack, Widget as _, column, container, row, text};
+use iced::{Alignment, Element, Fill, Length, Renderer, Theme};
 
-use crate::Apply;
-use crate::widget::{animate, button};
+use crate::widget::{AutoWidget, IntoWidget, button};
 
 pub struct NavigationItem<Message> {
     pub label: String,
@@ -12,52 +12,68 @@ pub struct NavigationItem<Message> {
     pub on_press: Message,
 }
 
-pub struct Shell<'a, Message> {
+pub type Shell<'a, Message> = AutoWidget<Builder<'a, Message>>;
+
+pub struct Builder<'a, Message> {
     navigation: Vec<NavigationItem<Message>>,
     content: Element<'a, Message>,
     controls: Option<(Message, Message)>,
     toasts: Vec<(String, Message)>,
-    dialog: Element<'a, Message>,
+    dialog: Option<Element<'a, Message>>,
 }
 
-impl<'a, Message: 'a> Shell<'a, Message> {
-    pub fn new(content: impl Into<Element<'a, Message>>) -> Self {
-        Self {
+impl<'a, Message: Clone + 'a> Shell<'a, Message> {
+    pub fn new(content: impl Widget<Message, Theme, Renderer> + 'a) -> Self {
+        AutoWidget::from_builder(Builder {
             navigation: Vec::new(),
-            content: content.into(),
+            content: content.boxed(),
             controls: None,
             toasts: Vec::new(),
-            dialog: iced::widget::Space::new().into(),
-        }
+            dialog: None,
+        })
     }
 
     #[must_use]
-    pub fn navigation(mut self, items: Vec<NavigationItem<Message>>) -> Self {
-        self.navigation = items;
-        self
+    pub fn navigation(self, items: Vec<NavigationItem<Message>>) -> Self {
+        self.map_builder(|mut shell| {
+            shell.navigation = items;
+            shell
+        })
     }
 
     #[must_use]
-    pub fn header_controls(mut self, toggle_navigation: Message, open_settings: Message) -> Self {
-        self.controls = Some((toggle_navigation, open_settings));
-        self
+    pub fn header_controls(self, toggle_navigation: Message, open_settings: Message) -> Self {
+        self.map_builder(|mut shell| {
+            shell.controls = Some((toggle_navigation, open_settings));
+            shell
+        })
     }
 
     #[must_use]
-    pub fn toasts(mut self, toasts: Vec<(String, Message)>) -> Self {
-        self.toasts = toasts;
-        self
+    pub fn toasts(self, toasts: Vec<(String, Message)>) -> Self {
+        self.map_builder(|mut shell| {
+            shell.toasts = toasts;
+            shell
+        })
     }
 
     #[must_use]
-    pub fn dialog(mut self, dialog: impl Into<Element<'a, Message>>) -> Self {
-        self.dialog = dialog.into();
-        self
+    pub fn dialog(self, dialog: impl Widget<Message, Theme, Renderer> + 'a) -> Self {
+        self.map_builder(|mut shell| {
+            shell.dialog = Some(dialog.boxed());
+            shell
+        })
     }
 }
 
-impl<'a, Message: Clone + 'a> From<Shell<'a, Message>> for Element<'a, Message> {
-    fn from(shell: Shell<'a, Message>) -> Self {
+impl<'a, Message: Clone + 'a> IntoWidget for Builder<'a, Message> {
+    type Message = Message;
+    type Theme = Theme;
+    type Renderer = Renderer;
+    type Widget = Stack<Element<'a, Message>>;
+
+    fn into_widget(self) -> Self::Widget {
+        let shell = self;
         let navigation_open = !shell.navigation.is_empty();
         let nav = shell
             .navigation
@@ -69,8 +85,6 @@ impl<'a, Message: Clone + 'a> From<Shell<'a, Message>> for Element<'a, Message> 
                 } else {
                     button.style(crate::theme::button::navigation_inactive)
                 }
-                .apply(animate)
-                .into()
             })
             .collect::<Column<_>>()
             .spacing(8)
@@ -93,7 +107,7 @@ impl<'a, Message: Clone + 'a> From<Shell<'a, Message>> for Element<'a, Message> 
         });
         let page = column![header, shell.content,].spacing(16);
 
-        let content: Element<'a, Message> = row![
+        let content = row![
             container(nav)
                 .width(if navigation_open { 200 } else { 0 })
                 .height(Length::Fill)
@@ -102,8 +116,7 @@ impl<'a, Message: Clone + 'a> From<Shell<'a, Message>> for Element<'a, Message> 
         ]
         .align_y(Alignment::Start)
         .width(Length::Fill)
-        .height(Length::Fill)
-        .into();
+        .height(Length::Fill);
 
         let toasts = column(shell.toasts.into_iter().map(|(message, close)| {
             container(
@@ -119,18 +132,14 @@ impl<'a, Message: Clone + 'a> From<Shell<'a, Message>> for Element<'a, Message> 
             )
             .padding(12)
             .style(crate::theme::container::card)
-            .into()
         }))
         .spacing(8)
         .padding(20);
 
-        let dialog = shell.dialog;
-        let shell: Element<'a, Message> =
-            iced::widget::stack![content, iced::widget::bottom_center(toasts)].into();
+        let shell_layer = iced::widget::stack![content, iced::widget::bottom_center(toasts)];
 
-        iced::widget::stack![shell, dialog]
+        iced::widget::stack![shell_layer, shell.dialog]
             .width(Length::Fill)
             .height(Length::Fill)
-            .into()
     }
 }

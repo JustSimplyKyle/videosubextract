@@ -5,14 +5,16 @@
 
 use std::cell::Cell;
 
-use iced::advanced::widget::{Operation, Tree, tree};
+use iced::advanced::widget::{Meta, Operation, Tree, tree};
 use iced::advanced::{Layout, Shell, Widget, layout, mouse, overlay, renderer};
 use iced::widget::pane_grid::{self, ResizeEvent};
-use iced::widget::{column, container, opaque, space, stack};
+use iced::widget::{Widget as _, column, container, opaque, space, stack};
 use iced::{Color, Fill, Length, Pixels, Rectangle, Renderer, Size, Vector, touch};
 
+use crate::Apply;
 use crate::theme::{COSMIC, WithRadius};
-use crate::{Apply, Element, Theme};
+use crate::widget::{AutoWidget, IntoWidget, swipe_helper};
+use iced::Theme;
 
 /// Height of the grab strip at the top of the sheet; the whole strip is draggable.
 const HANDLE_HEIGHT: f32 = 20.0;
@@ -23,25 +25,32 @@ const MINIMUM_HEIGHT: f32 = 120.0;
 const HEIGHT_EPSILON: f32 = 1.0;
 
 /// Lays `foreground` out as a draggable bottom sheet over `background`.
-pub fn bottom_sheet<'a, Message: 'a>(
+pub fn bottom_sheet<'a, Message, F, B>(
     state: &'a State,
-    foreground: impl Into<Element<'a, Message>>,
-    background: impl Into<Element<'a, Message>>,
-) -> BottomSheet<'a, Message> {
-    BottomSheet {
+    foreground: F,
+    background: B,
+) -> BottomSheet<'a, Message, F, B>
+where
+    Message: 'a,
+    F: Widget<Message, Theme, Renderer> + 'a,
+    B: Widget<Message, Theme, Renderer> + 'a,
+{
+    AutoWidget::from_builder(Builder {
         state,
-        foreground: foreground.into(),
-        background: background.into(),
+        foreground,
+        background,
         on_event: None,
         minimum_height: MINIMUM_HEIGHT,
         backdrop_height: None,
-    }
+    })
 }
 
-pub struct BottomSheet<'a, Message> {
+pub type BottomSheet<'a, Message, F, B> = AutoWidget<Builder<'a, Message, F, B>>;
+
+pub struct Builder<'a, Message, F, B> {
     state: &'a State,
-    foreground: Element<'a, Message>,
-    background: Element<'a, Message>,
+    foreground: F,
+    background: B,
     on_event: Option<Box<dyn Fn(Event) -> Message + 'a>>,
     /// Pixels.
     minimum_height: f32,
@@ -49,12 +58,19 @@ pub struct BottomSheet<'a, Message> {
     backdrop_height: Option<f32>,
 }
 
-impl<'a, Message> BottomSheet<'a, Message> {
+impl<'a, Message, F, B> BottomSheet<'a, Message, F, B>
+where
+    Message: 'a,
+    F: Widget<Message, Theme, Renderer> + 'a,
+    B: Widget<Message, Theme, Renderer> + 'a,
+{
     /// Makes the sheet draggable; route the [`Event`] to [`State::update`].
     #[must_use]
-    pub fn on_event(mut self, f: impl Fn(Event) -> Message + 'a) -> Self {
-        self.on_event = Some(Box::new(f));
-        self
+    pub fn on_event(self, f: impl Fn(Event) -> Message + 'a) -> Self {
+        self.map_builder(|mut sheet| {
+            sheet.on_event = Some(Box::new(f));
+            sheet
+        })
     }
 
     /// Height in pixels the sheet starts at and can't be dragged below. Unless
@@ -64,18 +80,22 @@ impl<'a, Message> BottomSheet<'a, Message> {
     /// Enforced while dragging; after a window resize the sheet keeps its
     /// split ratio until the next drag.
     #[must_use]
-    pub fn minimum_height(mut self, height: impl Into<Pixels>) -> Self {
-        self.minimum_height = height.into().0;
-        self
+    pub fn minimum_height(self, height: impl Into<Pixels>) -> Self {
+        self.map_builder(|mut sheet| {
+            sheet.minimum_height = height.into().0;
+            sheet
+        })
     }
 
     /// Height in pixels the sheet must be dragged above before the backdrop
     /// appears and the background stops taking input. Defaults to
     /// [`Self::minimum_height`].
     #[must_use]
-    pub fn backdrop_height(mut self, height: impl Into<Pixels>) -> Self {
-        self.backdrop_height = Some(height.into().0);
-        self
+    pub fn backdrop_height(self, height: impl Into<Pixels>) -> Self {
+        self.map_builder(|mut sheet| {
+            sheet.backdrop_height = Some(height.into().0);
+            sheet
+        })
     }
 }
 
@@ -169,29 +189,39 @@ pub struct Event {
     minimum_height: f32,
 }
 
-impl<'a, Message: 'a> From<BottomSheet<'a, Message>> for Element<'a, Message> {
-    fn from(sheet: BottomSheet<'a, Message>) -> Self {
-        let minimum_height = sheet.minimum_height;
-        let backdrop_height = sheet.backdrop_height.unwrap_or(minimum_height);
-        let min_size = sheet.state.min_size(minimum_height);
-        let backdrop = sheet
+impl<'a, Message, F, B> IntoWidget for Builder<'a, Message, F, B>
+where
+    Message: 'a,
+    F: Widget<Message, Theme, Renderer> + 'a,
+    B: Widget<Message, Theme, Renderer> + 'a,
+{
+    type Message = Message;
+    type Theme = Theme;
+    type Renderer = Renderer;
+    type Widget = impl Widget<Message, Theme, Renderer> + 'a;
+
+    fn into_widget(self) -> Self::Widget {
+        let minimum_height = self.minimum_height;
+        let backdrop_height = self.backdrop_height.unwrap_or(minimum_height);
+        let min_size = self.state.min_size(minimum_height);
+        let backdrop = self
             .state
             .sheet_height(minimum_height)
             .is_some_and(|height| height > backdrop_height + HEIGHT_EPSILON);
         // pane_grid's view is `Fn`, but it is called once per pane.
-        let foreground = Cell::new(Some(sheet.foreground));
+        let foreground = Cell::new(Some(self.foreground));
 
-        let panes = iced::widget::pane_grid(&sheet.state.panes, |_, pane, _| {
+        let panes = iced::widget::pane_grid(&self.state.panes, |_, pane, _| {
             pane_grid::Content::new(match pane {
                 Pane::Backdrop if backdrop => space()
                     .width(Fill)
                     .height(Fill)
                     .apply(container)
                     .style(|_| container::background(Color::BLACK.scale_alpha(0.55)))
-                    .apply(opaque),
-                Pane::Backdrop => space().width(Fill).height(Fill).into(),
-                Pane::Sheet => column![handle()]
-                    .push(foreground.take())
+                    .apply(opaque)
+                    .boxed(),
+                Pane::Backdrop => space().width(Fill).height(Fill).boxed(),
+                Pane::Sheet => column![handle(), foreground.take()]
                     .apply(container)
                     .width(Fill)
                     .height(Fill)
@@ -202,8 +232,9 @@ impl<'a, Message: 'a> From<BottomSheet<'a, Message>> for Element<'a, Message> {
                         crate::theme::container::navigation(theme)
                             .with_radius(iced::border::top(radius))
                     })
-                    // Keep sheet clicks from reaching the background beneath.
-                    .apply(opaque),
+                    // Keep self clicks from reaching the background beneath.
+                    .apply(opaque)
+                    .boxed(),
             })
         })
         .width(Fill)
@@ -223,7 +254,7 @@ impl<'a, Message: 'a> From<BottomSheet<'a, Message>> for Element<'a, Message> {
             }
         });
 
-        let panes = match sheet.on_event {
+        let panes = match self.on_event {
             // The grabbable band is `leeway / 2` either side of the split, so
             // this covers the whole handle strip.
             Some(on_event) => panes.on_resize(HANDLE_HEIGHT * 2.0, move |resize| {
@@ -235,19 +266,19 @@ impl<'a, Message: 'a> From<BottomSheet<'a, Message>> for Element<'a, Message> {
             None => panes,
         };
 
-        let panes = Element::new(PassThrough {
-            content: panes.into(),
-            state: sheet.state,
+        let panes = PassThrough {
+            content: panes,
+            state: self.state,
             min_size,
             pass_through: !backdrop,
-        });
+        };
 
-        stack([sheet.background, panes]).into()
+        stack![self.background, panes]
     }
 }
 
 /// Grab pill drawn at the top of the sheet, over the split's drag area.
-fn handle<'a, Message: 'a>() -> Element<'a, Message> {
+fn handle<Message>() -> impl Widget<Message, Theme, Renderer> {
     space()
         .width(36)
         .height(4)
@@ -260,7 +291,6 @@ fn handle<'a, Message: 'a>() -> Element<'a, Message> {
         .apply(container)
         .center_x(Fill)
         .center_y(HANDLE_HEIGHT)
-        .into()
 }
 
 /// Records the laid-out height into [`State`], and works around `pane_grid`
@@ -268,15 +298,17 @@ fn handle<'a, Message: 'a>() -> Element<'a, Message> {
 /// `pass_through`, presses over the backdrop get a levitated cursor so they fall
 /// through to the background. Everything else (including drag moves) is passed
 /// on unchanged.
-struct PassThrough<'a, Message> {
-    content: Element<'a, Message>,
+struct PassThrough<'a, W: Meta> {
+    content: W,
     state: &'a State,
     /// Must match the `pane_grid`'s, so the hole lines up with its layout.
     min_size: f32,
     pass_through: bool,
 }
 
-impl<Message> PassThrough<'_, Message> {
+impl<W: Meta> Meta for PassThrough<'_, W> {}
+
+impl<W: Meta> PassThrough<'_, W> {
     /// The backdrop region, minus the upper half of the split's drag band.
     fn hole(&self, bounds: Rectangle) -> Option<Rectangle> {
         let backdrop = self.state.backdrop()?;
@@ -293,25 +325,28 @@ impl<Message> PassThrough<'_, Message> {
     }
 }
 
-impl<Message> Widget<Message, Theme, Renderer> for PassThrough<'_, Message> {
+impl<W, Message> Widget<Message, Theme, Renderer> for PassThrough<'_, W>
+where
+    W: Widget<Message, Theme, Renderer>,
+{
     fn tag(&self) -> tree::Tag {
-        self.content.as_widget().tag()
+        self.content.tag()
     }
 
     fn state(&self) -> tree::State {
-        self.content.as_widget().state()
+        self.content.state()
     }
 
     fn diff(&mut self, tree: &mut Tree) {
-        self.content.as_widget_mut().diff(tree);
+        self.content.diff(tree);
     }
 
     fn size(&self) -> Size<Length> {
-        self.content.as_widget().size()
+        self.content.size()
     }
 
     fn layout(&mut self, tree: &mut Tree, renderer: &Renderer, limits: &layout::Limits) {
-        self.content.as_widget_mut().layout(tree, renderer, limits);
+        self.content.layout(tree, renderer, limits);
         self.state.area_height.set(tree.size.height);
     }
 
@@ -326,7 +361,6 @@ impl<Message> Widget<Message, Theme, Renderer> for PassThrough<'_, Message> {
         viewport: &Rectangle,
     ) {
         self.content
-            .as_widget()
             .draw(tree, renderer, theme, style, layout, cursor, viewport);
     }
 
@@ -339,7 +373,6 @@ impl<Message> Widget<Message, Theme, Renderer> for PassThrough<'_, Message> {
         operation: &mut dyn Operation,
     ) {
         self.content
-            .as_widget_mut()
             .operate(tree, layout, viewport, renderer, operation);
     }
 
@@ -364,7 +397,6 @@ impl<Message> Widget<Message, Theme, Renderer> for PassThrough<'_, Message> {
             _ => cursor,
         };
         self.content
-            .as_widget_mut()
             .update(tree, event, layout, cursor, renderer, shell, viewport);
     }
 
@@ -377,7 +409,6 @@ impl<Message> Widget<Message, Theme, Renderer> for PassThrough<'_, Message> {
         renderer: &Renderer,
     ) -> mouse::Interaction {
         self.content
-            .as_widget()
             .mouse_interaction(tree, layout, cursor, viewport, renderer)
     }
 
@@ -391,7 +422,6 @@ impl<Message> Widget<Message, Theme, Renderer> for PassThrough<'_, Message> {
         window: Size,
     ) -> Vec<overlay::Element<'b, Message, Theme, Renderer>> {
         self.content
-            .as_widget_mut()
             .overlay(tree, layout, renderer, viewport, translation, window)
     }
 }

@@ -10,31 +10,30 @@
 //!     .on_previous_maybe(model.previous_entity())
 //! ```
 
-use iced::advanced::widget::{Operation, Tree, tree};
+use iced::advanced::widget::{Meta, Operation, Tree, tree};
 use iced::advanced::{Layout, Shell, Widget, layout, mouse, overlay, renderer};
 use iced::mouse::ScrollDelta;
-use iced::{Element, Event, Length, Rectangle, Size, Vector};
+use iced::{Event, Length, Rectangle, Size, Vector};
 
-/// Accumulated touchpad distance, in pixels, that counts as one step.
 pub const SWIPE_THRESHOLD: f32 = 40.;
 
-pub fn swipe_helper<'a, Message, Theme, Renderer>(
-    content: impl Into<Element<'a, Message, Theme, Renderer>>,
-) -> SwipeHelper<'a, Message, Theme, Renderer> {
+pub fn swipe_helper<Message, W: Meta>(content: W) -> SwipeHelper<Message, W> {
     SwipeHelper {
-        content: content.into(),
+        content,
         on_next: None,
         on_previous: None,
+        threshold: SWIPE_THRESHOLD,
     }
 }
 
-pub struct SwipeHelper<'a, Message, Theme = iced::Theme, Renderer = iced::Renderer> {
-    content: Element<'a, Message, Theme, Renderer>,
+pub struct SwipeHelper<Message, W: Meta> {
+    content: W,
+    threshold: f32,
     on_next: Option<Message>,
     on_previous: Option<Message>,
 }
 
-impl<Message, Theme, Renderer> SwipeHelper<'_, Message, Theme, Renderer> {
+impl<Message, W: Meta> SwipeHelper<Message, W> {
     #[must_use]
     pub fn on_next(self, message: Message) -> Self {
         self.on_next_maybe(Some(message))
@@ -58,6 +57,12 @@ impl<Message, Theme, Renderer> SwipeHelper<'_, Message, Theme, Renderer> {
         self.on_previous = message;
         self
     }
+
+    #[must_use]
+    pub const fn threshold(mut self, threshold: f32) -> Self {
+        self.threshold = threshold;
+        self
+    }
 }
 
 /// Touchpad distance accumulated toward the next step.
@@ -71,9 +76,11 @@ fn dominant(x: f32, y: f32) -> f32 {
     if x.abs() > y.abs() { x } else { y }
 }
 
-impl<Message, Theme, Renderer> Widget<Message, Theme, Renderer>
-    for SwipeHelper<'_, Message, Theme, Renderer>
+impl<Message, W: Meta> Meta for SwipeHelper<Message, W> {}
+
+impl<Message, W, Theme, Renderer> Widget<Message, Theme, Renderer> for SwipeHelper<Message, W>
 where
+    W: Widget<Message, Theme, Renderer>,
     Message: Clone,
     Renderer: renderer::Renderer,
 {
@@ -90,13 +97,11 @@ where
     }
 
     fn size(&self) -> Size<Length> {
-        self.content.as_widget().size()
+        self.content.size()
     }
 
     fn layout(&mut self, tree: &mut Tree, renderer: &Renderer, limits: &layout::Limits) {
-        self.content
-            .as_widget_mut()
-            .layout(&mut tree.children[0], renderer, limits);
+        self.content.layout(&mut tree.children[0], renderer, limits);
         tree.size = tree.children[0].size;
     }
 
@@ -108,13 +113,8 @@ where
         renderer: &Renderer,
         operation: &mut dyn Operation,
     ) {
-        self.content.as_widget_mut().operate(
-            &mut tree.children[0],
-            layout,
-            viewport,
-            renderer,
-            operation,
-        );
+        self.content
+            .operate(&mut tree.children[0], layout, viewport, renderer, operation);
     }
 
     fn update(
@@ -127,7 +127,7 @@ where
         shell: &mut Shell<'_, Message>,
         viewport: &Rectangle,
     ) {
-        self.content.as_widget_mut().update(
+        self.content.update(
             &mut tree.children[0],
             event,
             layout,
@@ -152,7 +152,7 @@ where
             }
             ScrollDelta::Pixels { x, y } => {
                 state.accumulated += dominant(x, y);
-                if state.accumulated.abs() < SWIPE_THRESHOLD {
+                if state.accumulated.abs() < self.threshold {
                     return;
                 }
                 std::mem::take(&mut state.accumulated)
@@ -181,13 +181,8 @@ where
         viewport: &Rectangle,
         renderer: &Renderer,
     ) -> mouse::Interaction {
-        self.content.as_widget().mouse_interaction(
-            &tree.children[0],
-            layout,
-            cursor,
-            viewport,
-            renderer,
-        )
+        self.content
+            .mouse_interaction(&tree.children[0], layout, cursor, viewport, renderer)
     }
 
     fn draw(
@@ -200,7 +195,7 @@ where
         cursor: mouse::Cursor,
         viewport: &Rectangle,
     ) {
-        self.content.as_widget().draw(
+        self.content.draw(
             &tree.children[0],
             renderer,
             theme,
@@ -220,7 +215,7 @@ where
         translation: Vector,
         window: Size,
     ) -> Vec<overlay::Element<'b, Message, Theme, Renderer>> {
-        self.content.as_widget_mut().overlay(
+        self.content.overlay(
             &mut tree.children[0],
             layout,
             renderer,
@@ -228,17 +223,5 @@ where
             translation,
             window,
         )
-    }
-}
-
-impl<'a, Message, Theme, Renderer> From<SwipeHelper<'a, Message, Theme, Renderer>>
-    for Element<'a, Message, Theme, Renderer>
-where
-    Message: Clone + 'a,
-    Theme: 'a,
-    Renderer: renderer::Renderer + 'a,
-{
-    fn from(helper: SwipeHelper<'a, Message, Theme, Renderer>) -> Self {
-        Element::new(helper)
     }
 }

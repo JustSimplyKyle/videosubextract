@@ -12,10 +12,10 @@
 use crate::motion::{AnimationState, Mix, SpringConfig, presets};
 use iced::advanced::{
     Layout, Shell, Widget, layout, mouse, overlay, renderer,
-    widget::{Operation, Tree, tree},
+    widget::{Meta, Operation, Tree, tree},
 };
 use iced::time::Instant;
-use iced::{Element, Event, Length, Rectangle, Size, Vector, window};
+use iced::{Event, Length, Rectangle, Size, Vector, window};
 use std::{cell::RefCell, rc::Rc};
 
 /// Connects a widget's style function to the generic animation wrapper.
@@ -201,11 +201,7 @@ where
         self.binding
             .restore_state(tree.state.downcast_mut::<Binding<Value>>());
         self.binding.0.borrow_mut().update_config(self.config);
-        tree.diff_children_custom(
-            std::slice::from_mut(&mut self.inner),
-            |tree, inner| tree.diff(inner as &mut dyn Widget<Message, Theme, Renderer>),
-            |inner| Tree::new(inner as &dyn Widget<Message, Theme, Renderer>),
-        );
+        tree.diff_children_custom(std::slice::from_mut(&mut self.inner), Tree::diff, Tree::new);
     }
     fn size(&self) -> Size<Length> {
         self.inner.size()
@@ -316,25 +312,39 @@ where
     }
 }
 
-impl<'a, Message, Theme, Renderer, Inner, Value> From<Animated<Inner, Value>>
-    for Element<'a, Message, Theme, Renderer>
+impl<Value, Inner> Meta for Animated<Inner, Value>
 where
-    Inner: Widget<Message, Theme, Renderer> + 'a,
-    Value: Mix + 'static,
-    Message: 'a,
-    Theme: 'a,
-    Renderer: renderer::Renderer + 'a,
+    Inner: Meta,
+    Value: Mix,
 {
-    fn from(animated: Animated<Inner, Value>) -> Self {
-        Element::new(animated)
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::widget::button::{Button, Style};
-    type TestButton<'a, Message> = Animated<iced::widget::Button<'a, Message, Theme, ()>, Style>;
+
+    type TestButton<'a, Message> =
+        Animated<iced::widget::Button<'a, Message, iced::widget::Space, Theme>, Style>;
+
+    /// `Tree::new` for widgets implemented for several renderers.
+    fn new_tree<W, Message, Theme, Renderer>(widget: &W) -> Tree
+    where
+        W: Widget<Message, Theme, Renderer>,
+        Renderer: renderer::Renderer,
+    {
+        Tree::new(widget)
+    }
+
+    /// `Tree::diff` for widgets implemented for several renderers.
+    fn diff_tree<W, Message, Theme, Renderer>(tree: &mut Tree, widget: &mut W)
+    where
+        W: Widget<Message, Theme, Renderer>,
+        Renderer: renderer::Renderer,
+    {
+        tree.diff(widget);
+    }
+
     use iced::advanced::shell::{Bus, Waker};
     use iced::{Color, Point, Theme, time::Duration};
 
@@ -352,6 +362,7 @@ mod tests {
             Animated::new(self, binding)
         }
     }
+    impl Meta for ColorProbe {}
 
     impl Widget<u8, (), ()> for ColorProbe {
         fn size(&self) -> Size<Length> {
@@ -425,7 +436,7 @@ mod tests {
         };
 
         let mut control = probe(Color::BLACK);
-        let mut tree = Tree::new(&control as &dyn Widget<u8, (), ()>);
+        let mut tree = Tree::new(&control);
         control.diff(&mut tree);
         draw(&control, &tree);
 
@@ -433,7 +444,7 @@ mod tests {
         // clock would start the spring a second early and skip the transition.
         let start = Instant::now() + Duration::from_secs(1);
         let mut control = probe(Color::WHITE);
-        tree.diff(&mut control as &mut dyn Widget<u8, (), ()>);
+        tree.diff(&mut control);
         frame(&mut control, &mut tree, start);
         draw(&control, &tree);
         frame(&mut control, &mut tree, start + Duration::from_millis(40));
@@ -451,6 +462,7 @@ mod tests {
     #[should_panic(expected = "exactly once per draw")]
     fn debug_builds_reject_a_style_function_that_was_never_installed() {
         struct Unstyled;
+        impl Meta for Unstyled {}
         impl Widget<u8, (), ()> for Unstyled {
             fn size(&self) -> Size<Length> {
                 Size::new(Length::Fixed(20.0), Length::Fixed(20.0))
@@ -475,7 +487,7 @@ mod tests {
             let _unused = animate.wrap_unary(|color: &Color| *color);
             Unstyled
         });
-        let mut tree = Tree::new(&control as &dyn Widget<u8, (), ()>);
+        let mut tree = Tree::new(&control);
         control.diff(&mut tree);
         control.draw(
             &tree,
@@ -494,7 +506,7 @@ mod tests {
             color: Color::WHITE,
             binding: Binding::default(),
         });
-        let mut tree = Tree::new(&first as &dyn Widget<u8, (), ()>);
+        let mut tree = Tree::new(&first);
         first.diff(&mut tree);
         let now = Instant::now();
         let mut expected = AnimationState::default();
@@ -514,10 +526,10 @@ mod tests {
             color: Color::WHITE,
             binding: Binding::default(),
         });
-        tree.diff(&mut rebuilt as &mut dyn Widget<u8, (), ()>);
+        tree.diff(&mut rebuilt);
         // Re-diffing the same builder must neither borrow its cell twice nor
         // move its state out of that same cell.
-        tree.diff(&mut rebuilt as &mut dyn Widget<u8, (), ()>);
+        tree.diff(&mut rebuilt);
         assert_eq!(rebuilt.inner.binding.resolve(Color::WHITE), displayed);
 
         // Match an uninterrupted animation later in its trajectory. Keeping
@@ -542,8 +554,8 @@ mod tests {
     }
 
     fn layout_button<'a, Message: Clone + 'a>(control: &mut TestButton<'a, Message>) -> Tree {
-        let mut tree = Tree::new(control as &dyn Widget<Message, Theme, ()>);
-        control.diff(&mut tree);
+        let mut tree = new_tree::<_, Message, Theme, ()>(&*control);
+        Widget::<Message, Theme, ()>::diff(control, &mut tree);
         control.layout(
             &mut tree,
             &(),
@@ -597,7 +609,7 @@ mod tests {
     #[test]
     fn clipped_buttons_do_not_schedule_frames_for_unobserved_styles() {
         let mut control = animate(
-            Button::<(), ()>::new(iced::widget::Space::new().width(30).height(20)).on_press(()),
+            Button::<(), _, ()>::new(iced::widget::Space::new().width(30).height(20)).on_press(()),
         );
         let mut tree = layout_button(&mut control);
         let mut messages = Bus::new();
@@ -633,9 +645,9 @@ mod tests {
             Some(event)
         }
 
-        fn view(&self, _: &()) -> Element<'a, u8, Theme, ()> {
+        fn view(&self, _: &()) -> impl Widget<u8, Theme, ()> + 'a {
             iced::widget::Row::with_children((0..3).map(|index| {
-                Button::<_, ()>::new(iced::widget::Space::new().width(30).height(20))
+                Button::<_, _, ()>::new(iced::widget::Space::new().width(30).height(20))
                     .on_press(index)
                     .padding([6, 14])
                     .style(move |theme, status| {
@@ -647,10 +659,8 @@ mod tests {
                             index == 2,
                         )
                     })
-                    .into()
             }))
             .spacing(1)
-            .into()
         }
     }
 
@@ -659,10 +669,10 @@ mod tests {
         use iced::widget::button::Status;
 
         for index in 0..3 {
-            let mut control: Element<'_, u8, Theme, ()> = iced::widget::component(Segments);
-            let mut tree = Tree::new(control.as_widget());
-            tree.diff(control.as_widget_mut());
-            control.as_widget_mut().layout(
+            let mut control = iced::widget::component(Segments);
+            let mut tree = Tree::new(&control);
+            tree.diff(&mut control);
+            control.layout(
                 &mut tree,
                 &(),
                 &layout::Limits::new(Size::ZERO, Size::new(200.0, 200.0)),
@@ -693,7 +703,7 @@ mod tests {
                 };
                 for _ in 0..updates {
                     let mut shell = Shell::new(&window::Headless, Waker::noop(), &mut messages);
-                    control.as_widget_mut().update(
+                    control.update(
                         &mut tree,
                         &event,
                         layout,
@@ -705,7 +715,7 @@ mod tests {
                     redraw = shell.redraw_request();
                 }
                 if matches!(event, Event::Window(window::Event::RedrawRequested(_))) {
-                    control.as_widget().draw(
+                    control.draw(
                         &tree,
                         &mut (),
                         &Theme::Dark,
@@ -739,7 +749,7 @@ mod tests {
             assert!(messages.is_empty());
             for _ in 0..2 {
                 let mut shell = Shell::new(&window::Headless, Waker::noop(), &mut messages);
-                control.as_widget_mut().update(
+                control.update(
                     &mut tree,
                     &release(),
                     layout,
@@ -756,17 +766,17 @@ mod tests {
     #[test]
     fn style_changes_animate_across_rebuilds_and_redraws_stop() {
         let mut control = animate(
-            Button::<(), ()>::new(iced::widget::Space::new().width(30).height(20))
+            Button::<(), _, ()>::new(iced::widget::Space::new().width(30).height(20))
                 .style(|_, _| appearance_style(Color::BLACK)),
         );
         let mut tree = layout_button(&mut control);
         let mut messages = Bus::new();
         draw(&control, &tree);
         let mut rebuilt = animate(
-            Button::<(), ()>::new(iced::widget::Space::new().width(30).height(20))
+            Button::<(), _, ()>::new(iced::widget::Space::new().width(30).height(20))
                 .style(|_, _| appearance_style(Color::WHITE)),
         );
-        tree.diff(&mut rebuilt as &mut dyn Widget<(), Theme, ()>);
+        diff_tree::<_, (), Theme, ()>(&mut tree, &mut rebuilt);
         let now = Instant::now();
         assert_ne!(
             send(
@@ -832,7 +842,7 @@ mod tests {
             )
         }
         let mut control = build_control();
-        let mut tree = Tree::new(&control as &dyn Widget<usize, Theme, ()>);
+        let mut tree = new_tree::<_, usize, Theme, ()>(&control);
         Widget::<usize, Theme, ()>::diff(&mut control, &mut tree);
         control.layout(
             &mut tree,
@@ -884,7 +894,7 @@ mod tests {
         assert_ne!(displayed.border.color, hovered.border.color);
 
         let mut rebuilt = build_control();
-        tree.diff(&mut rebuilt as &mut dyn Widget<usize, Theme, ()>);
+        diff_tree::<_, usize, Theme, ()>(&mut tree, &mut rebuilt);
         assert_eq!(
             rebuilt.binding.0.borrow().animation.current(),
             Some(displayed)
@@ -922,7 +932,7 @@ mod tests {
         assert!(shell.is_event_captured());
         // Rebuilding while open preserves the native pick list's menu state.
         let mut rebuilt = build_control();
-        tree.diff(&mut rebuilt as &mut dyn Widget<usize, Theme, ()>);
+        diff_tree::<_, usize, Theme, ()>(&mut tree, &mut rebuilt);
         {
             let mut overlays = rebuilt.overlay(
                 &mut tree,
