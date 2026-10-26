@@ -1,17 +1,16 @@
 //! A resizable bottom sheet layered over a background, for compact layouts.
 //!
-//! Like [`pane_grid`], the caller owns the [`State`] and feeds resize [`Event`]s
-//! back into [`State::update`].
+//! The caller owns the [`State`] and feeds resize [`Event`]s back into
+//! [`State::update`].
 
+use crate::{Apply, ApplyConditional, Element};
 use std::cell::Cell;
 
 use iced::advanced::widget::{Meta, Operation, Tree, tree};
 use iced::advanced::{Layout, Shell, Widget, layout, mouse, overlay, renderer};
-use iced::widget::pane_grid::{self, ResizeEvent};
 use iced::widget::{Widget as _, column, container, opaque, space, stack};
-use iced::{Color, Fill, Length, Pixels, Rectangle, Renderer, Size, Vector, touch};
+use iced::{Color, Fill, Length, Pixels, Rectangle, Renderer, Size, Vector};
 
-use crate::Apply;
 use crate::theme::{COSMIC, WithRadius};
 use crate::widget::{AutoWidget, IntoWidget, swipe_helper};
 use iced::Theme;
@@ -20,8 +19,8 @@ use iced::Theme;
 const HANDLE_HEIGHT: f32 = 20.0;
 /// Default smallest sheet height in pixels: the handle plus room for a title row.
 const MINIMUM_HEIGHT: f32 = 120.0;
-/// Pixel slack when comparing the laid-out sheet against `backdrop_height`, as
-/// `pane_grid` rounds split positions.
+/// Pixel slack when comparing the sheet against `backdrop_height`, so a drag
+/// that lands on it doesn't flicker the backdrop.
 const HEIGHT_EPSILON: f32 = 1.0;
 
 /// Lays `foreground` out as a draggable bottom sheet over `background`.
@@ -78,7 +77,7 @@ where
     /// the background stays interactive.
     ///
     /// Enforced while dragging; after a window resize the sheet keeps its
-    /// split ratio until the next drag.
+    /// pixel height until the next drag.
     #[must_use]
     pub fn minimum_height(self, height: impl Into<Pixels>) -> Self {
         self.map_builder(|mut sheet| {
@@ -99,92 +98,43 @@ where
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Pane {
-    Backdrop,
-    Sheet,
-}
-
 /// The sheet's height; owned by the caller.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct State {
-    panes: pane_grid::State<Pane>,
-    /// Whether the sheet has been dragged. Until then it sits at `minimum_height`.
-    resized: bool,
-    /// Last laid-out height of the whole area in pixels, to convert between
-    /// pixel heights and split ratios.
+    /// Sheet height in pixels once dragged.
+    sheet_height: Option<f32>,
+    /// Last laid-out height of the whole area in pixels, to cap drags.
     area_height: Cell<f32>,
-}
-
-impl Default for State {
-    fn default() -> Self {
-        Self {
-            panes: pane_grid::State::with_configuration(pane_grid::Configuration::Split {
-                axis: pane_grid::Axis::Horizontal,
-                // Collapsed; `min_size` holds it at `minimum_height` until dragged.
-                ratio: 1.0,
-                a: Box::new(pane_grid::Configuration::Pane(Pane::Backdrop)),
-                b: Box::new(pane_grid::Configuration::Pane(Pane::Sheet)),
-            }),
-            resized: false,
-            area_height: Cell::new(0.0),
-        }
-    }
 }
 
 impl State {
     pub fn update(
         &mut self,
         Event {
-            resize,
+            height,
             minimum_height,
         }: Event,
     ) {
         let area_height = self.area_height.get();
-        // The split ratio is the backdrop's share, so the sheet's pixel minimum
-        // caps it from above.
-        let split_ratio = if area_height > 0.0 {
-            resize
-                .ratio
-                .min(1.0 - minimum_height / area_height)
-                .max(0.0)
+        let maximum_height = if area_height > 0.0 {
+            area_height.max(minimum_height)
         } else {
-            resize.ratio
+            f32::INFINITY
         };
-        self.panes.resize(resize.split, split_ratio);
-        self.resized = true;
+        self.sheet_height = Some(height.clamp(minimum_height, maximum_height));
     }
 
-    /// `pane_grid`'s shared per-pane minimum, in pixels. Only used to hold the
-    /// sheet at `minimum_height` before the first drag; afterwards it would also
-    /// stop the sheet short of the top, so drags are clamped in [`Self::update`].
-    fn min_size(&self, minimum_height: f32) -> f32 {
-        if self.resized { 0.0 } else { minimum_height }
-    }
-
-    /// Current sheet height in pixels, if the area has been laid out.
-    fn sheet_height(&self, minimum_height: f32) -> Option<f32> {
-        if !self.resized {
-            return Some(minimum_height);
-        }
-        let area_height = self.area_height.get();
-        let pane_grid::Node::Split { ratio, .. } = self.panes.layout() else {
-            return None;
-        };
-        (area_height > 0.0).then(|| (1.0 - ratio) * area_height)
-    }
-
-    fn backdrop(&self) -> Option<pane_grid::Pane> {
-        self.panes
-            .iter()
-            .find_map(|(id, pane)| (*pane == Pane::Backdrop).then_some(*id))
+    /// Current sheet height in pixels.
+    fn sheet_height(&self, minimum_height: f32) -> f32 {
+        self.sheet_height.unwrap_or(minimum_height)
     }
 }
 
 /// An opaque interaction with the sheet, for [`State::update`].
 #[derive(Debug, Clone, Copy)]
 pub struct Event {
-    resize: ResizeEvent,
+    /// Requested sheet height in pixels.
+    height: f32,
     /// Pixels.
     minimum_height: f32,
 }
@@ -203,81 +153,45 @@ where
     fn into_widget(self) -> Self::Widget {
         let minimum_height = self.minimum_height;
         let backdrop_height = self.backdrop_height.unwrap_or(minimum_height);
-        let min_size = self.state.min_size(minimum_height);
-        let backdrop = self
-            .state
-            .sheet_height(minimum_height)
-            .is_some_and(|height| height > backdrop_height + HEIGHT_EPSILON);
-        // pane_grid's view is `Fn`, but it is called once per pane.
-        let foreground = Cell::new(Some(self.foreground));
+        let sheet_height = self.state.sheet_height(minimum_height);
+        let backdrop = sheet_height > backdrop_height + HEIGHT_EPSILON;
 
-        let panes = iced::widget::pane_grid(&self.state.panes, |_, pane, _| {
-            pane_grid::Content::new(match pane {
-                Pane::Backdrop if backdrop => space()
+        let sheet = column![handle(), self.foreground]
+            .apply(container)
+            .width(Fill)
+            .height(sheet_height)
+            // libcosmic's context drawer surface: the primary container,
+            // one layer above the background-layer cards beneath.
+            .style(|theme| {
+                let radius = COSMIC.corner_radii.radius_m[0];
+                crate::theme::container::navigation(theme).with_radius(iced::border::top(radius))
+            })
+            // Keep self clicks from reaching the background beneath.
+            .apply(opaque)
+            .boxed();
+
+        let overlay = stack![
+            backdrop.then_some(
+                space()
                     .width(Fill)
                     .height(Fill)
                     .apply(container)
                     .style(|_| container::background(Color::BLACK.scale_alpha(0.55)))
                     .apply(opaque)
-                    .boxed(),
-                Pane::Backdrop => space().width(Fill).height(Fill).boxed(),
-                Pane::Sheet => column![handle(), foreground.take()]
-                    .apply(container)
-                    .width(Fill)
-                    .height(Fill)
-                    // libcosmic's context drawer surface: the primary container,
-                    // one layer above the background-layer cards beneath.
-                    .style(|theme| {
-                        let radius = COSMIC.corner_radii.radius_m[0];
-                        crate::theme::container::navigation(theme)
-                            .with_radius(iced::border::top(radius))
-                    })
-                    // Keep self clicks from reaching the background beneath.
-                    .apply(opaque)
-                    .boxed(),
-            })
-        })
-        .width(Fill)
-        .height(Fill)
-        .spacing(0)
-        .min_size(min_size)
-        // The handle is the visual; hide pane_grid's own split line.
-        .style(|theme| {
-            let hidden = pane_grid::Line {
-                color: Color::TRANSPARENT,
-                width: 0.0,
-            };
-            pane_grid::Style {
-                hovered_split: hidden,
-                picked_split: hidden,
-                ..pane_grid::default(theme)
-            }
-        });
+            ),
+            column![space().height(Fill), sheet]
+        ];
 
-        let panes = match self.on_event {
-            // The grabbable band is `leeway / 2` either side of the split, so
-            // this covers the whole handle strip.
-            Some(on_event) => panes.on_resize(HANDLE_HEIGHT * 2.0, move |resize| {
-                on_event(Event {
-                    resize,
-                    minimum_height,
-                })
-            }),
-            None => panes,
-        };
-
-        let panes = PassThrough {
-            content: panes,
+        let overlay = MeasureArea {
+            content: overlay,
             state: self.state,
-            min_size,
-            pass_through: !backdrop,
         };
 
-        stack![self.background, panes]
+        stack![self.background, overlay]
     }
 }
 
-/// Grab pill drawn at the top of the sheet, over the split's drag area.
+/// Grab pill drawn at the top of the sheet.
 fn handle<Message>() -> impl Widget<Message, Theme, Renderer> {
     space()
         .width(36)
@@ -293,39 +207,15 @@ fn handle<Message>() -> impl Widget<Message, Theme, Renderer> {
         .center_y(HANDLE_HEIGHT)
 }
 
-/// Records the laid-out height into [`State`], and works around `pane_grid`
-/// capturing every press inside its bounds, even over an empty pane: with
-/// `pass_through`, presses over the backdrop get a levitated cursor so they fall
-/// through to the background. Everything else (including drag moves) is passed
-/// on unchanged.
-struct PassThrough<'a, W: Meta> {
+/// Records the laid-out height of the whole area into [`State`].
+struct MeasureArea<'a, W: Meta> {
     content: W,
     state: &'a State,
-    /// Must match the `pane_grid`'s, so the hole lines up with its layout.
-    min_size: f32,
-    pass_through: bool,
 }
 
-impl<W: Meta> Meta for PassThrough<'_, W> {}
+impl<W: Meta> Meta for MeasureArea<'_, W> {}
 
-impl<W: Meta> PassThrough<'_, W> {
-    /// The backdrop region, minus the upper half of the split's drag band.
-    fn hole(&self, bounds: Rectangle) -> Option<Rectangle> {
-        let backdrop = self.state.backdrop()?;
-        let region = *self
-            .state
-            .panes
-            .layout()
-            .pane_regions(0.0, self.min_size, bounds.size())
-            .get(&backdrop)?;
-        Some(Rectangle {
-            height: (region.height - HANDLE_HEIGHT).max(0.0),
-            ..region + Vector::new(bounds.x, bounds.y)
-        })
-    }
-}
-
-impl<W, Message> Widget<Message, Theme, Renderer> for PassThrough<'_, W>
+impl<W, Message> Widget<Message, Theme, Renderer> for MeasureArea<'_, W>
 where
     W: Widget<Message, Theme, Renderer>,
 {
@@ -386,16 +276,6 @@ where
         shell: &mut Shell<'_, Message>,
         viewport: &Rectangle,
     ) {
-        let is_press = self.pass_through
-            && matches!(
-                event,
-                iced::Event::Mouse(mouse::Event::ButtonPressed(_))
-                    | iced::Event::Touch(touch::Event::FingerPressed { .. })
-            );
-        let cursor = match self.hole(layout.bounds()) {
-            Some(hole) if is_press && cursor.is_over(hole) => cursor.levitate(),
-            _ => cursor,
-        };
         self.content
             .update(tree, event, layout, cursor, renderer, shell, viewport);
     }
