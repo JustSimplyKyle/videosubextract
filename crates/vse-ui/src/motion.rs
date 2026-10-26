@@ -176,6 +176,7 @@ pub mod presets {
 /// Values can represent normalized progress, pixels, scale, or another continuous
 /// scalar. Time advancement uses the analytical solver in `springs`, so a long
 /// frame interval does not require numerical integration substeps.
+#[derive(Clone)]
 pub struct Motion {
     spring: Spring<f32>,
     now: Instant,

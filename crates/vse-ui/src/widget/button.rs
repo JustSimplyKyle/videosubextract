@@ -140,3 +140,11 @@ impl<'a, Message: Clone + 'a, Renderer: renderer::Renderer + 'a> From<Button<'a,
         button.into_animated().into()
     }
 }
+
+impl<'a, Message: Clone + 'a> From<iced::widget::Button<'a, Message>>
+    for Animated<iced::widget::Button<'a, Message>, iced::widget::button::Style>
+{
+    fn from(button: iced::widget::Button<'a, Message>) -> Self {
+        Animated::bind(|animate| button.style(animate.wrap(crate::theme::button::standard)))
+    }
+}

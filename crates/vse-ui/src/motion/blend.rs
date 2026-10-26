@@ -5,7 +5,7 @@
 //! interpolation, spring configuration, and animation time.
 
 use super::{Motion, SpringConfig, mix_oklab, presets};
-use iced::{Color, time::Instant};
+use iced::{Color, time::Instant, widget::transition};
 
 /// How to interpolate between two values of a type.
 ///
@@ -28,6 +28,7 @@ enum Endpoint {
 }
 
 /// Two style endpoints and a single spring for their blend progress.
+#[derive(Clone)]
 pub struct Blend<Style> {
     from: Style,
     to: Style,
@@ -106,9 +107,23 @@ impl<Value: Mix> Blend<Value> {
 }
 
 /// only deals with spring movement, parent decides when to "update" the spring
+#[derive(Clone)]
 pub struct AnimationState<Value> {
     appearance: Option<Blend<Value>>,
     config: SpringConfig,
+}
+
+impl<Value: Mix + Copy + 'static> transition::Program for AnimationState<Value> {
+    type Value = Value;
+
+    fn go(&mut self, value: Self::Value, now: Instant) {
+        self.resolve(value, now);
+        self.advance(now);
+    }
+
+    fn is_animating(&self, _now: Instant) -> bool {
+        self.is_animating()
+    }
 }
 
 impl<Value> Default for AnimationState<Value> {
@@ -187,6 +202,42 @@ mod tests {
                 brightness: self.brightness + (to.brightness - self.brightness) * progress,
                 name: to.name.clone(),
             }
+        }
+    }
+
+    #[test]
+    fn transition_program_repeats_enter_and_exit() {
+        use transition::Program;
+
+        let now = Instant::now();
+        let off = Color::WHITE.scale_alpha(0.0);
+        let on = Color::WHITE.scale_alpha(0.35);
+        let mut state = AnimationState::default();
+        state.go(off, now);
+
+        for cycle in 0..2 {
+            let enter = now + Duration::from_secs(cycle * 4 + 1);
+            state.go(on, enter);
+            assert!(
+                state.is_animating(),
+                "hover {cycle} must retarget the spring"
+            );
+            state.go(on, enter + Duration::from_millis(40));
+            let alpha = state.current().unwrap().a;
+            assert!(alpha > off.a && alpha < on.a);
+            state.go(on, enter + Duration::from_secs(1));
+            assert_eq!(state.current(), Some(on));
+            assert!(!state.is_animating());
+
+            let exit = enter + Duration::from_secs(2);
+            state.go(off, exit);
+            assert!(state.is_animating());
+            state.go(off, exit + Duration::from_millis(40));
+            let alpha = state.current().unwrap().a;
+            assert!(alpha > off.a && alpha < on.a);
+            state.go(off, exit + Duration::from_secs(1));
+            assert_eq!(state.current(), Some(off));
+            assert!(!state.is_animating());
         }
     }
 

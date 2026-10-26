@@ -7,10 +7,12 @@
 
 use crate::Apply;
 use crate::motion::{Motion, Motions, mix_oklab, presets};
-use iced::advanced::{mouse, renderer};
+use crate::widget::Animated;
+use iced::advanced::renderer;
 use iced::time::Instant;
-use iced::widget::{Container, Space, container, mouse_area, row, transition};
+use iced::widget::{Container, Space, button, container, row, stack, transition};
 use iced::{Border, Color, Element, Fill, Theme};
+use std::cell::Cell;
 use std::rc::Rc;
 
 #[derive(Default, Clone, Copy)]
@@ -21,18 +23,20 @@ pub struct Size {
 }
 
 impl Size {
-    pub const fn small() -> Self {
+    pub fn small() -> Self {
+        let default = Self::default();
         Self {
-            width: 46.0 * 0.75,
-            height: 28.0 * 0.75,
-            inset: 3.0 * 0.75,
+            width: default.width * 0.75,
+            height: default.height * 0.75,
+            inset: default.inset * 0.75,
         }
     }
-    pub const fn large() -> Self {
+    pub fn large() -> Self {
+        let default = Self::default();
         Self {
-            width: 46.0 * 1.25,
-            height: 28.0 * 1.25,
-            inset: 3.0 * 1.25,
+            width: default.width * 1.25,
+            height: default.height * 1.25,
+            inset: default.inset * 1.25,
         }
     }
     const fn thumb_size(&self) -> f32 {
@@ -108,15 +112,31 @@ impl<'a, Message: 'a, Renderer: renderer::Renderer + 'a> From<Switch<'a, Message
                 let thumb = thumb.value();
                 let color = color.value();
                 let Some(on_toggle) = on_toggle.clone() else {
-                    return track(size, thumb, color, false).into();
+                    return track(size, thumb, color, false, None).into();
                 };
 
-                let on_toggle = on_toggle.clone();
-                mouse_area(track(size, thumb, color, true))
-                    .on_press(())
-                    .interaction(mouse::Interaction::Pointer)
-                    .apply(Element::from)
-                    .map(move |()| on_toggle(!is_enabled))
+                // The button reports its status only to its style function, which
+                // runs before its content draws, so the hint can read it from here.
+                let hovered = Rc::new(Cell::new(false));
+                let status = hovered.clone();
+                button(track(
+                    size,
+                    thumb,
+                    color,
+                    true,
+                    Some(hint(size, thumb, hovered)),
+                ))
+                .padding(0)
+                .on_press(())
+                .style(move |_, current| {
+                    status.set(matches!(
+                        current,
+                        button::Status::Hovered | button::Status::Pressed
+                    ));
+                    button::Style::default()
+                })
+                .apply(Element::from)
+                .map(move |()| on_toggle(!is_enabled))
             },
         )
         .into()
@@ -125,12 +145,14 @@ impl<'a, Message: 'a, Renderer: renderer::Renderer + 'a> From<Switch<'a, Message
 
 /// The track with its thumb at `thumb` progress and its color blended in Oklab
 /// at `color` progress. The thumb may overshoot into the padding, but never
-/// past the track's edge.
+/// past the track's edge. An optional `hint` is layered between the track and
+/// the thumb.
 fn track<'a, Message: 'a, Renderer: renderer::Renderer + 'a>(
     size: Size,
     thumb: f32,
     color: f32,
     interactive: bool,
+    hint: Option<Element<'a, Message, Theme, Renderer>>,
 ) -> Container<'a, Message, Theme, Renderer> {
     let alpha = if interactive { 1.0 } else { 0.45 };
 
@@ -154,8 +176,7 @@ fn track<'a, Message: 'a, Renderer: renderer::Renderer + 'a>(
         .width(Fill)
         .height(Fill)
         .align_y(iced::Alignment::Center);
-    container(content)
-        .padding([size.inset, 0.0])
+    container(stack(hint.into_iter().chain([content.into()])))
         .width(size.width)
         .height(size.height)
         .style(move |theme: &Theme| container::Style {
@@ -176,12 +197,43 @@ fn track<'a, Message: 'a, Renderer: renderer::Renderer + 'a>(
         })
 }
 
+/// A translucent circle behind the thumb that fades in while `hovered`.
+fn hint<'a, Message: 'a, Renderer: renderer::Renderer + 'a>(
+    size: Size,
+    thumb: f32,
+    hovered: Rc<Cell<bool>>,
+) -> Element<'a, Message, Theme, Renderer> {
+    let circle = Animated::bind(|animate| {
+        let color = animate.wrap_unary(move |_: &Theme| {
+            Color::WHITE.scale_alpha(if hovered.get() { 0.35 } else { 0.0 })
+        });
+        container(Space::new())
+            .width(size.height)
+            .height(size.height)
+            .style(move |theme| container::Style {
+                background: Some(color(theme).into()),
+                border: Border {
+                    radius: (size.height / 2.0).into(),
+                    ..Border::default()
+                },
+                ..container::Style::default()
+            })
+    });
+
+    let offset = (size.track_width() * thumb).clamp(0.0, size.track_width());
+    row![Space::new().width(offset), circle]
+        .width(Fill)
+        .height(Fill)
+        .align_y(iced::Alignment::Center)
+        .into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use iced::advanced::shell::{Bus, Waker};
     use iced::advanced::widget::Tree;
-    use iced::advanced::{Layout, Shell, layout};
+    use iced::advanced::{Layout, Shell, layout, mouse};
     use iced::{Event, Point, Rectangle, time::Duration, window};
 
     type Control = Element<'static, bool, Theme, ()>;
@@ -223,12 +275,27 @@ mod tests {
         Event::Window(window::Event::RedrawRequested(now))
     }
 
+    /// Animated styles resolve while drawing, as after each frame of a real
+    /// event loop.
+    fn draw(control: &Control, tree: &Tree) {
+        control.as_widget().draw(
+            tree,
+            &mut (),
+            &Theme::Light,
+            &renderer::Style::default(),
+            Layout::new(tree.size),
+            mouse::Cursor::Unavailable,
+            &Rectangle::with_size(iced::Size::new(100.0, 100.0)),
+        );
+    }
+
     #[test]
     fn mounts_settled_animates_changes_and_redraws_stop() {
         let now = Instant::now();
         let mut control: Control = switch(true).on_toggle(|value| value).into();
         let mut tree = Tree::new(control.as_widget());
         reconcile(&mut control, &mut tree);
+        draw(&control, &tree);
         // Initially mounted switches start at their supplied value.
         let (redraw, _) = send(&mut control, &mut tree, frame(now));
         assert!(matches!(redraw, window::RedrawRequest::Wait));
@@ -241,7 +308,9 @@ mod tests {
             frame(now + Duration::from_millis(16)),
         );
         assert!(!matches!(redraw, window::RedrawRequest::Wait));
+        draw(&control, &tree);
         send(&mut control, &mut tree, frame(now + Duration::from_secs(5)));
+        draw(&control, &tree);
         let (redraw, _) = send(&mut control, &mut tree, frame(now + Duration::from_secs(6)));
         assert!(matches!(redraw, window::RedrawRequest::Wait));
     }

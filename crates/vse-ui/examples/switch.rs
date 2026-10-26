@@ -1,8 +1,9 @@
 //! Run with `cargo run -p vse-ui --example switch`.
 use iced::widget::{column, container, pick_list, row, text};
 use iced::{Element, Fill, Task};
+use vse_ui::Apply;
 use vse_ui::motion::{SpringConfig, presets};
-use vse_ui::widget::{AnimatedDropdown, button, switch};
+use vse_ui::widget::{Animated, AnimatedDropdown, button, switch};
 
 fn main() -> iced::Result {
     iced::application(Demo::default, Demo::update, Demo::view)
@@ -25,10 +26,17 @@ enum Preset {
     Quick,
     Bouncy,
     Slow,
+    Snappy,
 }
 
 impl Preset {
-    const ALL: [Self; 4] = [Self::Gentle, Self::Quick, Self::Bouncy, Self::Slow];
+    const ALL: [Self; 5] = [
+        Self::Gentle,
+        Self::Quick,
+        Self::Bouncy,
+        Self::Slow,
+        Self::Snappy,
+    ];
 
     fn config(self) -> SpringConfig {
         match self {
@@ -36,6 +44,7 @@ impl Preset {
             Self::Quick => presets::quick(),
             Self::Bouncy => presets::bouncy(),
             Self::Slow => presets::slow(),
+            Self::Snappy => presets::snappy(),
         }
     }
 }
@@ -47,6 +56,7 @@ impl std::fmt::Display for Preset {
             Self::Quick => "Quick",
             Self::Bouncy => "Bouncy",
             Self::Slow => "Slow",
+            Self::Snappy => "Snappy",
         })
     }
 }
@@ -88,9 +98,18 @@ impl Demo {
                         .on_toggle(Message::Changed),
                 ]
                 .align_y(iced::Alignment::Center),
-                button("Toggle from the parent").on_press(Message::Flip),
-                row![text("Disabled").width(Fill), switch(true)].align_y(iced::Alignment::Center),
                 text("Toggle rapidly to interrupt and reverse the spring.").size(13),
+                row![
+                    // animated from a iced widget
+                    iced::widget::button("Toggle from the parent")
+                        .on_press(Message::Flip)
+                        .apply(Animated::from),
+                    // animated using a vse ui re-export
+                    button("Toggle from the parent").on_press(Message::Flip),
+                ]
+                .align_y(iced::Alignment::Center)
+                .spacing(24),
+                row![text("Disabled").width(Fill), switch(true)].align_y(iced::Alignment::Center),
             ]
             .spacing(16),
         )
