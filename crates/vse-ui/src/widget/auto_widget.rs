@@ -27,7 +27,7 @@ pub struct AutoWidget<B: IntoWidget> {
 }
 
 impl<B: IntoWidget> AutoWidget<B> {
-    pub(crate) fn from_builder(builder: B) -> Self {
+    pub fn from_builder(builder: B) -> Self {
         Self {
             builder: Cell::new(Some(builder)),
             widget: OnceCell::new(),

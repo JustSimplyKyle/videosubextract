@@ -4,11 +4,11 @@ use super::{
 };
 use crate::{app::ReportLike, config::Config, fl, impl_report_residual};
 use cosmic::{
-    Apply, Element,
+    Apply,
     widget::{self, segmented_button::SingleSelectModel},
 };
 use iced::futures::SinkExt;
-use iced::{Alignment, Length, Subscription, Task};
+use iced::{Alignment, Length, Subscription, Task, Widget};
 use rfd::AsyncFileDialog;
 use std::{fmt::Write, path::PathBuf, sync::Arc, time::Duration};
 use vse_ui::{
@@ -374,7 +374,7 @@ impl Model {
     fn video_summary<'a>(
         subtitles: &'a subtitle::Model,
         video_path: Option<&'a PathBuf>,
-    ) -> Element<'a, Message> {
+    ) -> impl Widget<Message> + 'a {
         let filename = video_path.and_then(|path| path.file_name()).map_or_else(
             || fl!("no-video-loaded"),
             |name| name.to_string_lossy().into_owned(),
@@ -426,10 +426,9 @@ impl Model {
         .apply(widget::container)
         .style(cosmic::theme::container::card)
         .width(Length::Fill)
-        .into()
     }
 
-    fn export_settings(&self, disabled: bool) -> Element<'_, Message> {
+    fn export_settings(&self, disabled: bool) -> impl Widget<Message> + '_ {
         let spacing = cosmic::theme::spacing();
         let format_tabs =
             widget::segmented_control::horizontal(&self.formats).on_activate(Message::SelectFormat);
@@ -468,9 +467,9 @@ impl Model {
             );
 
         widget::settings::view_column(vec![
-            format_section.into(),
-            file_section.into(),
-            conversion_section.into(),
+            format_section.boxed(),
+            file_section.boxed(),
+            conversion_section.boxed(),
             widget::button(widget::text(format!(
                 "{} .{}",
                 fl!("export"),
@@ -479,19 +478,18 @@ impl Model {
             .style(cosmic::theme::button::suggested)
             .on_press_maybe((!disabled).then_some(Message::Export))
             .width(Length::Shrink)
-            .into(),
+            .boxed(),
         ])
         .spacing(spacing.space_m)
         .height(Length::Fill)
         .width(Length::FillPortion(2))
-        .into()
     }
 
     fn export_view<'a>(
         &'a self,
         subtitles: &'a subtitle::Model,
         search_active: bool,
-    ) -> Element<'a, Message> {
+    ) -> impl Widget<Message> + 'a {
         let show_converted = matches!(self.preview_modes.active_data(), PreviewMode::Converted);
         let preview_toggle = widget::segmented_control::horizontal(&self.preview_modes)
             .on_activate(Message::SelectPreviewMode);
@@ -528,21 +526,19 @@ impl Model {
         ]
         .spacing(cosmic::theme::spacing().space_s)
         .height(Length::Fill)
-        .into()
     }
 
     fn view<'a>(
         &'a self,
         subtitles: &'a subtitle::Model,
         video_path: Option<&'a PathBuf>,
-    ) -> Element<'a, Message> {
+    ) -> impl Widget<Message> + 'a {
         let spacing = cosmic::theme::spacing();
         let content = self.export_view(subtitles, subtitles.state.is_search_active());
 
         widget::column![Self::video_summary(subtitles, video_path), content]
             .spacing(spacing.space_s)
             .height(Length::Fill)
-            .into()
     }
 
     fn subscription(&self) -> Subscription<Message> {
@@ -579,7 +575,7 @@ impl Composition for Model {
 
     type SubscriptionContext<'a> = ();
 
-    fn view<'a>(&'a self, context: Self::ViewContext<'a>) -> Element<'a, Self::Message> {
+    fn view<'a>(&'a self, context: Self::ViewContext<'a>) -> impl Widget<Self::Message> + 'a {
         Self::view(self, context.subtitles, context.video_path)
     }
 

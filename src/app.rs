@@ -16,7 +16,7 @@ use cosmic_config::{self, CosmicConfigEntry};
 use futures::{SinkExt, StreamExt};
 use iced::alignment::Vertical;
 use iced::window::{self, Action};
-pub(crate) use iced::{Alignment, Element, Length, Subscription, Task};
+pub(crate) use iced::{Alignment, Length, Subscription, Task, Widget};
 use std::sync::LazyLock;
 use std::{sync::Arc, time::Duration};
 pub(crate) use vse_ui::widget;
@@ -37,7 +37,7 @@ trait Composition {
     where
         Self: 'a;
 
-    fn view<'a>(&'a self, context: Self::ViewContext<'a>) -> Element<'a, Self::Message>;
+    fn view<'a>(&'a self, context: Self::ViewContext<'a>) -> impl Widget<Self::Message> + 'a;
 
     fn update(&mut self, message: Self::Message, context: Self::UpdateContext<'_>) -> Self::Event;
 
@@ -152,7 +152,7 @@ impl Page {
 }
 
 impl AppModel {
-    fn settings_view(&self) -> Element<'_, Message> {
+    fn settings_view(&self) -> impl Widget<Message> + '_ {
         let selected_language = Language::ALL
             .iter()
             .position(|value| value == &self.config.language);
@@ -167,13 +167,12 @@ impl AppModel {
                     })
                     .apply(AnimatedDropdown::from),
                 ))
-                .into(),
+                .boxed(),
         ]))
         .height(Length::Fill)
-        .into()
     }
 
-    fn error_view(&self) -> Element<'_, Message> {
+    fn error_view(&self) -> impl Widget<Message> + '_ {
         use std::fmt::Write;
 
         let errors = self
@@ -193,7 +192,6 @@ impl AppModel {
                 .style(vse_ui::theme::container::card),
         )
         .height(Length::Fill)
-        .into()
     }
 
     pub fn boot() -> (Self, Task<Message>) {
@@ -382,9 +380,13 @@ impl AppModel {
         }
     }
 
-    pub fn view(&self) -> Element<'_, Message> {
+    pub fn view(&self) -> impl Widget<Message> + '_ {
         let content = match self.active_page {
-            Page::Prepare => self.prepare.view(&self.config).map(Message::Prepare),
+            Page::Prepare => self
+                .prepare
+                .view(&self.config)
+                .map(Message::Prepare)
+                .boxed(),
             Page::Subtitle => self
                 .subtitle
                 .view(
@@ -395,14 +397,16 @@ impl AppModel {
                             player.controller().inner.info.video_time
                         }),
                 )
-                .map(Message::Subtitle),
+                .map(Message::Subtitle)
+                .boxed(),
             Page::PostProduction => self
                 .post_production
                 .view(post_production::ViewArgs {
                     subtitles: &self.subtitle,
                     video_path: self.prepare.video_path(),
                 })
-                .map(Message::PostProduction),
+                .map(Message::PostProduction)
+                .boxed(),
         };
         let active = self.active_page;
         let navigation = if self.navigation_open {
@@ -428,14 +432,15 @@ impl AppModel {
         };
         let dialog = widget::dialog(self.dialog_open, || {
             let (title, content) = match self.dialog_page {
-                DialogPage::Settings => (fl!("settings"), self.settings_view()),
+                DialogPage::Settings => (fl!("settings"), self.settings_view().boxed()),
                 DialogPage::PrepareSettings => (
                     fl!("settings"),
                     self.prepare
                         .settings_view(&self.config)
-                        .map(Message::Prepare),
+                        .map(Message::Prepare)
+                        .boxed(),
                 ),
-                DialogPage::Error => (fl!("errors"), self.error_view()),
+                DialogPage::Error => (fl!("errors"), self.error_view().boxed()),
             };
 
             vse_ui::components::dialog(
@@ -457,17 +462,10 @@ impl AppModel {
         let header = widget::row![
             header,
             widget::space().width(Length::Fill),
-            match self.active_page {
-                Page::Prepare => {
-                    self.prepare.title_actions().map(Message::Prepare)
-                }
-                _ => {
-                    widget::space().apply(Element::from)
-                }
-            }
+            (self.active_page == Page::Prepare)
+                .then(|| self.prepare.title_actions().map(Message::Prepare)),
         ]
-        .align_y(Vertical::Center)
-        .apply(Element::from);
+        .align_y(Vertical::Center);
 
         let page = widget::column! {
             header,
@@ -488,6 +486,5 @@ impl AppModel {
                     .collect(),
             )
             .dialog(dialog)
-            .into()
     }
 }

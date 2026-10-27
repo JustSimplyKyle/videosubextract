@@ -11,10 +11,9 @@ use vse_ui::theme::WithRadius;
 use vse_ui::widget::{AnimatedDropdown, Breakpoint};
 
 use super::*;
-use cosmic::Element;
 use iced::{Font, alignment::Vertical};
 use vse_ui::{
-    self as cosmic, Apply,
+    Apply,
     theme::{self, COSMIC},
     widget::segmented_button::{Entity, SingleSelectModel, SingleSelectModelBuilder},
 };
@@ -296,7 +295,7 @@ impl Model {
         .await
     }
 
-    fn view<'a>(&'a self, config: &'a Config) -> Element<'a, Message> {
+    fn view<'a>(&'a self, config: &'a Config) -> impl Widget<Message> + 'a {
         widget::adaptive(move |viewport| {
             let spacing = theme::spacing();
             let settings = widget::container(self.settings_view(config))
@@ -321,14 +320,14 @@ impl Model {
                     .spacing(spacing.space_m)
                     .width(Length::Fill)
                     .height(Length::Fill)
-                    .into()
+                    .boxed()
             } else {
                 const MIN_SETTINGS_HEIGHT: f32 = 240.0;
                 let video = widget::container(widget::column![self.video_preview()])
                     .width(Length::Fill)
                     .height(Length::Shrink);
 
-                let settings: Element<'a, Message> = if self.compact_settings {
+                let settings = if self.compact_settings {
                     let button = widget::button(widget::text(fl!("settings")))
                         .padding(spacing.space_xs)
                         .on_press(Message::OpenSettings);
@@ -336,9 +335,9 @@ impl Model {
                     widget::column![button, widget::space().height(Length::Fill)]
                         .width(Length::Fill)
                         .height(Length::Fill)
-                        .into()
+                        .boxed()
                 } else {
-                    settings.width(Length::Fill).height(Length::Shrink).into()
+                    settings.width(Length::Fill).height(Length::Shrink).boxed()
                 };
 
                 let settings = widget::sensor(settings).on_resize(move |size| {
@@ -351,15 +350,14 @@ impl Model {
                     .spacing(spacing.space_s)
                     .width(Length::Fill)
                     .height(Length::Fill)
-                    .into()
+                    .boxed()
             }
         })
     }
 
-    fn video_preview(&self) -> Element<'_, Message> {
-        let Some(player) = &self.video_player else {
-            return widget::space().into();
-        };
+    /// Void until a video is loaded.
+    fn video_preview(&self) -> Option<impl Widget<Message> + '_> {
+        let player = self.video_player.as_ref()?;
         let img = player
             .image(COSMIC.corner_radii.radius_l[0])
             .map(playback_map);
@@ -367,7 +365,6 @@ impl Model {
         let selection_canvas = widget::canvas(selection_canvas::SelectionProgram::default())
             .width(Length::Fill)
             .height(Length::Fill)
-            .apply(Element::from)
             .map(Message::Canvas);
 
         let canvas_size = self.canvas_dimensions.size();
@@ -393,13 +390,12 @@ impl Model {
                     .translate(move |original, viewport| {
                         selection_details_translation(s, original, viewport, canvas_size)
                     })
-                    .apply(Element::from)
             });
 
-        widget::stack![img, selection_canvas, s].into()
+        Some(widget::stack![img, selection_canvas, s])
     }
 
-    pub fn title_actions(&self) -> Element<'_, Message> {
+    pub fn title_actions(&self) -> impl Widget<Message> + '_ {
         let load_video = if self.video_player.is_some() {
             widget::button(widget::text(fl!("change-video")))
         } else {
@@ -417,12 +413,10 @@ impl Model {
             })
             .padding(theme::spacing().space_xs);
 
-        widget::row![load_video, start_subtitle]
-            .spacing(theme::spacing().space_xs)
-            .into()
+        widget::row![load_video, start_subtitle].spacing(theme::spacing().space_xs)
     }
 
-    pub fn settings_view<'a>(&'a self, config: &'a Config) -> Element<'a, Message> {
+    pub fn settings_view<'a>(&'a self, config: &'a Config) -> impl Widget<Message> + 'a {
         let ocr_models = OcrModel::all(config);
         let selected_ocr = ocr_models
             .iter()
@@ -431,26 +425,25 @@ impl Model {
             .iter()
             .position(|value| value == &config.subtitle_detector);
         let mut sections = vec![
-            Element::<SettingsMessage>::from(
-                widget::settings::section()
-                    .title(fl!("text-recognition"))
-                    .add(widget::settings::item(
-                        fl!("ocr-model"),
-                        widget::dropdown(OcrModel::labels(config), selected_ocr, move |index| {
-                            SettingsMessage::SetOcrModel(ocr_models[index].clone())
-                        })
-                        .apply(AnimatedDropdown::from),
-                    ))
-                    .add(
-                        widget::settings::togglable(fl!("post-ocr-result-processing"))
-                            .description(fl!("merge-adjacent-detections"))
-                            .toggler(
-                                config.post_ocr_processing,
-                                SettingsMessage::SetPostOcrProcessing,
-                            ),
-                    ),
-            )
-            .map(Message::Settings),
+            widget::settings::section()
+                .title(fl!("text-recognition"))
+                .add(widget::settings::item(
+                    fl!("ocr-model"),
+                    widget::dropdown(OcrModel::labels(config), selected_ocr, move |index| {
+                        SettingsMessage::SetOcrModel(ocr_models[index].clone())
+                    })
+                    .apply(AnimatedDropdown::from),
+                ))
+                .add(
+                    widget::settings::togglable(fl!("post-ocr-result-processing"))
+                        .description(fl!("merge-adjacent-detections"))
+                        .toggler(
+                            config.post_ocr_processing,
+                            SettingsMessage::SetPostOcrProcessing,
+                        ),
+                )
+                .map(Message::Settings)
+                .boxed(),
             widget::settings::section()
                 .title(fl!("subtitle-detection"))
                 .add(
@@ -471,7 +464,7 @@ impl Model {
                     })
                     .apply(AnimatedDropdown::from),
                 ))
-                .into(),
+                .boxed(),
         ];
 
         if config.subtitle_detector == SubtitleDetector::OriginalCpp {
@@ -482,16 +475,14 @@ impl Model {
                     Message::ToggleOriginalCppSettings,
                     Self::original_cpp_settings(config).map(Message::Settings),
                 )
-                .into(),
+                .boxed(),
             );
         }
 
-        widget::scrollable(widget::settings::view_column(sections))
-            .height(Length::Fill)
-            .into()
+        widget::scrollable(widget::settings::view_column(sections)).height(Length::Fill)
     }
 
-    fn original_cpp_settings(config: &Config) -> Element<'_, SettingsMessage> {
+    fn original_cpp_settings(config: &Config) -> impl Widget<SettingsMessage> + '_ {
         let native = config.native_search_params;
 
         widget::settings::section()
@@ -670,10 +661,9 @@ impl Model {
                     },
                 ),
             )
-            .into()
     }
 
-    fn video_controls(player: &video_player_widget::Player) -> Element<'_, Message> {
+    fn video_controls(player: &video_player_widget::Player) -> impl Widget<Message> + '_ {
         let seek_duration = Duration::from_secs(5);
         let pause = icon_button!("media-playback-pause-symbolic");
         let start = icon_button!("media-playback-start-symbolic");
@@ -706,14 +696,13 @@ impl Model {
             .apply(widget::text)
             .font(Font::MONOSPACE);
 
-        let row = widget::row!(backward, play_button, forward, current, slider, total)
+        widget::row!(backward, play_button, forward, current, slider, total)
             .spacing(theme::spacing().space_s)
             .align_y(Vertical::Center)
             .apply(widget::container)
             .padding(theme::spacing().space_m)
             .width(Length::Fill)
-            .style(vse_ui::theme::container::card);
-        row.into()
+            .style(vse_ui::theme::container::card)
     }
 
     fn subscription(&self) -> Subscription<Message> {
@@ -799,7 +788,7 @@ impl Composition for Model {
     type UpdateContext<'a> = &'a mut Config;
     type SubscriptionContext<'a> = ();
 
-    fn view<'a>(&'a self, config: Self::ViewContext<'a>) -> Element<'a, Self::Message> {
+    fn view<'a>(&'a self, config: Self::ViewContext<'a>) -> impl Widget<Self::Message> + 'a {
         Self::view(self, config)
     }
 

@@ -149,7 +149,7 @@ fn subscription(model: &Model) -> Subscription<Message> {
     })
 }
 
-fn view(model: &Model) -> Element<'_, Message> {
+fn view(model: &Model) -> impl Widget<Message> + '_ {
     let load = widget::button(widget::text(if model.is_some() {
         fl!("change-video")
     } else {
@@ -159,8 +159,8 @@ fn view(model: &Model) -> Element<'_, Message> {
     match model {
         Some(player) => widget::column![player.view().map(Message::Playback), load]
             .spacing(cosmic::theme::spacing().space_s)
-            .into(),
-        None => load.style(cosmic::theme::button::suggested).into(),
+            .boxed(),
+        None => load.style(cosmic::theme::button::suggested).boxed(),
     }
 }
 
@@ -258,7 +258,7 @@ impl Player {
         )
     }
 
-    fn view(&self) -> Element<'_, PlayerMessage> {
+    fn view(&self) -> impl Widget<PlayerMessage> + '_ {
         let image = self.image(0.);
         let backward = icon_button!("media-seek-backward-symbolic")
             .on_press(PlayerMessage::SeekBackward(Duration::from_secs(5)))
@@ -279,16 +279,14 @@ impl Player {
                 .align_y(Alignment::Center),
         ]
         .spacing(cosmic::theme::spacing().space_s)
-        .into()
     }
 
-    pub fn slider(&self) -> Element<'_, PlayerMessage> {
+    pub fn slider(&self) -> impl Widget<PlayerMessage> + '_ {
         widget::slider(
             0.0..=self.video_duration().as_secs_f64(),
             self.current_time().as_secs_f64(),
             |seconds| PlayerMessage::SeekAbsolute(Duration::from_secs_f64(seconds)),
         )
-        .into()
     }
 
     pub const fn path(&self) -> &PathBuf {
@@ -314,18 +312,15 @@ impl Player {
             .cloned()
     }
 
-    pub fn image(&self, radius: f32) -> Element<'_, PlayerMessage> {
-        let image: Element<'_, PlayerMessage> = self
-            .frame_handle()
-            .map(widget::image)
-            .map(|x| {
-                x.content_fit(iced::ContentFit::Contain)
-                    .expand(true)
-                    .width(Length::Shrink)
-                    .height(Length::Shrink)
-                    .border_radius(radius)
-            })
-            .map_or_else(|| widget::space().into(), Element::from);
+    pub fn image(&self, radius: f32) -> impl Widget<PlayerMessage> + '_ {
+        // Void until the first frame is allocated.
+        let image = self.frame_handle().map(widget::image).map(|x| {
+            x.content_fit(iced::ContentFit::Contain)
+                .expand(true)
+                .width(Length::Shrink)
+                .height(Length::Shrink)
+                .border_radius(radius)
+        });
 
         // Reserve the controls' intrinsic height first, then fit the frame into
         // the remaining space. Expand + Shrink keeps both image bounds tight
@@ -334,7 +329,6 @@ impl Player {
         widget::container(image)
             .center_x(Length::Fill)
             .height(Length::Fluid(Constraint::Max))
-            .into()
     }
 }
 
@@ -432,7 +426,7 @@ impl Composition for Model {
     type UpdateContext<'a> = ();
     type SubscriptionContext<'a> = ();
 
-    fn view(&self, (): Self::ViewContext<'_>) -> Element<'_, Self::Message> {
+    fn view<'a>(&'a self, (): Self::ViewContext<'a>) -> impl Widget<Self::Message> + 'a {
         view(self)
     }
 
