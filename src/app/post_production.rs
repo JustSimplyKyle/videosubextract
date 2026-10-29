@@ -1,9 +1,10 @@
 use super::{
-    Composition, format_duration,
-    subtitle::{self, SubtitleTableConfig},
+    Composition,
+    detection::{self, DetectedTextTableConfig},
+    format_duration,
 };
 use crate::config::{ChapterParams, Config, ExtractionTarget};
-use crate::extraction::chapter_writer::{ChapterLocations, ChapterWriter};
+use crate::extraction::chapter_writer::{ChapterLocations, EmbedWriter};
 use crate::extraction::chapters::{ChapterOptions, runs_to_chapters};
 use crate::{app::ReportLike, fl, impl_report_residual};
 use cosmic::{
@@ -81,7 +82,7 @@ pub(super) struct SyncSource<'a> {
     pub video_duration: Duration,
     pub target: ExtractionTarget,
     pub chapter_params: ChapterParams,
-    pub results: &'a subtitle::SubtitleResults,
+    pub results: &'a detection::DetectedTexts,
 }
 
 const OPENCC_MODES: [(&str, &str); 6] = [
@@ -98,8 +99,11 @@ struct ConversionStream {
     generation: u64,
     config: Option<&'static str>,
     preserve_line_breaks: bool,
-    inputs: Arc<[(subtitle::SubtitleId, String)]>,
+    inputs: TransformationInputs,
 }
+
+/// DetectedText IDs are only unique within one track, so each input names its track.
+type TransformationInputs = Arc<[(ExtractionTarget, detection::DetectedTextId, String)]>;
 
 impl std::hash::Hash for ConversionStream {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
@@ -108,25 +112,31 @@ impl std::hash::Hash for ConversionStream {
 }
 
 pub struct Model {
+    /// Which track the preview and the format/export controls work on.
+    tracks: SingleSelectModel<ExtractionTarget>,
     formats: SingleSelectModel<ExportFormat>,
     video_path: Option<PathBuf>,
     video_duration: Duration,
-    target: ExtractionTarget,
     chapter_params: ChapterParams,
     preview_modes: SingleSelectModel<PreviewMode>,
     filename: String,
     opencc_enabled: bool,
     opencc_mode: usize,
     preserve_line_breaks: bool,
-    export_preview: subtitle::Model,
+    subtitles_preview: detection::Model,
+    chapters_preview: detection::Model,
     conversion_generation: u64,
-    transformation_inputs: Arc<[(subtitle::SubtitleId, String)]>,
+    transformation_inputs: TransformationInputs,
 }
 
 impl Default for Model {
     fn default() -> Self {
-        let target = ExtractionTarget::default();
-        let formats = ExportFormat::formats(target);
+        let tracks = SingleSelectModelBuilder::from_array(
+            ExtractionTarget::ALL.map(|target| (target_label(target), target)),
+        )
+        .with_first_as_active()
+        .build();
+        let formats = ExportFormat::formats(*tracks.active_data());
 
         let preview_modes = SingleSelectModelBuilder::new()
             .insert(fl!("original"), PreviewMode::Original)
@@ -135,17 +145,18 @@ impl Default for Model {
             .build();
 
         Self {
+            tracks,
             formats,
             video_path: None,
             video_duration: Duration::ZERO,
-            target,
             chapter_params: ChapterParams::default(),
             preview_modes,
             filename: "subtitles".into(),
             opencc_enabled: false,
             opencc_mode: 0,
             preserve_line_breaks: true,
-            export_preview: subtitle::Model::default(),
+            subtitles_preview: detection::Model::new(ExtractionTarget::Subtitles),
+            chapters_preview: detection::Model::new(ExtractionTarget::Chapters),
             conversion_generation: 0,
             transformation_inputs: Arc::default(),
         }
@@ -154,6 +165,7 @@ impl Default for Model {
 
 #[derive(Debug, Clone)]
 pub enum Message {
+    SelectTrack(widget::segmented_button::Entity),
     SelectFormat(widget::segmented_button::Entity),
     SelectPreviewMode(widget::segmented_button::Entity),
     FilenameChanged(String),
@@ -161,13 +173,14 @@ pub enum Message {
     SelectOpenCcMode(usize),
     TogglePreserveLineBreaks(bool),
     Export,
-    EmbedChapters,
+    EmbedIntoVideo,
     EmbedFinished(Result<Option<PathBuf>, String>),
-    Subtitle(subtitle::Message),
+    Preview(ExtractionTarget, detection::Message),
     Request,
     Transformed {
         generation: u64,
-        id: subtitle::SubtitleId,
+        target: ExtractionTarget,
+        id: detection::DetectedTextId,
         text: Option<String>,
     },
     TransformationError {
@@ -211,7 +224,7 @@ impl Model {
     pub(super) fn sync(
         &mut self,
         source: SyncSource<'_>,
-        changed: subtitle::ResultsChanged,
+        changed: detection::ResultsChanged,
         config: &Config,
     ) {
         let SyncSource {
@@ -226,43 +239,81 @@ impl Model {
         }
         self.video_path = video_path.cloned();
         self.video_duration = video_duration;
-        self.chapter_params = chapter_params;
-        if target != self.target {
-            self.target = target;
-            self.formats = ExportFormat::formats(target);
+        if target.is_chapters() {
+            self.chapter_params = chapter_params;
         }
         let changed = self
-            .export_preview
+            .preview_mut(target)
             .sync_result_from_source(results, changed);
+        // A new request restarts the conversion stream, so the other track's
+        // pending cues must be requested again too.
         self.transformation_inputs = match changed {
-            subtitle::ResultsChanged::Full => self.all_transformation_inputs(),
-            subtitle::ResultsChanged::Targeted(_) | subtitle::ResultsChanged::Append(_) => {
+            detection::ResultsChanged::Full => self.transformation_inputs_for(
+                ExtractionTarget::ALL.map(|track| (track, track != target)),
+            ),
+            detection::ResultsChanged::Targeted(_) | detection::ResultsChanged::Append(_) => {
                 self.missing_transformation_inputs()
             }
         };
         let _ = self.update(Message::Request, config);
     }
 
-    fn all_transformation_inputs(&self) -> Arc<[(subtitle::SubtitleId, String)]> {
-        self.export_preview
-            .results()
-            .iter()
-            .map(|result| (result.id(), result.original_text().to_owned()))
+    const fn preview(&self, target: ExtractionTarget) -> &detection::Model {
+        match target {
+            ExtractionTarget::Subtitles => &self.subtitles_preview,
+            ExtractionTarget::Chapters => &self.chapters_preview,
+        }
+    }
+
+    const fn preview_mut(&mut self, target: ExtractionTarget) -> &mut detection::Model {
+        match target {
+            ExtractionTarget::Subtitles => &mut self.subtitles_preview,
+            ExtractionTarget::Chapters => &mut self.chapters_preview,
+        }
+    }
+
+    fn shown_track(&self) -> ExtractionTarget {
+        *self.tracks.active_data()
+    }
+
+    /// DetectedTexts to convert from each listed track: all of them, or only the ones
+    /// without converted text when the flag is set.
+    fn transformation_inputs_for(
+        &self,
+        tracks: impl IntoIterator<Item = (ExtractionTarget, bool)>,
+    ) -> TransformationInputs {
+        tracks
+            .into_iter()
+            .flat_map(|(target, only_missing)| {
+                self.preview(target)
+                    .results()
+                    .iter()
+                    .filter(move |result| !only_missing || result.needs_transformation())
+                    .map(move |result| (target, result.id(), result.original_text().to_owned()))
+            })
             .collect::<Vec<_>>()
             .into()
     }
 
-    fn missing_transformation_inputs(&self) -> Arc<[(subtitle::SubtitleId, String)]> {
-        self.export_preview
-            .results()
-            .iter()
-            .filter(|result| result.needs_transformation())
-            .map(|result| (result.id(), result.original_text().to_owned()))
-            .collect::<Vec<_>>()
-            .into()
+    fn all_transformation_inputs(&self) -> TransformationInputs {
+        self.transformation_inputs_for(ExtractionTarget::ALL.map(|target| (target, false)))
+    }
+
+    fn missing_transformation_inputs(&self) -> TransformationInputs {
+        self.transformation_inputs_for(ExtractionTarget::ALL.map(|target| (target, true)))
+    }
+
+    fn clear_transformed_text(&mut self) {
+        self.subtitles_preview.clear_transformed_text();
+        self.chapters_preview.clear_transformed_text();
     }
 
     pub fn refresh_language(&mut self) {
+        let tracks = self.tracks.entries().keys().copied().collect::<Vec<_>>();
+        for (id, target) in tracks.into_iter().zip(ExtractionTarget::ALL) {
+            self.tracks.text_set(id, target_label(target));
+        }
+
         let preview_modes = self
             .preview_modes
             .entries()
@@ -295,7 +346,7 @@ impl Model {
     /// Chapters as they will be exported, with any conversion applied to their titles.
     fn chapters(&self) -> ChapterLocations {
         let runs = self
-            .export_preview
+            .chapters_preview
             .results()
             .iter()
             .map(|result| {
@@ -314,17 +365,18 @@ impl Model {
         )
     }
 
-    fn export_text(&self, results: &subtitle::SubtitleResults) -> eyre::Result<String> {
+    fn export_text(&self) -> eyre::Result<String> {
+        let results = self.preview(self.shown_track()).results();
         Ok(match self.selected_format() {
             ExportFormat::FfMetadata => self.chapters().into_ffmetadata()?,
-            ExportFormat::Txt if self.target.is_chapters() => self
+            ExportFormat::Txt if self.shown_track().is_chapters() => self
                 .chapters()
                 .0
                 .iter()
                 .map(|chapter| format!("{} {}", format_duration(chapter.start), chapter.name))
                 .collect::<Vec<_>>()
                 .join("\n"),
-            ExportFormat::Srt => subtitle::to_srt(results),
+            ExportFormat::Srt => detection::to_srt(results),
             ExportFormat::Vtt => {
                 let mut output = String::from("WEBVTT\n\n");
                 for result in results.iter() {
@@ -367,6 +419,11 @@ impl Model {
 
     fn update(&mut self, message: Message, config: &Config) -> Event {
         match message {
+            Message::SelectTrack(id) => {
+                self.tracks.activate(id);
+                self.formats = ExportFormat::formats(self.shown_track());
+                Event::Run(Task::none())
+            }
             Message::SelectFormat(id) => {
                 self.formats.activate(id);
                 Event::Run(Task::none())
@@ -381,41 +438,46 @@ impl Model {
             }
             Message::ToggleOpenCc(enabled) => {
                 self.opencc_enabled = enabled;
-                self.export_preview.clear_transformed_text();
+                self.clear_transformed_text();
                 self.transformation_inputs = self.all_transformation_inputs();
                 self.update(Message::Request, config)
             }
             Message::SelectOpenCcMode(mode) => {
                 self.opencc_mode = mode.min(OPENCC_MODES.len() - 1);
-                self.export_preview.clear_transformed_text();
+                self.clear_transformed_text();
                 self.transformation_inputs = self.all_transformation_inputs();
                 self.update(Message::Request, config)
             }
             Message::TogglePreserveLineBreaks(preserve) => {
                 self.preserve_line_breaks = preserve;
-                self.export_preview.clear_transformed_text();
+                self.clear_transformed_text();
                 self.transformation_inputs = self.all_transformation_inputs();
                 self.update(Message::Request, config)
             }
-            Message::Subtitle(message) => match self.export_preview.update(message, config) {
-                subtitle::Event::Run(task) => Event::Run(task.map(Message::Subtitle)),
-                subtitle::Event::Error(error) => Event::Error(error),
-                subtitle::Event::GoToPostProduction | subtitle::Event::None => {
-                    Event::Run(Task::none())
+            Message::Preview(target, message) => {
+                match self.preview_mut(target).update(message, config) {
+                    detection::Event::Run(task) => {
+                        Event::Run(task.map(move |message| Message::Preview(target, message)))
+                    }
+                    detection::Event::Error(error) => Event::Error(error),
+                    detection::Event::GoToPostProduction | detection::Event::None => {
+                        Event::Run(Task::none())
+                    }
+                    detection::Event::SyncWithPostProduction(_) => Event::Run(Task::none()),
                 }
-                subtitle::Event::SyncWithPostProduction(_) => Event::Run(Task::none()),
-            },
+            }
             Message::Request => {
                 self.conversion_generation = self.conversion_generation.wrapping_add(1);
                 Event::Run(Task::none())
             }
             Message::Transformed {
                 generation,
+                target,
                 id,
                 text,
             } => {
                 if generation == self.conversion_generation {
-                    self.export_preview.set_transformed_text(id, text);
+                    self.preview_mut(target).set_transformed_text(id, text);
                 }
                 Event::Run(Task::none())
             }
@@ -427,10 +489,10 @@ impl Model {
                 }
             }
             Message::Export => {
-                let contents = self.export_text(self.export_preview.results())?;
+                let contents = self.export_text()?;
                 let extension = self.selected_format().extension();
                 let filename = format!("{}.{}", self.filename.trim(), extension);
-                let filter_name = if self.target.is_chapters() {
+                let filter_name = if self.shown_track().is_chapters() {
                     fl!("chapter-file")
                 } else {
                     fl!("subtitle-file")
@@ -464,13 +526,18 @@ impl Model {
                     Event::Error(eyre::eyre!("writing the subtitle file failed: {error}"))
                 }
             },
-            Message::EmbedChapters => {
+            Message::EmbedIntoVideo => {
                 let input = self.video_path.clone()?;
-                let chapters = self.chapters();
+                let embed = EmbedWriter {
+                    chapters: (!self.chapters_preview.results().is_empty())
+                        .then(|| self.chapters()),
+                    subtitles: (!self.subtitles_preview.results().is_empty())
+                        .then(|| detection::to_srt(self.subtitles_preview.results())),
+                };
                 let extension = input
                     .extension()
                     .map_or_else(|| "mkv".into(), |ext| ext.to_string_lossy().into_owned());
-                let filename = format!("{}.chapters.{extension}", self.filename.trim());
+                let filename = format!("{}.embedded.{extension}", self.filename.trim());
                 Event::Run(Task::perform(
                     async move {
                         let mut dialog = AsyncFileDialog::new()
@@ -485,9 +552,9 @@ impl Model {
                         let output = file.path().to_path_buf();
                         // FFmpeg would truncate its own input before reading it.
                         if output == input {
-                            return Err(fl!("embed-chapters-same-file"));
+                            return Err(fl!("embed-same-file"));
                         }
-                        smol::unblock(move || embed_chapters(&input, output, chapters))
+                        smol::unblock(move || embed_into_video(&input, output, embed))
                             .await
                             .map(Some)
                     },
@@ -495,40 +562,44 @@ impl Model {
                 ))
             }
             Message::EmbedFinished(result) => match result {
-                Ok(Some(path)) => {
-                    Event::Toast(fl!("chapters-embedded", path = path.display().to_string()))
-                }
+                Ok(Some(path)) => Event::Toast(fl!(
+                    "embedded-into-video",
+                    path = path.display().to_string()
+                )),
                 Ok(None) => Event::Run(Task::none()),
-                Err(error) => Event::Error(eyre::eyre!("embedding chapters failed: {error}")),
+                Err(error) => Event::Error(eyre::eyre!("embedding into the video failed: {error}")),
             },
         }
     }
 
+    /// `shown` is the source model of the track being previewed; the status describes it.
     fn video_summary<'a>(
-        subtitles: &'a subtitle::Model,
-        video_path: Option<&'a PathBuf>,
+        sources: &ViewArgs<'a>,
+        shown: &'a detection::Model,
     ) -> impl Widget<Message> + 'a {
-        let filename = video_path.and_then(|path| path.file_name()).map_or_else(
-            || fl!("no-video-loaded"),
-            |name| name.to_string_lossy().into_owned(),
+        let filename = sources
+            .video_path
+            .and_then(|path| path.file_name())
+            .map_or_else(
+                || fl!("no-video-loaded"),
+                |name| name.to_string_lossy().into_owned(),
+            );
+        let details = format!(
+            "{} · {}",
+            fl!("subtitle-count", count = sources.subtitles.results().len()),
+            fl!("chapter-count", count = sources.chapters.results().len()),
         );
-        let chapters = subtitles.target().is_chapters();
-        let count = subtitles.results().len();
-        let details = if chapters {
-            fl!("chapter-count", count = count)
-        } else {
-            fl!("subtitle-count", count = count)
-        };
-        let (status, state) = match subtitles.state {
-            subtitle::State::Empty => (
+        let chapters = shown.target().is_chapters();
+        let (status, state) = match shown.state {
+            detection::State::Empty => (
                 fl!("not-completed"),
                 fl!("subtitle-extraction-not-completed"),
             ),
-            subtitle::State::SearchActive => {
+            detection::State::SearchActive => {
                 (fl!("processing"), fl!("subtitle-extraction-in-progress"))
             }
-            subtitle::State::Finished => {
-                let state = match (subtitles.results().is_empty(), chapters) {
+            detection::State::Finished => {
+                let state = match (shown.results().is_empty(), chapters) {
                     (true, false) => fl!("no-subtitles-ready"),
                     (true, true) => fl!("no-chapters-ready"),
                     (false, false) => fl!("subtitles-ready-for-export"),
@@ -568,8 +639,18 @@ impl Model {
         .width(Length::Fill)
     }
 
-    fn export_settings(&self, disabled: bool) -> impl Widget<Message> + '_ {
+    /// `export_disabled` is about the shown track; embedding uses both tracks.
+    fn export_settings(
+        &self,
+        export_disabled: bool,
+        embed_disabled: bool,
+    ) -> impl Widget<Message> + '_ {
         let spacing = cosmic::theme::spacing();
+        let track_section = widget::settings::section().title(fl!("track")).add(
+            widget::segmented_control::horizontal(&self.tracks)
+                .fill()
+                .on_activate(Message::SelectTrack),
+        );
         let format_tabs =
             widget::segmented_control::horizontal(&self.formats).on_activate(Message::SelectFormat);
         let filename = widget::text_input("subtitles", &self.filename)
@@ -612,28 +693,27 @@ impl Model {
             self.selected_format().extension().to_uppercase()
         )))
         .style(cosmic::theme::button::suggested)
-        .on_press_maybe((!disabled).then_some(Message::Export))
+        .on_press_maybe((!export_disabled).then_some(Message::Export))
         .width(Length::Shrink);
-        let mut sections = vec![
+        let embed = widget::button(widget::text(fl!("embed-into-video-action")))
+            .on_press_maybe((!embed_disabled).then_some(Message::EmbedIntoVideo))
+            .width(Length::Shrink);
+        let embed_section = widget::settings::section()
+            .title(fl!("embed-into-video"))
+            .add(widget::text::caption(fl!(
+                "embed-into-video-description",
+                subtitles = self.subtitles_preview.results().len(),
+                chapters = self.chapters_preview.results().len()
+            )))
+            .add(embed);
+        let sections = vec![
+            track_section.boxed(),
             format_section.boxed(),
             file_section.boxed(),
             conversion_section.boxed(),
             export.boxed(),
+            embed_section.boxed(),
         ];
-        if self.target.is_chapters() {
-            let embed = widget::button(widget::text(fl!("embed-chapters-into-video")))
-                .on_press_maybe(
-                    (!disabled && self.video_path.is_some()).then_some(Message::EmbedChapters),
-                )
-                .width(Length::Shrink);
-            sections.push(
-                widget::settings::section()
-                    .title(fl!("embed-chapters"))
-                    .add(widget::text::caption(fl!("embed-chapters-description")))
-                    .add(embed)
-                    .boxed(),
-            );
-        }
 
         widget::settings::view_column(sections)
             .spacing(spacing.space_m)
@@ -641,14 +721,12 @@ impl Model {
             .width(Length::FillPortion(2))
     }
 
-    fn export_view<'a>(
-        &'a self,
-        subtitles: &'a subtitle::Model,
-        search_active: bool,
-    ) -> impl Widget<Message> + 'a {
+    fn export_view<'a>(&'a self, sources: &ViewArgs<'a>) -> impl Widget<Message> + 'a {
+        let shown = self.shown_track();
         let show_converted = matches!(self.preview_modes.active_data(), PreviewMode::Converted);
         let preview_toggle = widget::segmented_control::horizontal(&self.preview_modes)
             .on_activate(Message::SelectPreviewMode);
+        let preview_results = self.preview(shown);
         let preview = widget::column![
             widget::row![
                 widget::text::title3(fl!("export-preview")),
@@ -656,19 +734,19 @@ impl Model {
                 preview_toggle
             ]
             .align_y(Alignment::Center),
-            widget::text(fl!("showing-cues", count = subtitles.results().len())),
-            self.export_preview
+            widget::text(fl!("showing-cues", count = preview_results.results().len())),
+            preview_results
                 .results_table(
-                    SubtitleTableConfig {
+                    DetectedTextTableConfig {
                         show_id_instead_of_preview: true,
                         timestamp_above_text: true,
                         read_only: true,
                         show_transformed: show_converted && self.opencc_enabled,
-                        start_only: self.target.is_chapters(),
+                        start_only: shown.is_chapters(),
                     },
                     false,
                 )
-                .map(Message::Subtitle),
+                .map(move |message| Message::Preview(shown, message)),
         ]
         .spacing(cosmic::theme::spacing().space_s)
         .padding(cosmic::theme::spacing().space_m)
@@ -677,23 +755,37 @@ impl Model {
         .style(cosmic::theme::container::card)
         .width(Length::FillPortion(3));
 
+        let searching =
+            sources.subtitles.state.is_search_active() || sources.chapters.state.is_search_active();
+        let source_for = |target| match target {
+            ExtractionTarget::Subtitles => sources.subtitles,
+            ExtractionTarget::Chapters => sources.chapters,
+        };
+        let export_disabled =
+            source_for(shown).state.is_search_active() || preview_results.results().is_empty();
+        let embed_disabled = searching
+            || self.video_path.is_none()
+            || (self.subtitles_preview.results().is_empty()
+                && self.chapters_preview.results().is_empty());
+
         widget::row![
-            self.export_settings(search_active || self.export_preview.results().is_empty()),
+            self.export_settings(export_disabled, embed_disabled),
             preview
         ]
         .spacing(cosmic::theme::spacing().space_s)
         .height(Length::Fill)
     }
 
-    fn view<'a>(
-        &'a self,
-        subtitles: &'a subtitle::Model,
-        video_path: Option<&'a PathBuf>,
-    ) -> impl Widget<Message> + 'a {
+    fn view<'a>(&'a self, sources: ViewArgs<'a>) -> impl Widget<Message> + 'a {
         let spacing = cosmic::theme::spacing();
-        let content = self.export_view(subtitles, subtitles.state.is_search_active());
+        let shown = match self.shown_track() {
+            ExtractionTarget::Subtitles => sources.subtitles,
+            ExtractionTarget::Chapters => sources.chapters,
+        };
+        let summary = Self::video_summary(&sources, shown);
+        let content = self.export_view(&sources);
 
-        widget::column![Self::video_summary(subtitles, video_path), content]
+        widget::column![summary, content]
             .spacing(spacing.space_s)
             .height(Length::Fill)
     }
@@ -717,7 +809,8 @@ impl Model {
 }
 
 pub(super) struct ViewArgs<'a> {
-    pub subtitles: &'a subtitle::Model,
+    pub subtitles: &'a detection::Model,
+    pub chapters: &'a detection::Model,
     pub video_path: Option<&'a PathBuf>,
 }
 
@@ -733,7 +826,7 @@ impl Composition for Model {
     type SubscriptionContext<'a> = ();
 
     fn view<'a>(&'a self, context: Self::ViewContext<'a>) -> impl Widget<Self::Message> + 'a {
-        Self::view(self, context.subtitles, context.video_path)
+        Self::view(self, context)
     }
 
     fn update(&mut self, message: Self::Message, context: Self::UpdateContext<'_>) -> Self::Event {
@@ -755,7 +848,7 @@ fn conversion_stream(
         let (sender, receiver) = smol::channel::bounded(32);
         let worker = smol::unblock(move || {
             let converter = source.config.map(opencc::OpenCC::new);
-            for (id, original) in source.inputs.iter() {
+            for (target, id, original) in source.inputs.iter() {
                 let text = if converter.is_none() && source.preserve_line_breaks {
                     None
                 } else {
@@ -768,7 +861,7 @@ fn conversion_stream(
                         text.lines().collect::<Vec<_>>().join(" ")
                     })
                 };
-                if let Err(e) = sender.send_blocking((*id, text)) {
+                if let Err(e) = sender.send_blocking((*target, *id, text)) {
                     _output
                         .try_send(Message::TransformationError {
                             generation,
@@ -780,10 +873,11 @@ fn conversion_stream(
             }
         });
 
-        while let Ok((id, text)) = receiver.recv().await {
+        while let Ok((target, id, text)) = receiver.recv().await {
             if output
                 .send(Message::Transformed {
                     generation,
+                    target,
                     id,
                     text,
                 })
@@ -797,210 +891,20 @@ fn conversion_stream(
     })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::extraction::Subtitle;
-    use iced::futures::StreamExt;
-    use image::RgbaImage;
-    use smol::block_on;
-
-    fn source_with_text(text: &str) -> subtitle::Model {
-        let mut source = subtitle::Model::default();
-        source.update(
-            subtitle::Message::EventFound {
-                subtitle: Subtitle::new(Duration::ZERO, Duration::from_secs(1), text.to_owned()),
-                replace_previous: false,
-                preview: RgbaImage::new(1, 1),
-            },
-            &Config::default(),
-        );
-        source
-    }
-
-    fn subtitles_source(results: &subtitle::SubtitleResults) -> SyncSource<'_> {
-        SyncSource {
-            video_path: None,
-            video_duration: Duration::ZERO,
-            target: ExtractionTarget::Subtitles,
-            chapter_params: ChapterParams::default(),
-            results,
-        }
-    }
-
-    #[test]
-    fn chapter_results_export_as_chapters() {
-        let config = Config::default();
-        let mut source = subtitle::Model::default();
-        for (start, end, text) in [(2, 170, "One"), (180, 290, "Two")] {
-            let _ = source.update(
-                subtitle::Message::EventFound {
-                    subtitle: Subtitle::new(
-                        Duration::from_secs(start),
-                        Duration::from_secs(end),
-                        text.to_owned(),
-                    ),
-                    replace_previous: false,
-                    preview: RgbaImage::new(1, 1),
-                },
-                &config,
-            );
-        }
-        let mut model = Model::default();
-        model.sync(
-            SyncSource {
-                video_duration: Duration::from_secs(300),
-                target: ExtractionTarget::Chapters,
-                ..subtitles_source(source.results())
-            },
-            subtitle::ResultsChanged::Full,
-            &config,
-        );
-
-        assert_eq!(model.selected_format(), ExportFormat::FfMetadata);
-        assert_eq!(
-            model.export_text(model.export_preview.results()).unwrap(),
-            ";FFMETADATA1\n\
-             [CHAPTER]\nTIMEBASE=1/1000\nSTART=0\nEND=180000\ntitle=One\n\
-             [CHAPTER]\nTIMEBASE=1/1000\nSTART=180000\nEND=300000\ntitle=Two\n"
-        );
-
-        let txt = model
-            .formats
-            .entries()
-            .iter()
-            .find_map(|(id, entry)| (*entry.data() == ExportFormat::Txt).then_some(*id))
-            .unwrap();
-        model.update(Message::SelectFormat(txt), &config);
-        assert_eq!(
-            model.export_text(model.export_preview.results()).unwrap(),
-            "00:00:00 One\n00:03:00 Two"
-        );
-    }
-
-    #[test]
-    fn conversion_stream_emits_each_transformed_subtitle() {
-        let id = subtitle::SubtitleId(7);
-        let source = ConversionStream {
-            generation: 1,
-            config: Some("s2t.json"),
-            preserve_line_breaks: false,
-            inputs: vec![(id, "汉字\n测试".to_owned())].into(),
-        };
-
-        let messages = conversion_stream(&source)
-            .collect::<Vec<_>>()
-            .apply(block_on);
-        assert!(matches!(
-            messages.as_slice(),
-            [Message::Transformed {
-                generation: 1,
-                id: transformed_id,
-                text: Some(text),
-            }] if *transformed_id == id && text == "漢字 測試"
-        ));
-    }
-
-    #[test]
-    fn request_restarts_the_stream_and_stale_items_are_ignored() {
-        let source = source_with_text("汉字");
-        let mut model = Model::default();
-        model.opencc_enabled = true;
-        let config = Config::default();
-        let id = source.results()[0].id();
-        model.sync(
-            subtitles_source(source.results()),
-            subtitle::ResultsChanged::Full,
-            &config,
-        );
-        let generation = model.conversion_generation;
-
-        model.update(
-            Message::Transformed {
-                generation: generation.wrapping_sub(1),
-                id,
-                text: Some("stale".to_owned()),
-            },
-            &config,
-        );
-        assert_eq!(
-            model.export_preview.results()[0].text_for_display(true),
-            "汉字"
-        );
-
-        model.update(
-            Message::Transformed {
-                generation,
-                id,
-                text: Some("漢字".to_owned()),
-            },
-            &config,
-        );
-        assert_eq!(
-            model.export_preview.results()[0].text_for_display(true),
-            "漢字"
-        );
-
-        model.update(Message::Request, &config);
-        assert_eq!(model.conversion_generation, generation.wrapping_add(1));
-        assert_eq!(
-            model.export_preview.results()[0].text_for_display(true),
-            "漢字"
-        );
-    }
-
-    #[test]
-    fn append_sync_preserves_existing_transformed_text() {
-        let mut source = source_with_text("first");
-        let config = Config::default();
-        let first_id = source.results()[0].id();
-        let mut model = Model::default();
-        model.sync(
-            subtitles_source(source.results()),
-            subtitle::ResultsChanged::Full,
-            &config,
-        );
-        model
-            .export_preview
-            .set_transformed_text(first_id, Some("transformed first".to_owned()));
-
-        let event = source.update(
-            subtitle::Message::EventFound {
-                subtitle: Subtitle::new(
-                    Duration::from_secs(2),
-                    Duration::from_secs(3),
-                    "second".to_owned(),
-                ),
-                replace_previous: false,
-                preview: RgbaImage::new(1, 1),
-            },
-            &config,
-        );
-        let subtitle::Event::SyncWithPostProduction(changed) = event else {
-            panic!("append should request synchronization");
-        };
-        model.sync(subtitles_source(source.results()), changed, &config);
-
-        assert_eq!(
-            model.export_preview.results()[0].text_for_display(true),
-            "transformed first"
-        );
-        assert_eq!(
-            model.export_preview.results()[1].text_for_display(true),
-            "second"
-        );
-        assert_eq!(model.transformation_inputs.len(), 1);
-        assert_eq!(model.transformation_inputs[0].0, source.results()[1].id());
+fn target_label(target: ExtractionTarget) -> String {
+    match target {
+        ExtractionTarget::Subtitles => fl!("target-subtitles"),
+        ExtractionTarget::Chapters => fl!("chapters"),
     }
 }
 
-/// Remux `input` into `output` with `chapters`, copying every stream as-is.
-fn embed_chapters(
+/// Remux `input` into `output` with what `embed` adds, copying every existing stream.
+fn embed_into_video(
     input: &std::path::Path,
     output: PathBuf,
-    chapters: ChapterLocations,
+    embed: EmbedWriter,
 ) -> Result<PathBuf, String> {
-    let mut child = ChapterWriter::new(chapters)
+    let mut child = embed
         .into_sidecar(input, &output)
         .map_err(|error| error.to_string())?
         .spawn()
@@ -1018,5 +922,267 @@ fn embed_chapters(
         Ok(output)
     } else {
         Err(errors.join("\n"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::extraction::Subtitle;
+    use iced::futures::StreamExt;
+    use image::RgbaImage;
+    use smol::block_on;
+
+    fn source_with_text(text: &str) -> detection::Model {
+        let mut source = detection::Model::default();
+        source.update(
+            detection::Message::EventFound {
+                subtitle: Subtitle::new(Duration::ZERO, Duration::from_secs(1), text.to_owned()),
+                replace_previous: false,
+                preview: RgbaImage::new(1, 1),
+            },
+            &Config::default(),
+        );
+        source
+    }
+
+    fn subtitles_source(results: &detection::DetectedTexts) -> SyncSource<'_> {
+        SyncSource {
+            video_path: None,
+            video_duration: Duration::ZERO,
+            target: ExtractionTarget::Subtitles,
+            chapter_params: ChapterParams::default(),
+            results,
+        }
+    }
+
+    fn source_with_runs(target: ExtractionTarget, runs: &[(u64, u64, &str)]) -> detection::Model {
+        let mut source = detection::Model::new(target);
+        for (start, end, text) in runs {
+            let _ = source.update(
+                detection::Message::EventFound {
+                    subtitle: Subtitle::new(
+                        Duration::from_secs(*start),
+                        Duration::from_secs(*end),
+                        (*text).to_owned(),
+                    ),
+                    replace_previous: false,
+                    preview: RgbaImage::new(1, 1),
+                },
+                &Config::default(),
+            );
+        }
+        source
+    }
+
+    fn select<T: PartialEq + 'static>(
+        model: &SingleSelectModel<T>,
+        value: &T,
+    ) -> widget::segmented_button::Entity {
+        model
+            .entries()
+            .iter()
+            .find_map(|(id, entry)| (entry.data() == value).then_some(*id))
+            .unwrap()
+    }
+
+    #[test]
+    fn subtitle_and_chapter_tracks_are_kept_side_by_side() {
+        let config = Config::default();
+        let subtitles = source_with_runs(ExtractionTarget::Subtitles, &[(1, 2, "line")]);
+        let chapters = source_with_runs(ExtractionTarget::Chapters, &[(0, 60, "Song")]);
+        let mut model = Model::default();
+        model.sync(
+            subtitles_source(subtitles.results()),
+            detection::ResultsChanged::Full,
+            &config,
+        );
+        model.sync(
+            SyncSource {
+                target: ExtractionTarget::Chapters,
+                ..subtitles_source(chapters.results())
+            },
+            detection::ResultsChanged::Full,
+            &config,
+        );
+
+        assert_eq!(model.selected_format(), ExportFormat::Srt);
+        assert_eq!(
+            model.export_text().unwrap(),
+            "1\n00:00:01,000 --> 00:00:02,000\nline\n\n"
+        );
+
+        let chapters_track = select(&model.tracks, &ExtractionTarget::Chapters);
+        model.update(Message::SelectTrack(chapters_track), &config);
+        assert_eq!(model.selected_format(), ExportFormat::FfMetadata);
+        assert_eq!(model.subtitles_preview.results().len(), 1);
+        assert_eq!(model.chapters_preview.results().len(), 1);
+        // Both tracks are queued for conversion, each tagged with its own track.
+        assert_eq!(
+            model
+                .transformation_inputs
+                .iter()
+                .map(|(target, _, text)| (*target, text.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                (ExtractionTarget::Subtitles, "line"),
+                (ExtractionTarget::Chapters, "Song")
+            ]
+        );
+    }
+
+    #[test]
+    fn chapter_results_export_as_chapters() {
+        let config = Config::default();
+        let source = source_with_runs(
+            ExtractionTarget::Chapters,
+            &[(2, 170, "One"), (180, 290, "Two")],
+        );
+        let mut model = Model::default();
+        model.sync(
+            SyncSource {
+                video_duration: Duration::from_secs(300),
+                target: ExtractionTarget::Chapters,
+                ..subtitles_source(source.results())
+            },
+            detection::ResultsChanged::Full,
+            &config,
+        );
+        let chapters_track = select(&model.tracks, &ExtractionTarget::Chapters);
+        model.update(Message::SelectTrack(chapters_track), &config);
+
+        assert_eq!(model.selected_format(), ExportFormat::FfMetadata);
+        assert_eq!(
+            model.export_text().unwrap(),
+            ";FFMETADATA1\n\
+             [CHAPTER]\nTIMEBASE=1/1000\nSTART=0\nEND=180000\ntitle=One\n\
+             [CHAPTER]\nTIMEBASE=1/1000\nSTART=180000\nEND=300000\ntitle=Two\n"
+        );
+
+        let txt = select(&model.formats, &ExportFormat::Txt);
+        model.update(Message::SelectFormat(txt), &config);
+        assert_eq!(model.export_text().unwrap(), "00:00:00 One\n00:03:00 Two");
+    }
+
+    #[test]
+    fn conversion_stream_emits_each_transformed_subtitle() {
+        let id = detection::DetectedTextId(7);
+        let source = ConversionStream {
+            generation: 1,
+            config: Some("s2t.json"),
+            preserve_line_breaks: false,
+            inputs: vec![(ExtractionTarget::Subtitles, id, "汉字\n测试".to_owned())].into(),
+        };
+
+        let messages = conversion_stream(&source)
+            .collect::<Vec<_>>()
+            .apply(block_on);
+        assert!(matches!(
+            messages.as_slice(),
+            [Message::Transformed {
+                generation: 1,
+                target: ExtractionTarget::Subtitles,
+                id: transformed_id,
+                text: Some(text),
+            }] if *transformed_id == id && text == "漢字 測試"
+        ));
+    }
+
+    #[test]
+    fn request_restarts_the_stream_and_stale_items_are_ignored() {
+        let source = source_with_text("汉字");
+        let mut model = Model::default();
+        model.opencc_enabled = true;
+        let config = Config::default();
+        let id = source.results()[0].id();
+        model.sync(
+            subtitles_source(source.results()),
+            detection::ResultsChanged::Full,
+            &config,
+        );
+        let generation = model.conversion_generation;
+
+        model.update(
+            Message::Transformed {
+                generation: generation.wrapping_sub(1),
+                target: ExtractionTarget::Subtitles,
+                id,
+                text: Some("stale".to_owned()),
+            },
+            &config,
+        );
+        assert_eq!(
+            model.subtitles_preview.results()[0].text_for_display(true),
+            "汉字"
+        );
+
+        model.update(
+            Message::Transformed {
+                generation,
+                target: ExtractionTarget::Subtitles,
+                id,
+                text: Some("漢字".to_owned()),
+            },
+            &config,
+        );
+        assert_eq!(
+            model.subtitles_preview.results()[0].text_for_display(true),
+            "漢字"
+        );
+
+        model.update(Message::Request, &config);
+        assert_eq!(model.conversion_generation, generation.wrapping_add(1));
+        assert_eq!(
+            model.subtitles_preview.results()[0].text_for_display(true),
+            "漢字"
+        );
+    }
+
+    #[test]
+    fn append_sync_preserves_existing_transformed_text() {
+        let mut source = source_with_text("first");
+        let config = Config::default();
+        let first_id = source.results()[0].id();
+        let mut model = Model::default();
+        model.sync(
+            subtitles_source(source.results()),
+            detection::ResultsChanged::Full,
+            &config,
+        );
+        model
+            .subtitles_preview
+            .set_transformed_text(first_id, Some("transformed first".to_owned()));
+
+        let event = source.update(
+            detection::Message::EventFound {
+                subtitle: Subtitle::new(
+                    Duration::from_secs(2),
+                    Duration::from_secs(3),
+                    "second".to_owned(),
+                ),
+                replace_previous: false,
+                preview: RgbaImage::new(1, 1),
+            },
+            &config,
+        );
+        let detection::Event::SyncWithPostProduction(changed) = event else {
+            panic!("append should request synchronization");
+        };
+        model.sync(subtitles_source(source.results()), changed, &config);
+
+        assert_eq!(
+            model.subtitles_preview.results()[0].text_for_display(true),
+            "transformed first"
+        );
+        assert_eq!(
+            model.subtitles_preview.results()[1].text_for_display(true),
+            "second"
+        );
+        assert_eq!(model.transformation_inputs.len(), 1);
+        assert_eq!(
+            model.transformation_inputs[0].0,
+            ExtractionTarget::Subtitles
+        );
+        assert_eq!(model.transformation_inputs[0].1, source.results()[1].id());
     }
 }

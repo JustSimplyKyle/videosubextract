@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MPL-2.0
 
+pub mod detection;
 pub mod post_production;
 pub mod prepare;
 pub mod selection_canvas;
-pub mod subtitle;
 pub mod toast;
 pub mod video_player_widget;
 
@@ -100,7 +100,8 @@ pub struct AppModel {
     config: Config,
     video_frame_rate: f64,
     prepare: prepare::Model,
-    subtitle: subtitle::Model,
+    subtitle: detection::Model,
+    chapters: detection::Model,
     post_production: post_production::Model,
     errors: Vec<Arc<eyre::Report>>,
 }
@@ -115,7 +116,8 @@ pub enum Message {
     CloseToast(toast::ToastId),
     SetLanguage(Language),
     Prepare(prepare::Message),
-    Subtitle(subtitle::Message),
+    /// A message for the results page of that target.
+    Results(ExtractionTarget, detection::Message),
     PostProduction(post_production::Message),
     ErrorReported(Arc<eyre::Report>),
 }
@@ -124,6 +126,7 @@ pub enum Message {
 pub enum Page {
     Prepare,
     Subtitle,
+    Chapters,
     PostProduction,
 }
 
@@ -135,51 +138,115 @@ pub enum DialogPage {
 }
 
 impl Page {
-    /// `target` is what the page is working on: the configured target for
-    /// Prepare, and the target of the last search for the pages after it.
-    fn label(self, target: ExtractionTarget) -> String {
-        match (self, target) {
-            (Self::Prepare, _) => fl!("page-prepare"),
-            (Self::Subtitle, ExtractionTarget::Subtitles) => fl!("page-subtitle"),
-            (Self::Subtitle, ExtractionTarget::Chapters) => fl!("page-chapters"),
-            (Self::PostProduction, _) => fl!("page-post"),
+    const ALL: [Self; 4] = [
+        Self::Prepare,
+        Self::Subtitle,
+        Self::Chapters,
+        Self::PostProduction,
+    ];
+
+    const fn target(self) -> Option<ExtractionTarget> {
+        match self {
+            Self::Subtitle => Some(ExtractionTarget::Subtitles),
+            Self::Chapters => Some(ExtractionTarget::Chapters),
+            Self::Prepare | Self::PostProduction => None,
         }
     }
-    fn details(self, target: ExtractionTarget) -> String {
-        match (self, target) {
+
+    const fn results(target: ExtractionTarget) -> Self {
+        match target {
+            ExtractionTarget::Subtitles => Self::Subtitle,
+            ExtractionTarget::Chapters => Self::Chapters,
+        }
+    }
+
+    fn label(self) -> String {
+        match self {
+            Self::Prepare => fl!("page-prepare"),
+            Self::Subtitle => fl!("page-subtitle"),
+            Self::Chapters => fl!("page-chapters"),
+            Self::PostProduction => fl!("page-post"),
+        }
+    }
+    /// `prepare_target` is the configured target, which Prepare's hint describes.
+    fn details(self, prepare_target: ExtractionTarget) -> String {
+        match (self, prepare_target) {
             (Self::Prepare, ExtractionTarget::Subtitles) => fl!("page-prepare-details"),
             (Self::Prepare, ExtractionTarget::Chapters) => fl!("page-prepare-details-chapters"),
-            (Self::Subtitle, ExtractionTarget::Subtitles) => fl!("page-subtitle-details"),
-            (Self::Subtitle, ExtractionTarget::Chapters) => fl!("page-chapters-details"),
+            (Self::Subtitle, _) => fl!("page-subtitle-details"),
+            (Self::Chapters, _) => fl!("page-chapters-details"),
             (Self::PostProduction, _) => fl!("page-post-details"),
         }
     }
 }
 
 impl AppModel {
-    fn page_target(&self, page: Page) -> ExtractionTarget {
-        match page {
-            Page::Prepare => self.config.extraction_target,
-            Page::Subtitle | Page::PostProduction => self.subtitle.target(),
+    const fn results(&self, target: ExtractionTarget) -> &detection::Model {
+        match target {
+            ExtractionTarget::Subtitles => &self.subtitle,
+            ExtractionTarget::Chapters => &self.chapters,
         }
     }
 
-    fn page_label(&self, page: Page) -> String {
-        page.label(self.page_target(page))
+    /// The results model for `target`, alongside the config it is updated with.
+    const fn results_mut(&mut self, target: ExtractionTarget) -> (&mut detection::Model, &Config) {
+        let model = match target {
+            ExtractionTarget::Subtitles => &mut self.subtitle,
+            ExtractionTarget::Chapters => &mut self.chapters,
+        };
+        (model, &self.config)
     }
 
-    fn sync_post_production(&mut self, changed: subtitle::ResultsChanged) {
+    fn sync_post_production(
+        &mut self,
+        target: ExtractionTarget,
+        changed: detection::ResultsChanged,
+    ) {
+        // Field access rather than `self.results`, which would borrow all of `self`.
+        let results = match target {
+            ExtractionTarget::Subtitles => &self.subtitle,
+            ExtractionTarget::Chapters => &self.chapters,
+        };
         self.post_production.sync(
             post_production::SyncSource {
                 video_path: self.prepare.video_path(),
                 video_duration: self.prepare.video_duration(),
-                target: self.subtitle.target(),
-                chapter_params: self.subtitle.chapter_params(),
-                results: self.subtitle.results(),
+                target,
+                chapter_params: results.chapter_params(),
+                results: results.results(),
             },
             changed,
             &self.config,
         );
+    }
+
+    fn sync_post_production_fully(&mut self) {
+        for target in ExtractionTarget::ALL {
+            self.sync_post_production(target, detection::ResultsChanged::Full);
+        }
+    }
+
+    fn handle_results_event(
+        &mut self,
+        target: ExtractionTarget,
+        event: detection::Event,
+    ) -> Task<Message> {
+        match event {
+            detection::Event::GoToPostProduction => {
+                self.sync_post_production_fully();
+                self.active_page = Page::PostProduction;
+                Task::none()
+            }
+            detection::Event::SyncWithPostProduction(changed) => {
+                self.sync_post_production(target, changed);
+                Task::none()
+            }
+            detection::Event::None => Task::none(),
+            detection::Event::Run(task) => {
+                task.map(move |message| Message::Results(target, message))
+            }
+            detection::Event::Error(error) => Task::done(Message::ErrorReported(Arc::new(error))),
+        }
     }
 
     fn settings_view(&self) -> impl Widget<Message> + '_ {
@@ -241,7 +308,8 @@ impl AppModel {
                 config,
                 video_frame_rate: 24.0,
                 prepare,
-                subtitle: subtitle::Model::default(),
+                subtitle: detection::Model::new(ExtractionTarget::Subtitles),
+                chapters: detection::Model::new(ExtractionTarget::Chapters),
                 post_production: post_production::Model::default(),
                 errors: Vec::new(),
             },
@@ -250,11 +318,7 @@ impl AppModel {
     }
 
     pub fn title(&self) -> String {
-        format!(
-            "{} — {}",
-            fl!("app-title"),
-            self.page_label(self.active_page)
-        )
+        format!("{} — {}", fl!("app-title"), self.active_page.label())
     }
 
     pub fn theme(&self) -> iced::Theme {
@@ -265,11 +329,19 @@ impl AppModel {
             self.prepare
                 .settings_subscription(&self.config_handler)
                 .map(Message::Prepare),
-            self.subtitle
-                .subscription(self.video_frame_rate)
-                .map(Message::Subtitle),
             Self::monitor_warning_channel(),
         ];
+        // Searches keep running in the background whichever page is showing.
+        for target in ExtractionTarget::ALL {
+            let active = self.active_page.target() == Some(target);
+            subscriptions.push(
+                self.results(target)
+                    .subscription((self.video_frame_rate, active))
+                    // Subscription closures can't capture; `with` carries the target instead.
+                    .with(target)
+                    .map(|(target, message)| Message::Results(target, message)),
+            );
+        }
         match self.active_page {
             Page::Prepare => {
                 subscriptions.push(self.prepare.subscription(()).map(Message::Prepare));
@@ -279,9 +351,7 @@ impl AppModel {
                     .subscription(())
                     .map(Message::PostProduction),
             ),
-            Page::Subtitle => {
-                // subtitles search should always run in the background regardless of current active page
-            }
+            Page::Subtitle | Page::Chapters => {}
         }
         Subscription::batch(subscriptions)
     }
@@ -304,7 +374,7 @@ impl AppModel {
         match message {
             Message::SelectPage(page) => {
                 if page == Page::PostProduction {
-                    self.sync_post_production(subtitle::ResultsChanged::Full);
+                    self.sync_post_production_fully();
                 }
                 self.active_page = page;
                 Task::none()
@@ -333,8 +403,10 @@ impl AppModel {
             }
             Message::Prepare(message) => match self.prepare.update(message, &mut self.config) {
                 prepare::Event::StartSubtitleSearch(path, selection) => {
-                    self.subtitle.start_search(path, selection, &self.config);
-                    self.active_page = Page::Subtitle;
+                    let target = self.config.extraction_target;
+                    let (results, config) = self.results_mut(target);
+                    results.start_search(path, selection, config);
+                    self.active_page = Page::results(target);
                     Task::none()
                 }
                 prepare::Event::Run(task) => task.map(Message::Prepare),
@@ -352,22 +424,11 @@ impl AppModel {
                 prepare::Event::Error(error) => Task::done(Message::ErrorReported(Arc::new(error))),
                 prepare::Event::None => Task::none(),
             },
-            Message::Subtitle(message) => match self.subtitle.update(message, &self.config) {
-                subtitle::Event::GoToPostProduction => {
-                    self.sync_post_production(subtitle::ResultsChanged::Full);
-                    self.active_page = Page::PostProduction;
-                    Task::none()
-                }
-                subtitle::Event::SyncWithPostProduction(changed) => {
-                    self.sync_post_production(changed);
-                    Task::none()
-                }
-                subtitle::Event::None => Task::none(),
-                subtitle::Event::Run(task) => task.map(Message::Subtitle),
-                subtitle::Event::Error(error) => {
-                    Task::done(Message::ErrorReported(Arc::new(error)))
-                }
-            },
+            Message::Results(target, message) => {
+                let (results, config) = self.results_mut(target);
+                let event = results.update(message, config);
+                self.handle_results_event(target, event)
+            }
             Message::PostProduction(message) => {
                 match self.post_production.update(message, &self.config) {
                     post_production::Event::Run(task) => task.map(Message::PostProduction),
@@ -397,15 +458,21 @@ impl AppModel {
                 .view(&self.config)
                 .map(Message::Prepare)
                 .boxed(),
-            Page::Subtitle => self
-                .subtitle
-                .view(self.prepare.video_duration())
-                .map(Message::Subtitle)
-                .boxed(),
+            Page::Subtitle | Page::Chapters => {
+                let target = self
+                    .active_page
+                    .target()
+                    .expect("results pages have a target");
+                self.results(target)
+                    .view(self.prepare.video_duration())
+                    .map(move |message| Message::Results(target, message))
+                    .boxed()
+            }
             Page::PostProduction => self
                 .post_production
                 .view(post_production::ViewArgs {
                     subtitles: &self.subtitle,
+                    chapters: &self.chapters,
                     video_path: self.prepare.video_path(),
                 })
                 .map(Message::PostProduction)
@@ -413,9 +480,9 @@ impl AppModel {
         };
         let active = self.active_page;
         let navigation = if self.navigation_open {
-            [Page::Prepare, Page::Subtitle, Page::PostProduction]
+            Page::ALL
                 .map(|page| shell::NavigationItem {
-                    label: self.page_label(page),
+                    label: page.label(),
                     selected: active == page,
                     on_press: Message::SelectPage(page),
                 })
@@ -447,8 +514,8 @@ impl AppModel {
         });
 
         let header = widget::column![
-            widget::text(self.page_label(active)).size(36),
-            widget::text(active.details(self.page_target(active))).size(14),
+            widget::text(active.label()).size(36),
+            widget::text(active.details(self.config.extraction_target)).size(14),
         ]
         .spacing(theme::spacing().space_s);
 

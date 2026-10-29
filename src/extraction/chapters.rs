@@ -37,26 +37,32 @@ pub fn runs_to_chapters(
     total: Duration,
     options: &ChapterOptions,
 ) -> ChapterLocations {
-    let candidates = runs
-        .iter()
-        .map(|run| (run.start_timestamp, normalize_title(run.text())))
-        .filter(|(_, title)| !title.is_empty())
-        .collect::<Vec<_>>();
     let total = runs
         .iter()
         .map(|run| run.end_timestamp)
         .fold(total, Duration::max);
+    // The video's end closes the last window, so every candidate has a next start.
+    let end_of_video = (total, String::new());
 
-    let mut kept: Vec<(Duration, String)> = Vec::with_capacity(candidates.len());
-    for (index, (start, title)) in candidates.iter().enumerate() {
-        let next_start = candidates.get(index + 1).map_or(total, |(next, _)| *next);
-        let too_short = next_start.saturating_sub(*start) < options.min_length;
-        match kept.last() {
-            Some(_) if too_short => {}
-            Some((_, previous)) if previous == title => {}
-            _ => kept.push((*start, title.clone())),
-        }
-    }
+    let candidates = runs
+        .iter()
+        .map(|run| (run.start_timestamp, normalize_title(run.text())))
+        .filter(|(_, title)| !title.is_empty())
+        .chain(std::iter::once(end_of_video.clone()))
+        .collect::<Vec<_>>();
+
+    // The first title always starts a chapter; later ones only if they last.
+    let mut kept = candidates
+        .array_windows::<2>()
+        .enumerate()
+        .filter(|(index, [(start, _), (next_start, _)])| {
+            *index == 0 || next_start.saturating_sub(*start) >= options.min_length
+        })
+        .map(|(_, [current, _])| current.clone())
+        .collect::<Vec<_>>();
+
+    // Dropping a short flash can leave the same title on both sides of it.
+    kept.dedup_by(|current, previous| current.1 == previous.1);
 
     if let Some((first_start, _)) = kept.first_mut() {
         if *first_start < options.min_length {
@@ -66,17 +72,14 @@ pub fn runs_to_chapters(
         }
     }
 
-    let ends = kept
-        .iter()
-        .skip(1)
-        .map(|(start, _)| *start)
-        .chain(std::iter::once(total))
-        .collect::<Vec<_>>();
-
+    kept.push(end_of_video);
     ChapterLocations(
-        kept.into_iter()
-            .zip(ends)
-            .map(|((start, name), end)| ChapterLocation { start, end, name })
+        kept.array_windows::<2>()
+            .map(|[(start, name), (end, _)]| ChapterLocation {
+                start: *start,
+                end: *end,
+                name: name.clone(),
+            })
             .collect(),
     )
 }

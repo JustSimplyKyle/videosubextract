@@ -1,8 +1,11 @@
-//! Subtitle editing and the ordered, stable-ID result collection.
+//! A text-detection run over one region of the video and its editable results.
+//!
+//! The app keeps one [`Model`] per [`ExtractionTarget`]: each detected run of
+//! text is a [`DetectedText`], a subtitle line or a chapter title depending on the target.
 //!
 //! # Source data and presentation state
 //!
-//! `SubtitleResult::subtitle` holds the source cue, including its text and timing.
+//! `DetectedText::subtitle` holds the source cue, including its text and timing.
 //! Editor actions currently copy `Content::text()` back into that cue. Editor
 //! content also holds cursor/selection state; it is not an export representation.
 //! `DisplayOnly` holds an optional transformed-text cache and reads original
@@ -72,7 +75,7 @@ const RESULT_TIMING_WIDTH: f32 = 132.0;
 const RESULT_ROW_OVERSCAN: usize = 3;
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
-pub struct SubtitleId(pub(crate) u64);
+pub struct DetectedTextId(pub(crate) u64);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[must_use]
@@ -87,17 +90,17 @@ pub enum ResultsChanged {
     Full,
     /// Replace one existing cue without changing membership or ordering.
     /// Its transformed cache is invalidated; other cues retain theirs.
-    Targeted(SubtitleId),
+    Targeted(DetectedTextId),
     /// Add one new cue at the end, preserving existing transformed caches.
     /// The ID must be new to the destination and present in the source.
-    Append(SubtitleId),
+    Append(DetectedTextId),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct SubtitleIndex(usize);
+struct DetectedTextIndex(usize);
 
 #[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct SubtitleTableConfig {
+pub(crate) struct DetectedTextTableConfig {
     /// Use a compact, one-based cue number instead of the extracted frame preview.
     pub show_id_instead_of_preview: bool,
     /// Put the cue's time range above its text to preserve horizontal space.
@@ -111,22 +114,22 @@ pub(crate) struct SubtitleTableConfig {
 }
 
 #[derive(Debug, Clone)]
-pub struct SubtitleResult {
-    id: SubtitleId,
+pub struct DetectedText {
+    id: DetectedTextId,
     pub subtitle: Subtitle,
     pub preview: widget::image::Handle,
-    display: SubtitleDisplay,
+    display: DetectedTextDisplay,
 }
 
 #[derive(Debug, Clone)]
-pub enum SubtitleDisplay {
+pub enum DetectedTextDisplay {
     Editor(text_editor::Content),
     DisplayOnly { transformed: Option<String> },
 }
 
-impl SubtitleResult {
+impl DetectedText {
     pub fn new_with_editor(
-        id: SubtitleId,
+        id: DetectedTextId,
         subtitle: Subtitle,
         preview: widget::image::Handle,
     ) -> Self {
@@ -136,12 +139,12 @@ impl SubtitleResult {
             id,
             subtitle,
             preview,
-            display: SubtitleDisplay::Editor(editor_content),
+            display: DetectedTextDisplay::Editor(editor_content),
         }
     }
 
     pub fn new_with_display(
-        id: SubtitleId,
+        id: DetectedTextId,
         subtitle: Subtitle,
         preview: widget::image::Handle,
     ) -> Self {
@@ -149,17 +152,17 @@ impl SubtitleResult {
             id,
             subtitle,
             preview,
-            display: SubtitleDisplay::DisplayOnly { transformed: None },
+            display: DetectedTextDisplay::DisplayOnly { transformed: None },
         }
     }
 
-    pub(crate) const fn id(&self) -> SubtitleId {
+    pub(crate) const fn id(&self) -> DetectedTextId {
         self.id
     }
 
     pub(crate) fn text_for_display(&self, show_transformed: bool) -> &str {
         if show_transformed
-            && let SubtitleDisplay::DisplayOnly {
+            && let DetectedTextDisplay::DisplayOnly {
                 transformed: Some(text),
             } = &self.display
         {
@@ -180,7 +183,7 @@ impl SubtitleResult {
     pub(crate) const fn needs_transformation(&self) -> bool {
         matches!(
             &self.display,
-            SubtitleDisplay::DisplayOnly {
+            DetectedTextDisplay::DisplayOnly {
                 transformed: None,
                 ..
             }
@@ -188,16 +191,16 @@ impl SubtitleResult {
     }
 
     fn set_transformed_text(&mut self, text: Option<String>) {
-        if let SubtitleDisplay::DisplayOnly { transformed, .. } = &mut self.display {
+        if let DetectedTextDisplay::DisplayOnly { transformed, .. } = &mut self.display {
             *transformed = text;
         }
     }
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct SubtitleResults(IndexMap<SubtitleId, SubtitleResult>);
+pub struct DetectedTexts(IndexMap<DetectedTextId, DetectedText>);
 
-impl SubtitleResults {
+impl DetectedTexts {
     /// Copy source cues into a read-only snapshot, preserving IDs and order.
     /// Editor content is deliberately excluded from the copy.
     pub(crate) fn readonly_snapshot(&self) -> Self {
@@ -216,19 +219,19 @@ impl SubtitleResults {
         self.0.is_empty()
     }
 
-    pub(crate) fn iter(&self) -> indexmap::map::Values<'_, SubtitleId, SubtitleResult> {
+    pub(crate) fn iter(&self) -> indexmap::map::Values<'_, DetectedTextId, DetectedText> {
         self.0.values()
     }
 
-    fn get_index(&self, index: usize) -> Option<&SubtitleResult> {
+    fn get_index(&self, index: usize) -> Option<&DetectedText> {
         self.0.get_index(index).map(|(_, result)| result)
     }
 
-    fn get(&self, id: SubtitleId) -> Option<&SubtitleResult> {
+    fn get(&self, id: DetectedTextId) -> Option<&DetectedText> {
         self.0.get(&id)
     }
 
-    fn last(&self) -> Option<&SubtitleResult> {
+    fn last(&self) -> Option<&DetectedText> {
         self.0.last().map(|(_, result)| result)
     }
 
@@ -236,7 +239,7 @@ impl SubtitleResults {
     /// The caller must forward the returned change; no notification is sent here.
     fn with_mut<R>(
         &mut self,
-        f: impl FnOnce(&mut IndexMap<SubtitleId, SubtitleResult>) -> R,
+        f: impl FnOnce(&mut IndexMap<DetectedTextId, DetectedText>) -> R,
     ) -> (R, ResultsChanged) {
         (f(&mut self.0), ResultsChanged::Full)
     }
@@ -245,8 +248,8 @@ impl SubtitleResults {
     /// Returns `None` for a stale ID. The closure must preserve the cue's ID.
     fn with_mut_entry<R>(
         &mut self,
-        id: SubtitleId,
-        f: impl FnOnce(&mut SubtitleResult) -> R,
+        id: DetectedTextId,
+        f: impl FnOnce(&mut DetectedText) -> R,
     ) -> Option<(R, ResultsChanged)> {
         self.0
             .get_mut(&id)
@@ -254,15 +257,15 @@ impl SubtitleResults {
     }
 
     /// Append a fresh ID and return the change for the caller to forward.
-    fn push(&mut self, result: SubtitleResult) -> ResultsChanged {
+    fn push(&mut self, result: DetectedText) -> ResultsChanged {
         let id = result.id;
         assert!(self.0.insert(id, result).is_none(), "subtitle ID is unique");
         ResultsChanged::Append(id)
     }
 }
 
-impl std::ops::Index<usize> for SubtitleResults {
-    type Output = SubtitleResult;
+impl std::ops::Index<usize> for DetectedTexts {
+    type Output = DetectedText;
 
     fn index(&self, index: usize) -> &Self::Output {
         self.get_index(index).expect("subtitle index is in bounds")
@@ -282,7 +285,7 @@ pub struct Model {
     processing_resolution: ProcessingResolution,
     target: ExtractionTarget,
     chapter_params: ChapterParams,
-    results: SubtitleResults,
+    results: DetectedTexts,
     // pub preview: Option<widget::image::Handle>,
     pub current_timestamp: Duration,
     pub progress_bar: ProgressBar,
@@ -290,8 +293,8 @@ pub struct Model {
     next_result_id: u64,
     result_scroll_offset: f32,
     result_viewport_height: f32,
-    zoomed_result_id: Option<SubtitleId>,
-    edit_history: Vec<SubtitleEdit>,
+    zoomed_result_id: Option<DetectedTextId>,
+    edit_history: Vec<DetectedTextEdit>,
 }
 
 #[derive(Default)]
@@ -329,15 +332,15 @@ impl State {
 }
 
 #[derive(Debug, Clone)]
-enum SubtitleEdit {
+enum DetectedTextEdit {
     Delete {
         index: usize,
-        result: SubtitleResult,
+        result: DetectedText,
     },
     MergeWithPrevious {
         index: usize,
         previous_end_timestamp: Duration,
-        result: SubtitleResult,
+        result: DetectedText,
     },
 }
 
@@ -375,8 +378,8 @@ pub enum Message {
         #[debug("{}x{}", preview.width(), preview.height())]
         preview: RgbaImage,
     },
-    Delete(SubtitleId),
-    MergeWithPrevious(SubtitleId),
+    Delete(DetectedTextId),
+    MergeWithPrevious(DetectedTextId),
     UndoEdit,
     Scrolled {
         at_end: bool,
@@ -391,11 +394,11 @@ pub enum Message {
     SearchError(String),
     GoToPostProduction,
     SubtitleContentEdit {
-        id: SubtitleId,
+        id: DetectedTextId,
         action: text_editor::Action,
     },
     ZoomIntoSubtitle {
-        id: SubtitleId,
+        id: DetectedTextId,
     },
     CloseSubtitlePreview,
     None,
@@ -425,20 +428,20 @@ impl_report_residual!(Event);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum VirtualRowKey {
     TopSpacer,
-    Row { id: SubtitleId },
+    Row { id: DetectedTextId },
     BottomSpacer,
 }
 
 /// A virtualized list that only builds the rows near the viewport.
-type SubtitleTable<'a> = AutoWidget<SubtitleTableBuilder<'a>>;
+type DetectedTextTable<'a> = AutoWidget<DetectedTextTableBuilder<'a>>;
 
-fn subtitle_table(
+fn detected_text_table(
     scroll_offset: f32,
     viewport_height: f32,
-    results: &SubtitleResults,
-    config: SubtitleTableConfig,
-) -> SubtitleTable<'_> {
-    AutoWidget::from_builder(SubtitleTableBuilder {
+    results: &DetectedTexts,
+    config: DetectedTextTableConfig,
+) -> DetectedTextTable<'_> {
+    AutoWidget::from_builder(DetectedTextTableBuilder {
         scroll_offset,
         viewport_height,
         results,
@@ -447,14 +450,14 @@ fn subtitle_table(
 }
 
 #[derive(Clone, Copy)]
-struct SubtitleTableBuilder<'a> {
+struct DetectedTextTableBuilder<'a> {
     scroll_offset: f32,
     viewport_height: f32,
-    results: &'a SubtitleResults,
-    config: SubtitleTableConfig,
+    results: &'a DetectedTexts,
+    config: DetectedTextTableConfig,
 }
 
-impl<'a> SubtitleTableBuilder<'a> {
+impl<'a> DetectedTextTableBuilder<'a> {
     fn row_pitch() -> f32 {
         RESULT_ROW_HEIGHT
     }
@@ -493,7 +496,7 @@ impl<'a> SubtitleTableBuilder<'a> {
             .take(active_range.len())
             .enumerate()
             .map(move |(relative_index, result)| {
-                let index = SubtitleIndex(active_range.start + relative_index);
+                let index = DetectedTextIndex(active_range.start + relative_index);
                 (
                     VirtualRowKey::Row { id: result.id },
                     self.subtitle_row(viewport, index, result)
@@ -504,7 +507,7 @@ impl<'a> SubtitleTableBuilder<'a> {
     }
 
     fn timestamp(
-        result: &SubtitleResult,
+        result: &DetectedText,
         render_atop: bool,
         start_only: bool,
     ) -> Element<'_, Message> {
@@ -547,8 +550,8 @@ impl<'a> SubtitleTableBuilder<'a> {
     fn subtitle_row(
         self,
         viewport: Viewport,
-        index: SubtitleIndex,
-        result: &'a SubtitleResult,
+        index: DetectedTextIndex,
+        result: &'a DetectedText,
     ) -> Element<'a, Message> {
         let spacing = cosmic::theme::spacing();
 
@@ -588,7 +591,7 @@ impl<'a> SubtitleTableBuilder<'a> {
                 .height(Length::Fill)
                 .boxed()
         } else {
-            let SubtitleDisplay::Editor(content) = &result.display else {
+            let DetectedTextDisplay::Editor(content) = &result.display else {
                 return widget::text(result.subtitle.text()).boxed();
             };
             Self::text_editor(result.id, content).boxed()
@@ -626,7 +629,7 @@ impl<'a> SubtitleTableBuilder<'a> {
         .align_y(Alignment::Center)
         .boxed()
     }
-    fn toolbar(index: SubtitleIndex, id: SubtitleId) -> impl Widget<Message> {
+    fn toolbar(index: DetectedTextIndex, id: DetectedTextId) -> impl Widget<Message> {
         widget::row![
             (index.0 != 0).then(|| Self::merge_with_previous(id)),
             Self::delete(id),
@@ -635,7 +638,7 @@ impl<'a> SubtitleTableBuilder<'a> {
         .align_y(Alignment::Center)
     }
     fn text_editor(
-        id: SubtitleId,
+        id: DetectedTextId,
         content: &'a widget::text_editor::Content,
     ) -> impl Widget<Message> + 'a {
         widget::text_editor(content)
@@ -647,19 +650,19 @@ impl<'a> SubtitleTableBuilder<'a> {
                 style
             })
     }
-    fn delete(id: SubtitleId) -> impl Widget<Message> {
+    fn delete(id: DetectedTextId) -> impl Widget<Message> {
         widget::button(icon_button!("edit-delete-symbolic"))
             .on_press(Message::Delete(id))
             .style(cosmic::theme::button::destructive)
     }
-    fn merge_with_previous(id: SubtitleId) -> impl Widget<Message> {
+    fn merge_with_previous(id: DetectedTextId) -> impl Widget<Message> {
         widget::button(icon_button!("go-up-symbolic"))
             .on_press(Message::MergeWithPrevious(id))
             .style(cosmic::theme::button::icon)
     }
 }
 
-impl<'a> IntoWidget for SubtitleTableBuilder<'a> {
+impl<'a> IntoWidget for DetectedTextTableBuilder<'a> {
     type Message = Message;
     type Theme = iced::Theme;
     type Renderer = iced::Renderer;
@@ -685,22 +688,22 @@ impl<'a> IntoWidget for SubtitleTableBuilder<'a> {
 }
 
 /// The search page: progress, controls, live results, and the zoomed preview.
-type SubtitleView<'a> = AutoWidget<SubtitleViewBuilder<'a>>;
+type DetectionView<'a> = AutoWidget<DetectionViewBuilder<'a>>;
 
-fn subtitle_view(model: &Model, video_duration: Duration) -> SubtitleView<'_> {
-    AutoWidget::from_builder(SubtitleViewBuilder {
+fn detection_view(model: &Model, video_duration: Duration) -> DetectionView<'_> {
+    AutoWidget::from_builder(DetectionViewBuilder {
         model,
         video_duration,
     })
 }
 
 #[derive(Clone, Copy)]
-struct SubtitleViewBuilder<'a> {
+struct DetectionViewBuilder<'a> {
     model: &'a Model,
     video_duration: Duration,
 }
 
-impl<'a> SubtitleViewBuilder<'a> {
+impl<'a> DetectionViewBuilder<'a> {
     fn format_eta(duration: Duration) -> String {
         let seconds = duration.as_secs();
 
@@ -720,9 +723,13 @@ impl<'a> SubtitleViewBuilder<'a> {
             .set_length(self.video_duration.as_millis() as u64);
 
         if matches!(self.model.state, State::Empty) {
-            return widget::text(fl!("no-active-search"))
-                .style(cosmic::theme::text::accent)
-                .boxed();
+            return widget::text(if self.model.target.is_chapters() {
+                fl!("no-active-chapter-search")
+            } else {
+                fl!("no-active-search")
+            })
+            .style(cosmic::theme::text::accent)
+            .boxed();
         }
 
         if matches!(self.model.state, State::Finished) {
@@ -810,7 +817,7 @@ impl<'a> SubtitleViewBuilder<'a> {
     }
 
     fn results(self) -> impl Widget<Message> + 'a {
-        let config = SubtitleTableConfig {
+        let config = DetectedTextTableConfig {
             timestamp_above_text: true,
             start_only: self.model.target.is_chapters(),
             ..Default::default()
@@ -818,7 +825,7 @@ impl<'a> SubtitleViewBuilder<'a> {
         self.model.results_table(config, true)
     }
 
-    fn zoomed_preview(result: &'a SubtitleResult) -> impl Widget<Message> + 'a {
+    fn zoomed_preview(result: &'a DetectedText) -> impl Widget<Message> + 'a {
         cosmic::components::dialog(
             fl!("subtitle-preview"),
             widget::image(result.preview.clone())
@@ -834,7 +841,7 @@ impl<'a> SubtitleViewBuilder<'a> {
     }
 }
 
-impl<'a> IntoWidget for SubtitleViewBuilder<'a> {
+impl<'a> IntoWidget for DetectionViewBuilder<'a> {
     type Message = Message;
     type Theme = iced::Theme;
     type Renderer = iced::Renderer;
@@ -856,12 +863,18 @@ impl<'a> IntoWidget for SubtitleViewBuilder<'a> {
 }
 
 impl Model {
-    pub(crate) fn results(&self) -> &SubtitleResults {
+    /// A model that only ever holds results for `target`; the app keeps one per target.
+    pub(crate) fn new(target: ExtractionTarget) -> Self {
+        Self {
+            target,
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn results(&self) -> &DetectedTexts {
         &self.results
     }
 
-    /// What the current (or last) search was looking for. Settings changed
-    /// since then don't apply to results that already exist.
     pub(crate) const fn target(&self) -> ExtractionTarget {
         self.target
     }
@@ -870,13 +883,13 @@ impl Model {
         self.chapter_params
     }
 
-    fn result_index(&self, id: SubtitleId) -> Option<SubtitleIndex> {
-        self.results.0.get_index_of(&id).map(SubtitleIndex)
+    fn result_index(&self, id: DetectedTextId) -> Option<DetectedTextIndex> {
+        self.results.0.get_index_of(&id).map(DetectedTextIndex)
     }
 
     pub(crate) fn results_table(
         &self,
-        config: SubtitleTableConfig,
+        config: DetectedTextTableConfig,
         show_jump_to_end: bool,
     ) -> impl Widget<Message> + '_ {
         let scrollable_id = iced::widget::Id::new("scrollable");
@@ -892,7 +905,7 @@ impl Model {
                     .padding(cosmic::theme::spacing().space_m),
             );
 
-        let results = subtitle_table(
+        let results = detected_text_table(
             self.result_scroll_offset,
             self.result_viewport_height,
             &self.results,
@@ -902,7 +915,7 @@ impl Model {
         .padding(iced::Padding::ZERO.right(20))
         .height(Length::Fill)
         .apply(widget::scrollable)
-        .on_scroll(SubtitleViewBuilder::scrolled)
+        .on_scroll(DetectionViewBuilder::scrolled)
         .id(scrollable_id);
 
         iced::widget::stack![results, jump_to_end]
@@ -925,7 +938,6 @@ impl Model {
         self.native_search_params = config.native_search_params;
         self.post_ocr_processing = config.post_ocr_processing;
         self.processing_resolution = config.processing_resolution;
-        self.target = config.extraction_target;
         self.chapter_params = config.chapter_params;
         let _ = self.results.with_mut(IndexMap::clear);
         self.current_timestamp = Duration::ZERO;
@@ -959,15 +971,15 @@ impl Model {
                 if replace_previous && let Some(previous_id) = self.results.last().map(|x| x.id) {
                     let (_, changed) = self.results.with_mut(|results| {
                         let previous = results.last_mut().unwrap().1;
-                        *previous = SubtitleResult::new_with_editor(previous_id, subtitle, preview);
+                        *previous = DetectedText::new_with_editor(previous_id, subtitle, preview);
                     });
                     return Event::SyncWithPostProduction(changed);
                 }
-                let id = SubtitleId(self.next_result_id);
+                let id = DetectedTextId(self.next_result_id);
                 self.next_result_id = self.next_result_id.wrapping_add(1);
                 let changed = self
                     .results
-                    .push(SubtitleResult::new_with_editor(id, subtitle, preview));
+                    .push(DetectedText::new_with_editor(id, subtitle, preview));
                 Event::SyncWithPostProduction(changed)
             }
             Message::SearchDone => {
@@ -1013,18 +1025,18 @@ impl Model {
                 Event::None
             }
             Message::Delete(id) => {
-                if let Some(SubtitleIndex(index)) = self.result_index(id) {
+                if let Some(DetectedTextIndex(index)) = self.result_index(id) {
                     let (result, changed) = self
                         .results
                         .with_mut(|results| results.shift_remove_index(index).unwrap().1);
                     self.edit_history
-                        .push(SubtitleEdit::Delete { index, result });
+                        .push(DetectedTextEdit::Delete { index, result });
                     return Event::SyncWithPostProduction(changed);
                 }
                 Event::None
             }
             Message::MergeWithPrevious(id) => {
-                if let Some(SubtitleIndex(index)) = self.result_index(id)
+                if let Some(DetectedTextIndex(index)) = self.result_index(id)
                     && index > 0
                 {
                     let ((result, previous_end_timestamp), changed) =
@@ -1041,7 +1053,7 @@ impl Model {
                             );
                             (result, previous_end_timestamp)
                         });
-                    self.edit_history.push(SubtitleEdit::MergeWithPrevious {
+                    self.edit_history.push(DetectedTextEdit::MergeWithPrevious {
                         index,
                         previous_end_timestamp,
                         result,
@@ -1053,11 +1065,11 @@ impl Model {
             Message::UndoEdit => {
                 if let Some(edit) = self.edit_history.pop() {
                     let (_, changed) = self.results.with_mut(|results| match edit {
-                        SubtitleEdit::Delete { index, result } => {
+                        DetectedTextEdit::Delete { index, result } => {
                             let index = index.min(results.len());
                             results.shift_insert(index, result.id, result);
                         }
-                        SubtitleEdit::MergeWithPrevious {
+                        DetectedTextEdit::MergeWithPrevious {
                             index,
                             previous_end_timestamp,
                             result,
@@ -1079,7 +1091,7 @@ impl Model {
             }
             Message::SubtitleContentEdit { id, action } => {
                 if let Some(((), changed)) = self.results.with_mut_entry(id, |result| {
-                    if let SubtitleDisplay::Editor(content) = &mut result.display {
+                    if let DetectedTextDisplay::Editor(content) = &mut result.display {
                         content.perform(action);
                         result.subtitle.set_text(content.text());
                     }
@@ -1118,7 +1130,7 @@ impl Model {
     /// This updates local state only; it does not emit another source-change event.
     pub(crate) fn sync_result_from_source(
         &mut self,
-        source: &SubtitleResults,
+        source: &DetectedTexts,
         changed: ResultsChanged,
     ) -> ResultsChanged {
         let applied = match changed {
@@ -1141,7 +1153,7 @@ impl Model {
                 if let Some(source_result) = source.get(id)
                     && !self.results.0.contains_key(&id)
                     && source.len() == self.results.len() + 1
-                    && source.last().map(SubtitleResult::id) == Some(id)
+                    && source.last().map(DetectedText::id) == Some(id)
                 {
                     self.results.0.insert(id, source_result.readonly_snapshot());
                     ResultsChanged::Append(id)
@@ -1157,7 +1169,11 @@ impl Model {
         applied
     }
 
-    pub(crate) fn set_transformed_text(&mut self, id: SubtitleId, text: Option<String>) -> bool {
+    pub(crate) fn set_transformed_text(
+        &mut self,
+        id: DetectedTextId,
+        text: Option<String>,
+    ) -> bool {
         let Some(result) = self.results.0.get_mut(&id) else {
             return false;
         };
@@ -1171,18 +1187,19 @@ impl Model {
         }
     }
 
-    fn view(&self, video_duration: Duration) -> SubtitleView<'_> {
-        subtitle_view(self, video_duration)
+    fn view(&self, video_duration: Duration) -> DetectionView<'_> {
+        detection_view(self, video_duration)
     }
 
-    fn subscription(&self, video_frame_rate: f64) -> Subscription<Message> {
+    /// `active` is whether this model's page is showing; only that page takes shortcuts.
+    fn subscription(&self, video_frame_rate: f64, active: bool) -> Subscription<Message> {
         let mut subscriptions = vec![];
         if self.state.is_search_active()
             && let Some(path) = &self.search_path
             && let Some(ocr) = &self.search_ocr
         {
-            let search = SubtitleSearchSubscription {
-                key: SubtitleSearchKey {
+            let search = DetectionSubscription {
+                key: DetectionKey {
                     generation: self.search_gen,
                     path: path.clone(),
                 },
@@ -1196,18 +1213,20 @@ impl Model {
                 target: self.target,
                 chapter_params: self.chapter_params,
             };
-            subscriptions.push(Subscription::run_with(search, subtitle_search_stream));
+            subscriptions.push(Subscription::run_with(search, detection_stream));
         }
 
-        subscriptions.push(iced::keyboard::listen().map(|x| match x {
-            iced::keyboard::Event::KeyPressed {
-                key: iced::keyboard::Key::Character(x),
-                modifiers: iced::keyboard::Modifiers::CTRL,
-                repeat,
-                ..
-            } if x == "z" && !repeat => Message::UndoEdit,
-            _ => Message::None,
-        }));
+        if active {
+            subscriptions.push(iced::keyboard::listen().map(|x| match x {
+                iced::keyboard::Event::KeyPressed {
+                    key: iced::keyboard::Key::Character(x),
+                    modifiers: iced::keyboard::Modifiers::CTRL,
+                    repeat,
+                    ..
+                } if x == "z" && !repeat => Message::UndoEdit,
+                _ => Message::None,
+            }));
+        }
         Subscription::batch(subscriptions)
     }
 }
@@ -1217,7 +1236,8 @@ impl Composition for Model {
     type Event = Event;
     type ViewContext<'a> = Duration;
     type UpdateContext<'a> = &'a Config;
-    type SubscriptionContext<'a> = f64;
+    /// The video frame rate, and whether this model's page is showing.
+    type SubscriptionContext<'a> = (f64, bool);
 
     fn view<'a>(
         &'a self,
@@ -1232,13 +1252,13 @@ impl Composition for Model {
 
     fn subscription(
         &self,
-        video_frame_rate: Self::SubscriptionContext<'_>,
+        (video_frame_rate, active): Self::SubscriptionContext<'_>,
     ) -> Subscription<Self::Message> {
-        Self::subscription(self, video_frame_rate)
+        Self::subscription(self, video_frame_rate, active)
     }
 }
 
-pub(crate) fn to_srt(results: &SubtitleResults) -> String {
+pub(crate) fn to_srt(results: &DetectedTexts) -> String {
     extraction::to_srt(
         &results
             .iter()
@@ -1252,13 +1272,13 @@ pub(crate) fn to_srt(results: &SubtitleResults) -> String {
 }
 
 #[derive(Clone, Hash, PartialEq, Eq)]
-struct SubtitleSearchKey {
+struct DetectionKey {
     generation: usize,
     path: std::path::PathBuf,
 }
 
-struct SubtitleSearchSubscription {
-    key: SubtitleSearchKey,
+struct DetectionSubscription {
+    key: DetectionKey,
     selection: Option<iced::Rectangle>,
     frame_rate: f64,
     ocr: OcrHandle,
@@ -1270,7 +1290,7 @@ struct SubtitleSearchSubscription {
     chapter_params: ChapterParams,
 }
 
-impl std::hash::Hash for SubtitleSearchSubscription {
+impl std::hash::Hash for DetectionSubscription {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.key.hash(state);
         self.selection
@@ -1291,8 +1311,8 @@ impl std::hash::Hash for SubtitleSearchSubscription {
     }
 }
 
-fn subtitle_search_stream(
-    search: &SubtitleSearchSubscription,
+fn detection_stream(
+    search: &DetectionSubscription,
 ) -> impl futures::Stream<Item = Message> + Send + use<> {
     let request = ExtractionRequest {
         input: search.key.path.clone(),
@@ -1378,7 +1398,7 @@ mod tests {
         assert_eq!(model.results.len(), 2);
     }
 
-    fn model_with_three_results() -> (Model, Config, [SubtitleId; 3]) {
+    fn model_with_three_results() -> (Model, Config, [DetectedTextId; 3]) {
         let mut model = Model::default();
         let config = Config::default();
 

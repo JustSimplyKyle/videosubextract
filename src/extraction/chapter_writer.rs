@@ -3,15 +3,20 @@ use std::path::Path;
 use std::{path::PathBuf, time::Duration};
 
 use ffmpeg_sidecar::command::FfmpegCommand;
-use ffmpeg_the_third::{Rational, Rescale};
+use ffmpeg_the_third::{Rational, Rescale, media};
 
 const CHAPTER_TIME_BASE: Rational = Rational(1, 1000);
 
 error_set::error_set! {
-    ChapterWriterError := {
-        #[display("failed to write chapter metadata to {path:?}: {source}")]
-        WriteMetadata {
+    EmbedWriterError := {
+        #[display("failed to write {path:?}: {source}")]
+        WriteTemporaryFile {
             source: std::io::Error,
+            path: PathBuf,
+        },
+        #[display("failed to read the streams of {path:?}: {source}")]
+        ProbeInput {
+            source: ffmpeg_the_third::Error,
             path: PathBuf,
         },
     } || ChapterMetadataError
@@ -27,44 +32,104 @@ error_set::error_set! {
     }
 }
 
-pub struct ChapterWriter {
-    locations: ChapterLocations,
+/// Copies a video into a new file with chapters and/or an extra subtitle
+/// stream added. Every existing stream is copied as-is; nothing is re-encoded
+/// except the new subtitles, which are converted to a codec the container takes.
+#[derive(Default)]
+pub struct EmbedWriter {
+    pub chapters: Option<ChapterLocations>,
+    /// SRT text for the new subtitle stream.
+    pub subtitles: Option<String>,
 }
 
-impl ChapterWriter {
-    pub const fn new(locations: ChapterLocations) -> Self {
-        Self { locations }
-    }
-
+impl EmbedWriter {
     pub fn into_sidecar(
         self,
         input: impl AsRef<Path>,
         output: impl AsRef<Path>,
-    ) -> Result<FfmpegCommand, ChapterWriterError> {
+    ) -> Result<FfmpegCommand, EmbedWriterError> {
+        let input = input.as_ref();
+        let output = output.as_ref();
+        let chapters = self
+            .chapters
+            .map(|chapters| write_temporary("chapters.ffmetadata", &chapters.into_ffmetadata()?))
+            .transpose()?;
+        let subtitles = self
+            .subtitles
+            .map(|subtitles| write_temporary("subtitles.srt", &subtitles))
+            .transpose()?;
+
+        // FFmpeg applies options to the file that follows them, so every input
+        // goes first and every output option after.
         let mut command = FfmpegCommand::new();
-        let ffmetadata = self.locations.into_ffmetadata()?;
-
-        let f = std::env::temp_dir().join("chapters.metadata");
-
-        std::fs::write(&f, ffmetadata).map_err(|source| ChapterWriterError::WriteMetadata {
-            source,
-            path: f.clone(),
-        })?;
-
+        command.hide_banner().overwrite().input(input);
+        for extra_input in chapters.iter().chain(&subtitles) {
+            command.input(extra_input);
+        }
         command
-            .hide_banner()
-            .overwrite()
-            .input(input.as_ref())
-            .input(&f)
             // keep every stream, not just FFmpeg's default pick of one video and one audio
             .map("0")
             .args(["-map_metadata", "0"]) // copy the existing metadata information
-            // take chapters from the metadata file even if the input already has some
-            .args(["-map_chapters", "1"])
-            .args(["-c", "copy"])
-            .output(output.as_ref());
+            .args(["-c", "copy"]);
 
+        let mut next_input = 1;
+        if chapters.is_some() {
+            // take chapters from the metadata file even if the input already has some
+            command.args(["-map_chapters", &next_input.to_string()]);
+            next_input += 1;
+        }
+        if subtitles.is_some() {
+            // The new stream comes after the input's own subtitle streams.
+            let index = count_subtitle_streams(input)?;
+            command
+                .map(format!("{next_input}:s"))
+                .arg(format!("-c:s:{index}"))
+                .arg(subtitle_codec(output))
+                // mov_text otherwise gets a 1/1000000 time base, and the MP4
+                // muxer gives its chapter track the LCM of all track time bases
+                // (1/6000000 next to 1/16000 video and 1/48000 audio). Chapter
+                // durations then overflow 32 bits after ~716s and the chapters
+                // come out scrambled. SRT is millisecond-precise anyway.
+                .arg(format!("-time_base:s:{index}"))
+                .arg("1/1000");
+        }
+
+        command.output(output);
         Ok(command)
+    }
+}
+
+/// A file in the temp directory, named per process so concurrent runs don't collide.
+fn write_temporary(name: &str, contents: &str) -> Result<PathBuf, EmbedWriterError> {
+    let path = std::env::temp_dir().join(format!("videosubextract-{}-{name}", std::process::id()));
+    std::fs::write(&path, contents).map_err(|source| EmbedWriterError::WriteTemporaryFile {
+        source,
+        path: path.clone(),
+    })?;
+    Ok(path)
+}
+
+fn count_subtitle_streams(input: &Path) -> Result<usize, EmbedWriterError> {
+    let probe = |source| EmbedWriterError::ProbeInput {
+        source,
+        path: input.to_path_buf(),
+    };
+    let context = ffmpeg_the_third::format::input(input).map_err(probe)?;
+    Ok(context
+        .streams()
+        .filter(|stream| stream.parameters().medium() == media::Type::Subtitle)
+        .count())
+}
+
+/// The text subtitle codec the output container accepts.
+fn subtitle_codec(output: &Path) -> &'static str {
+    let extension = output
+        .extension()
+        .map(|extension| extension.to_string_lossy().to_ascii_lowercase());
+    match extension.as_deref() {
+        Some("mp4" | "m4v" | "mov") => "mov_text",
+        Some("webm") => "webvtt",
+        _ => "srt",
     }
 }
 
