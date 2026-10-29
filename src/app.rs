@@ -4,6 +4,7 @@ pub mod post_production;
 pub mod prepare;
 pub mod selection_canvas;
 pub mod subtitle;
+pub mod toast;
 pub mod video_player_widget;
 
 use crate::config::{Config, Language};
@@ -94,8 +95,7 @@ pub struct AppModel {
     navigation_open: bool,
     dialog_page: DialogPage,
     dialog_open: bool,
-    next_toast_id: u64,
-    toasts: Vec<(u64, String)>,
+    toasts: toast::Toasts,
     config_handler: Arc<cosmic_config::Config>,
     config: Config,
     video_frame_rate: f64,
@@ -112,7 +112,7 @@ pub enum Message {
     CloseDialog,
     ToggleNavigation,
     PushToast(String),
-    CloseToast(u64),
+    CloseToast(toast::ToastId),
     SetLanguage(Language),
     Prepare(prepare::Message),
     Subtitle(subtitle::Message),
@@ -206,8 +206,7 @@ impl AppModel {
                 navigation_open: true,
                 dialog_page: DialogPage::Settings,
                 dialog_open: false,
-                next_toast_id: 0,
-                toasts: Vec::new(),
+                toasts: toast::Toasts::default(),
                 config_handler: Arc::new(config_handler),
                 config,
                 video_frame_rate: 24.0,
@@ -294,8 +293,8 @@ impl AppModel {
                 self.dialog_open = false;
                 Task::none()
             }
-            Message::CloseToast(remove_id) => {
-                self.toasts.retain(|(toast_id, _)| *toast_id != remove_id);
+            Message::CloseToast(id) => {
+                self.toasts.close(id);
                 Task::none()
             }
             Message::SetLanguage(value) => {
@@ -354,10 +353,7 @@ impl AppModel {
                 match self.post_production.update(message, &self.config) {
                     post_production::Event::Run(task) => task.map(Message::PostProduction),
                     post_production::Event::Toast(message) => {
-                        let id = self.next_toast_id;
-                        self.next_toast_id = self.next_toast_id.wrapping_add(1);
-                        self.toasts.push((id, message));
-                        Task::none()
+                        self.toasts.push(message, Message::CloseToast)
                     }
                     post_production::Event::Error(error) => {
                         Task::done(Message::ErrorReported(Arc::new(error)))
@@ -371,12 +367,7 @@ impl AppModel {
                 self.dialog_open = true;
                 Task::none()
             }
-            Message::PushToast(msg) => {
-                let id = self.next_toast_id;
-                self.next_toast_id = self.next_toast_id.wrapping_add(1);
-                self.toasts.push((id, msg));
-                Task::none()
-            }
+            Message::PushToast(msg) => self.toasts.push(msg, Message::CloseToast),
         }
     }
 
