@@ -32,6 +32,10 @@ pub struct ChapterWriter {
 }
 
 impl ChapterWriter {
+    pub const fn new(locations: ChapterLocations) -> Self {
+        Self { locations }
+    }
+
     pub fn into_sidecar(
         self,
         input: impl AsRef<Path>,
@@ -48,19 +52,24 @@ impl ChapterWriter {
         })?;
 
         command
+            .hide_banner()
+            .overwrite()
             .input(input.as_ref())
             .input(&f)
-            .codec_video("copy")
-            .codec_audio("copy")
-            .codec_subtitle("copy")
+            // keep every stream, not just FFmpeg's default pick of one video and one audio
+            .map("0")
             .args(["-map_metadata", "0"]) // copy the existing metadata information
+            // take chapters from the metadata file even if the input already has some
+            .args(["-map_chapters", "1"])
+            .args(["-c", "copy"])
             .output(output.as_ref());
 
         Ok(command)
     }
 }
 
-pub struct ChapterLocations(Vec<ChapterLocation>);
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChapterLocations(pub Vec<ChapterLocation>);
 
 impl ChapterLocations {
     pub fn into_ffmetadata(self) -> Result<String, ChapterMetadataError> {
@@ -73,16 +82,30 @@ impl ChapterLocations {
             writeln!(&mut output, "TIMEBASE={CHAPTER_TIME_BASE}")?;
             writeln!(&mut output, "START={start}")?;
             writeln!(&mut output, "END={end}")?;
-            writeln!(&mut output, "title={}", chapter.name)?;
+            writeln!(&mut output, "title={}", escape_metadata(&chapter.name))?;
         }
         Ok(output)
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChapterLocation {
-    start: Duration,
-    end: Duration,
-    name: String,
+    pub start: Duration,
+    pub end: Duration,
+    pub name: String,
+}
+
+/// FFmetadata treats `=`, `;`, `#`, `\` and newlines as syntax; they must be backslash-escaped.
+fn escape_metadata(value: &str) -> String {
+    value
+        .chars()
+        .fold(String::with_capacity(value.len()), |mut out, c| {
+            if matches!(c, '=' | ';' | '#' | '\\' | '\n') {
+                out.push('\\');
+            }
+            out.push(c);
+            out
+        })
 }
 
 /// Convert to chapter ticks, rounding to the nearest millisecond (ties up).
@@ -156,5 +179,10 @@ mod tests {
             metadata,
             ";FFMETADATA1\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=1235\nEND=5678\ntitle=First chapter\n",
         );
+    }
+
+    #[test]
+    fn escapes_metadata_syntax_in_titles() {
+        assert_eq!(escape_metadata("a=b;c#d\\e\nf"), "a\\=b\\;c\\#d\\\\e\\\nf");
     }
 }

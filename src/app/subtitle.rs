@@ -45,7 +45,7 @@
 //! notification protocol.
 
 use crate::app::ReportLike;
-use crate::config::{ProcessingResolution, SubtitleDetector};
+use crate::config::{ChapterParams, ExtractionTarget, ProcessingResolution, SubtitleDetector};
 use crate::extraction::{self, OcrHandle, Request as ExtractionRequest, Subtitle};
 use crate::impl_report_residual;
 use crate::native_video_sub_finder::NativeSearchParams;
@@ -106,6 +106,8 @@ pub(crate) struct SubtitleTableConfig {
     pub read_only: bool,
     /// Show cached transformed text in read-only mode.
     pub show_transformed: bool,
+    /// Show only the start time: chapters end where the next one starts.
+    pub start_only: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -278,6 +280,8 @@ pub struct Model {
     native_search_params: NativeSearchParams,
     post_ocr_processing: bool,
     processing_resolution: ProcessingResolution,
+    target: ExtractionTarget,
+    chapter_params: ChapterParams,
     results: SubtitleResults,
     // pub preview: Option<widget::image::Handle>,
     pub current_timestamp: Duration,
@@ -499,7 +503,11 @@ impl<'a> SubtitleTableBuilder<'a> {
             })
     }
 
-    fn timestamp(result: &SubtitleResult, render_atop: bool) -> Element<'_, Message> {
+    fn timestamp(
+        result: &SubtitleResult,
+        render_atop: bool,
+        start_only: bool,
+    ) -> Element<'_, Message> {
         fn precise_timestamp(timestamp: Duration) -> String {
             let total_seconds = timestamp.as_secs();
             let hours = total_seconds / 3_600;
@@ -509,7 +517,16 @@ impl<'a> SubtitleTableBuilder<'a> {
 
             format!("{hours:02}:{minutes:02}:{seconds:02}.{milliseconds:03}")
         }
-        if render_atop {
+        if start_only {
+            widget::text::monotext(precise_timestamp(result.subtitle.start_timestamp))
+                .apply(widget::container)
+                .width(if render_atop {
+                    Length::Shrink
+                } else {
+                    Length::Fixed(RESULT_TIMING_WIDTH)
+                })
+                .boxed()
+        } else if render_atop {
             widget::text::monotext(format!(
                 "{} → {}",
                 precise_timestamp(result.subtitle.start_timestamp),
@@ -578,18 +595,24 @@ impl<'a> SubtitleTableBuilder<'a> {
         };
 
         let timing_and_text = if self.config.timestamp_above_text {
-            widget::column![Self::timestamp(result, true), subtitle_text]
-                .spacing(spacing.space_xxs)
-                .height(Length::Fill)
-                .width(Length::Fill)
-                .boxed()
+            widget::column![
+                Self::timestamp(result, true, self.config.start_only),
+                subtitle_text
+            ]
+            .spacing(spacing.space_xxs)
+            .height(Length::Fill)
+            .width(Length::Fill)
+            .boxed()
         } else {
-            widget::row![Self::timestamp(result, false), subtitle_text]
-                .spacing(spacing.space_m)
-                .height(Length::Fill)
-                .width(Length::Fill)
-                .align_y(Alignment::Center)
-                .boxed()
+            widget::row![
+                Self::timestamp(result, false, self.config.start_only),
+                subtitle_text
+            ]
+            .spacing(spacing.space_m)
+            .height(Length::Fill)
+            .width(Length::Fill)
+            .align_y(Alignment::Center)
+            .boxed()
         };
 
         widget::row![
@@ -703,10 +726,12 @@ impl<'a> SubtitleViewBuilder<'a> {
         }
 
         if matches!(self.model.state, State::Finished) {
-            return widget::text(fl!(
-                "complete-subtitles-found",
-                count = self.model.results.len()
-            ))
+            let count = self.model.results.len();
+            return widget::text(if self.model.target.is_chapters() {
+                fl!("complete-chapters-found", count = count)
+            } else {
+                fl!("complete-subtitles-found", count = count)
+            })
             .style(cosmic::theme::text::accent)
             .boxed();
         }
@@ -787,6 +812,7 @@ impl<'a> SubtitleViewBuilder<'a> {
     fn results(self) -> impl Widget<Message> + 'a {
         let config = SubtitleTableConfig {
             timestamp_above_text: true,
+            start_only: self.model.target.is_chapters(),
             ..Default::default()
         };
         self.model.results_table(config, true)
@@ -832,6 +858,16 @@ impl<'a> IntoWidget for SubtitleViewBuilder<'a> {
 impl Model {
     pub(crate) fn results(&self) -> &SubtitleResults {
         &self.results
+    }
+
+    /// What the current (or last) search was looking for. Settings changed
+    /// since then don't apply to results that already exist.
+    pub(crate) const fn target(&self) -> ExtractionTarget {
+        self.target
+    }
+
+    pub(crate) const fn chapter_params(&self) -> ChapterParams {
+        self.chapter_params
     }
 
     fn result_index(&self, id: SubtitleId) -> Option<SubtitleIndex> {
@@ -889,6 +925,8 @@ impl Model {
         self.native_search_params = config.native_search_params;
         self.post_ocr_processing = config.post_ocr_processing;
         self.processing_resolution = config.processing_resolution;
+        self.target = config.extraction_target;
+        self.chapter_params = config.chapter_params;
         let _ = self.results.with_mut(IndexMap::clear);
         self.current_timestamp = Duration::ZERO;
         self.edit_history.clear();
@@ -1155,6 +1193,8 @@ impl Model {
                 native_search_params: self.native_search_params,
                 post_ocr_processing: self.post_ocr_processing,
                 processing_resolution: self.processing_resolution,
+                target: self.target,
+                chapter_params: self.chapter_params,
             };
             subscriptions.push(Subscription::run_with(search, subtitle_search_stream));
         }
@@ -1226,6 +1266,8 @@ struct SubtitleSearchSubscription {
     native_search_params: NativeSearchParams,
     post_ocr_processing: bool,
     processing_resolution: ProcessingResolution,
+    target: ExtractionTarget,
+    chapter_params: ChapterParams,
 }
 
 impl std::hash::Hash for SubtitleSearchSubscription {
@@ -1244,6 +1286,8 @@ impl std::hash::Hash for SubtitleSearchSubscription {
         self.frame_rate.to_bits().hash(state);
         self.post_ocr_processing.hash(state);
         self.processing_resolution.hash(state);
+        self.target.hash(state);
+        self.chapter_params.hash(state);
     }
 }
 
@@ -1261,7 +1305,13 @@ fn subtitle_search_stream(
         ocr: search.ocr.clone(),
         detector: search.detector,
         native_search_params: search.native_search_params,
-        post_ocr_processing: search.post_ocr_processing,
+        // A chapter is defined by its title, so repeats of one always merge.
+        post_ocr_processing: search.post_ocr_processing || search.target.is_chapters(),
+        merge_gap: (!search.target.is_chapters()).then_some(extraction::SUBTITLE_MERGE_GAP),
+        sample_interval: search
+            .target
+            .is_chapters()
+            .then(|| search.chapter_params.sample_interval()),
         processing_resolution: search.processing_resolution,
         progress_interval: 100,
         include_progress_preview: false,

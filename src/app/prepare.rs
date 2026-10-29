@@ -1,4 +1,6 @@
-use crate::config::{Config, ProcessingResolution, SubtitleDetector};
+use crate::config::{
+    ChapterParams, Config, ExtractionTarget, ProcessingResolution, SubtitleDetector,
+};
 use crate::impl_report_residual;
 use crate::native_video_sub_finder::NativeSearchParams;
 use crate::ocr::OcrModel;
@@ -25,6 +27,7 @@ pub struct Model {
     pub canvas_dimensions: iced::Rectangle,
     pub canvas_generation: u32,
     processing_resolutions: SingleSelectModel<ProcessingResolution>,
+    extraction_targets: SingleSelectModel<ExtractionTarget>,
     original_cpp_expanded: bool,
     compact_settings: bool,
 }
@@ -47,7 +50,7 @@ impl std::hash::Hash for ConfigWriteStreamData {
 
 impl Default for Model {
     fn default() -> Self {
-        Self::new(ProcessingResolution::default())
+        Self::new(&Config::default())
     }
 }
 
@@ -60,6 +63,7 @@ pub enum Message {
     StartSubtitleDisplay,
     Settings(SettingsMessage),
     SelectProcessingResolution(Entity),
+    SelectExtractionTarget(Entity),
     ToggleOriginalCppSettings,
     OpenSettings,
     SetCompactSettings(bool),
@@ -73,6 +77,8 @@ pub enum SettingsMessage {
     SetNativeSearchParams(NativeSearchParams),
     SetPostOcrProcessing(bool),
     SetProcessingResolution(ProcessingResolution),
+    SetExtractionTarget(ExtractionTarget),
+    SetChapterParams(ChapterParams),
 }
 
 impl SettingsMessage {
@@ -85,6 +91,8 @@ impl SettingsMessage {
             Self::SetNativeSearchParams(value) => handler.set("native_search_params", value),
             Self::SetPostOcrProcessing(value) => handler.set("post_ocr_processing", value),
             Self::SetProcessingResolution(value) => handler.set("processing_resolution", value),
+            Self::SetExtractionTarget(value) => handler.set("extraction_target", value),
+            Self::SetChapterParams(value) => handler.set("chapter_params", value),
         }
     }
 }
@@ -143,26 +151,44 @@ fn selection_details_translation(
     iced::Vector::new(x - details.x, y - details.y)
 }
 
+/// A segmented-control model over `values`, with `active` selected.
+fn segmented_model<T: Copy + PartialEq + 'static, const N: usize>(
+    values: [T; N],
+    labels: Vec<String>,
+    active: T,
+) -> SingleSelectModel<T> {
+    let mut model =
+        SingleSelectModelBuilder::from_array::<String, N>(std::array::from_fn(|index| {
+            (labels[index].clone(), values[index])
+        }))
+        .with_first_as_active()
+        .build();
+    activate_value(&mut model, &active);
+    model
+}
+
+fn activate_value<T: PartialEq + 'static>(model: &mut SingleSelectModel<T>, value: &T) {
+    let active = model
+        .entries()
+        .iter()
+        .find_map(|(id, entry)| (entry.data() == value).then_some(*id));
+    if let Some(active) = active {
+        model.activate(active);
+    }
+}
+
 impl Model {
-    pub fn new(processing_resolution: ProcessingResolution) -> Self {
-        let labels = ProcessingResolution::labels();
-        let mut processing_resolutions =
-            SingleSelectModelBuilder::from_array(ProcessingResolution::ALL.map(|resolution| {
-                let index = ProcessingResolution::ALL
-                    .iter()
-                    .position(|candidate| *candidate == resolution)
-                    .unwrap_or_default();
-                (labels[index].clone(), resolution)
-            }))
-            .with_first_as_active()
-            .build();
-        let active = processing_resolutions
-            .entries()
-            .iter()
-            .find_map(|(id, entry)| (entry.data() == &processing_resolution).then_some(*id));
-        if let Some(active) = active {
-            processing_resolutions.activate(active);
-        }
+    pub fn new(config: &Config) -> Self {
+        let processing_resolutions = segmented_model(
+            ProcessingResolution::ALL,
+            ProcessingResolution::labels(),
+            config.processing_resolution,
+        );
+        let extraction_targets = segmented_model(
+            ExtractionTarget::ALL,
+            ExtractionTarget::labels(),
+            config.extraction_target,
+        );
 
         Self {
             video_player: video_player_widget::Model::default(),
@@ -171,6 +197,7 @@ impl Model {
             canvas_dimensions: iced::Rectangle::default(),
             canvas_generation: 0,
             processing_resolutions,
+            extraction_targets,
             original_cpp_expanded: false,
             compact_settings: false,
         }
@@ -182,6 +209,13 @@ impl Model {
             Some(player) => Some(player.path()),
             None => None,
         }
+    }
+
+    /// Zero until a video is loaded.
+    pub fn video_duration(&self) -> Duration {
+        self.video_player.as_ref().map_or(Duration::ZERO, |player| {
+            player.controller().inner.info.video_time
+        })
     }
 
     fn update(&mut self, message: Message, config: &mut Config) -> Event {
@@ -233,6 +267,15 @@ impl Model {
                     config,
                 )
             }
+            Message::SelectExtractionTarget(id) => {
+                self.extraction_targets.activate(id);
+                self.update(
+                    Message::Settings(SettingsMessage::SetExtractionTarget(
+                        *self.extraction_targets.active_data(),
+                    )),
+                    config,
+                )
+            }
             Message::ToggleOriginalCppSettings => {
                 self.original_cpp_expanded = !self.original_cpp_expanded;
                 Event::None
@@ -261,14 +304,14 @@ impl Model {
                     }
                     SettingsMessage::SetProcessingResolution(value) => {
                         config.processing_resolution = *value;
-                        let active = self
-                            .processing_resolutions
-                            .entries()
-                            .iter()
-                            .find_map(|(id, entry)| (entry.data() == value).then_some(*id));
-                        if let Some(active) = active {
-                            self.processing_resolutions.activate(active);
-                        }
+                        activate_value(&mut self.processing_resolutions, value);
+                    }
+                    SettingsMessage::SetExtractionTarget(value) => {
+                        config.extraction_target = *value;
+                        activate_value(&mut self.extraction_targets, value);
+                    }
+                    SettingsMessage::SetChapterParams(value) => {
+                        config.chapter_params = *value;
                     }
                 }
                 CONFIG_WRITE_CHANNEL.0.try_send(message)?;
@@ -395,7 +438,7 @@ impl Model {
         Some(widget::stack![img, selection_canvas, s])
     }
 
-    pub fn title_actions(&self) -> impl Widget<Message> + '_ {
+    pub fn title_actions(&self, config: &Config) -> impl Widget<Message> + '_ {
         let load_video = if self.video_player.is_some() {
             widget::button(widget::text(fl!("change-video")))
         } else {
@@ -406,7 +449,12 @@ impl Model {
         )))
         .padding(theme::spacing().space_xs);
 
-        let start_subtitle = widget::button(widget::text(fl!("find-subtitles")))
+        let find_label = if config.extraction_target.is_chapters() {
+            fl!("find-chapters")
+        } else {
+            fl!("find-subtitles")
+        };
+        let start_subtitle = widget::button(widget::text(find_label))
             .apply_if(self.video_player.is_some(), |x| {
                 x.on_press(Message::StartSubtitleDisplay)
                     .style(theme::button::suggested)
@@ -424,26 +472,52 @@ impl Model {
         let selected_detector = SubtitleDetector::ALL
             .iter()
             .position(|value| value == &config.subtitle_detector);
+        let chapters = config.extraction_target.is_chapters();
+        let text_recognition = widget::settings::section()
+            .title(fl!("text-recognition"))
+            .add(widget::settings::item(
+                fl!("ocr-model"),
+                widget::dropdown(OcrModel::labels(config), selected_ocr, move |index| {
+                    SettingsMessage::SetOcrModel(ocr_models[index].clone())
+                })
+                .apply(AnimatedDropdown::from),
+            ));
+        // Chapters always merge identical titles; the toggle would do nothing.
+        let text_recognition = if chapters {
+            text_recognition
+        } else {
+            text_recognition.add(
+                widget::settings::togglable(fl!("post-ocr-result-processing"))
+                    .description(fl!("merge-adjacent-detections"))
+                    .toggler(
+                        config.post_ocr_processing,
+                        SettingsMessage::SetPostOcrProcessing,
+                    ),
+            )
+        };
         let mut sections = vec![
             widget::settings::section()
-                .title(fl!("text-recognition"))
-                .add(widget::settings::item(
-                    fl!("ocr-model"),
-                    widget::dropdown(OcrModel::labels(config), selected_ocr, move |index| {
-                        SettingsMessage::SetOcrModel(ocr_models[index].clone())
-                    })
-                    .apply(AnimatedDropdown::from),
-                ))
+                .title(fl!("extract"))
                 .add(
-                    widget::settings::togglable(fl!("post-ocr-result-processing"))
-                        .description(fl!("merge-adjacent-detections"))
-                        .toggler(
-                            config.post_ocr_processing,
-                            SettingsMessage::SetPostOcrProcessing,
-                        ),
+                    widget::settings::item(
+                        fl!("selected-region-contains"),
+                        widget::segmented_control::horizontal(&self.extraction_targets)
+                            .fill()
+                            .on_activate(Message::SelectExtractionTarget),
+                    )
+                    .vertical(),
                 )
-                .map(Message::Settings)
                 .boxed(),
+        ];
+        if chapters {
+            sections.push(
+                Self::chapter_settings(config)
+                    .map(Message::Settings)
+                    .boxed(),
+            );
+        }
+        sections.extend([
+            text_recognition.map(Message::Settings).boxed(),
             widget::settings::section()
                 .title(fl!("subtitle-detection"))
                 .add(
@@ -465,7 +539,7 @@ impl Model {
                     .apply(AnimatedDropdown::from),
                 ))
                 .boxed(),
-        ];
+        ]);
 
         if config.subtitle_detector == SubtitleDetector::OriginalCpp {
             sections.push(
@@ -480,6 +554,47 @@ impl Model {
         }
 
         widget::scrollable(widget::settings::view_column(sections)).height(Length::Fill)
+    }
+
+    fn chapter_settings(config: &Config) -> impl Widget<SettingsMessage> + '_ {
+        let params = config.chapter_params;
+
+        widget::settings::section()
+            .title(fl!("chapter-detection"))
+            .add(widget::settings::item(
+                fl!("sample-rate"),
+                widget::spin_button(
+                    fl!("frames-per-second", fps = params.sample_fps),
+                    fl!("sample-rate"),
+                    params.sample_fps,
+                    1,
+                    1,
+                    30,
+                    move |sample_fps| {
+                        SettingsMessage::SetChapterParams(ChapterParams {
+                            sample_fps,
+                            ..params
+                        })
+                    },
+                ),
+            ))
+            .add(widget::settings::item(
+                fl!("minimum-chapter-length"),
+                widget::spin_button(
+                    fl!("seconds", seconds = params.min_chapter_secs),
+                    fl!("minimum-chapter-length"),
+                    params.min_chapter_secs,
+                    1,
+                    0,
+                    600,
+                    move |min_chapter_secs| {
+                        SettingsMessage::SetChapterParams(ChapterParams {
+                            min_chapter_secs,
+                            ..params
+                        })
+                    },
+                ),
+            ))
     }
 
     fn original_cpp_settings(config: &Config) -> impl Widget<SettingsMessage> + '_ {
@@ -820,7 +935,10 @@ mod tests {
     #[test]
     fn processing_resolution_model_uses_the_configured_selection() {
         for resolution in ProcessingResolution::ALL {
-            let model = Model::new(resolution);
+            let model = Model::new(&Config {
+                processing_resolution: resolution,
+                ..Config::default()
+            });
             assert_eq!(*model.processing_resolutions.active_data(), resolution);
         }
     }

@@ -87,6 +87,8 @@ pub async fn run(input: PathBuf, output: PathBuf, crop: Option<Crop>) -> eyre::R
         detector: config.subtitle_detector,
         native_search_params: config.native_search_params,
         post_ocr_processing: config.post_ocr_processing,
+        merge_gap: Some(extraction::SUBTITLE_MERGE_GAP),
+        sample_interval: None,
         processing_resolution: config.processing_resolution,
         progress_interval: 10,
         include_progress_preview: false,

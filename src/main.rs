@@ -5,7 +5,7 @@ mod app;
 pub mod apply_traits;
 mod cli;
 mod config;
-mod extraction;
+pub mod extraction;
 mod i18n;
 mod native_video_sub_finder;
 mod ocr;

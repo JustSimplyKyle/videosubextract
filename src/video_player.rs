@@ -61,10 +61,13 @@ pub struct CropRect {
     pub height: f32,
 }
 
+/// `sample_interval` drops frames closer than that to the last one kept, so
+/// everything after the decoder only sees about one frame per interval.
 pub fn create_video_player<const STOP_ON_SEEK: bool>(
     input: ffmpeg::format::context::Input,
     crop_rectangle: impl Into<Option<CropRect>>,
     processing_resolution: ProcessingResolution,
+    sample_interval: Option<Duration>,
 ) -> eyre::Result<(VideoPlayerController, VideoPlayerIterator<STOP_ON_SEEK>)> {
     let crop_rectangle = crop_rectangle.into();
     let vstream = input
@@ -89,7 +92,13 @@ pub fn create_video_player<const STOP_ON_SEEK: bool>(
         });
     }
 
-    let decoder = vcodec.decoder().video()?;
+    let mut decoder = vcodec.decoder().video()?;
+    if sample_interval.is_some() {
+        // B-frames are never references for the I/P frames, and those alone are
+        // still far denser than any useful sample rate. Skipping them saves most
+        // of the decoding work.
+        decoder.skip_frame(codec::discard::Discard::Bidirectional);
+    }
 
     let time_base = vstream.time_base();
 
@@ -102,18 +111,12 @@ pub fn create_video_player<const STOP_ON_SEEK: bool>(
         time_base,
     };
 
-    let filter_graph = if let Some(rect) = crop_rectangle {
-        Some(build_crop_graph(
-            info,
-            rect.x as u32,
-            rect.y as u32,
-            rect.width as u32,
-            rect.height as u32,
-            processing_resolution,
-        )?)
-    } else {
-        Some(build_filter_graph(info, processing_resolution)?)
-    };
+    let filter_graph = Some(build_filter_graph(
+        info,
+        crop_rectangle,
+        processing_resolution,
+        sample_interval,
+    )?);
 
     let inner = Arc::new(InnerPlayer {
         state: Mutex::new(PlayerState {
@@ -296,25 +299,23 @@ pub(crate) fn frame_to_mats(
     info: &DecoderInfo,
     decoded_video: &Video,
 ) {
-    let frame = state.filter_graph.as_mut().unwrap().apply(decoded_video);
-
-    let frame = match frame {
-        Ok(x) => x,
+    let frames = match state.filter_graph.as_mut().unwrap().apply(decoded_video) {
+        Ok(frames) => frames,
         Err(e) => {
             state.frame_buffer.push_back(Err(e));
             return;
         }
     };
 
-    let timestamp = frame.timestamp().expect("frame has no timestamp");
+    for frame in frames {
+        let timestamp = frame.timestamp().expect("frame has no timestamp");
+        let us = timestamp.rescale(info.time_base, TIME_BASE);
+        let timestamp = Duration::from_micros(us as u64);
 
-    let us = timestamp.rescale(info.time_base, TIME_BASE);
-
-    let timestamp = Duration::from_micros(us as u64);
-
-    let mat = video_frame_to_mat(&frame, frame.width() as i32, frame.height() as i32);
-    let mat = mat.map(|mat| VideoFrame { mat, timestamp });
-    state.frame_buffer.push_back(mat);
+        let mat = video_frame_to_mat(&frame, frame.width() as i32, frame.height() as i32);
+        let mat = mat.map(|mat| VideoFrame { mat, timestamp });
+        state.frame_buffer.push_back(mat);
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -327,54 +328,15 @@ pub(crate) struct DecoderInfo {
     pub time_base: Rational,
 }
 
-pub(crate) fn build_crop_graph(
-    info: DecoderInfo,
-    crop_x: u32,
-    crop_y: u32,
-    crop_w: u32,
-    crop_h: u32,
-    processing_resolution: ProcessingResolution,
-) -> eyre::Result<GraphWithInfo> {
-    let pix_fmt_name = info
-        .format
-        .descriptor()
-        .context("pixel format has no descriptor")?
-        .name();
-
-    let scaled = scaled_output_dimensions(info, crop_w, crop_h, processing_resolution);
-    let scale = scaled.map_or_else(String::new, |(width, height)| {
-        format!("scale=w={width}:h={height}:flags=bilinear,")
-    });
-    let desc = format!(
-        "buffer=video_size={w}x{h}:pix_fmt={pix_fmt_name}:time_base={}/{}:sar=1/1,\
-         crop=x={crop_x}:y={crop_y}:w={crop_w}:h={crop_h},\
-         {scale}\
-         format=pix_fmts=bgr24,\
-         buffersink",
-        info.time_base.numerator(),
-        info.time_base.denominator(),
-        w = info.width,
-        h = info.height,
-    );
-
-    let mut graph = Graph::new();
-    graph.parse(&desc)?;
-    graph.validate()?;
-
-    Ok(GraphWithInfo {
-        graph,
-        source: "Parsed_buffer_0",
-        sink: if scaled.is_some() {
-            "Parsed_buffersink_4"
-        } else {
-            "Parsed_buffersink_3"
-        },
-    })
-}
+// FFmpeg names an instance written as `filter@id` in a spec by that whole string.
+const GRAPH_SOURCE: &str = "buffer@in";
+const GRAPH_SINK: &str = "buffersink@out";
 
 pub(crate) fn build_filter_graph(
     info: DecoderInfo,
+    crop_rectangle: Option<CropRect>,
     processing_resolution: ProcessingResolution,
+    sample_interval: Option<Duration>,
 ) -> eyre::Result<GraphWithInfo> {
     let pix_fmt_name = info
         .format
@@ -382,34 +344,49 @@ pub(crate) fn build_filter_graph(
         .context("pixel format has no descriptor")?
         .name();
 
-    let scaled = scaled_output_dimensions(info, info.width, info.height, processing_resolution);
-    let scale = scaled.map_or_else(String::new, |(width, height)| {
-        format!("scale=w={width}:h={height}:flags=bilinear,")
+    let (crop_w, crop_h) = crop_rectangle.map_or((info.width, info.height), |rect| {
+        (rect.width as u32, rect.height as u32)
     });
-    let desc = format!(
-        "buffer=video_size={w}x{h}:pix_fmt={pix_fmt_name}:time_base={}/{}:sar=1/1,\
-         {scale}\
-         format=pix_fmts=bgr24,\
-         buffersink",
-        info.time_base.numerator(),
-        info.time_base.denominator(),
-        w = info.width,
-        h = info.height,
-    );
+    let scaled = scaled_output_dimensions(info, crop_w, crop_h, processing_resolution);
+
+    // `select` keeps each frame's original pts, unlike `fps` (or `-r`), which
+    // retimes frames onto its own clock and duplicates them to fill gaps.
+    let desc = [
+        Some(format!(
+            "{GRAPH_SOURCE}=video_size={}x{}:pix_fmt={pix_fmt_name}:time_base={}/{}:sar=1/1",
+            info.width,
+            info.height,
+            info.time_base.numerator(),
+            info.time_base.denominator(),
+        )),
+        sample_interval.map(|interval| {
+            format!(
+                "select='isnan(prev_selected_t)+gte(t-prev_selected_t\\,{})'",
+                interval.as_secs_f64()
+            )
+        }),
+        crop_rectangle.map(|rect| {
+            format!(
+                "crop=x={}:y={}:w={crop_w}:h={crop_h}",
+                rect.x as u32, rect.y as u32
+            )
+        }),
+        scaled.map(|(width, height)| format!("scale=w={width}:h={height}:flags=bilinear")),
+        Some("format=pix_fmts=bgr24".into()),
+        Some(GRAPH_SINK.into()),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(",");
 
     let mut graph = Graph::new();
-    graph.parse(&desc)?;
+    graph
+        .parse(&desc)
+        .with_context(|| format!("parsing filter graph {desc:?}"))?;
     graph.validate()?;
 
-    Ok(GraphWithInfo {
-        graph,
-        source: "Parsed_buffer_0",
-        sink: if scaled.is_some() {
-            "Parsed_buffersink_3"
-        } else {
-            "Parsed_buffersink_2"
-        },
-    })
+    Ok(GraphWithInfo { graph })
 }
 
 fn scaled_output_dimensions(
@@ -432,27 +409,42 @@ fn scaled_output_dimensions(
 
 pub(crate) struct GraphWithInfo {
     pub(crate) graph: Graph,
-    pub(crate) source: &'static str,
-    pub(crate) sink: &'static str,
 }
 
 impl GraphWithInfo {
-    pub fn apply(&mut self, frame: &Video) -> eyre::Result<Video> {
+    /// Push one decoded frame through and collect everything that comes out:
+    /// none if the graph dropped it, possibly several from buffered filters.
+    pub fn apply(&mut self, frame: &Video) -> eyre::Result<Vec<Video>> {
         self.graph
-            .get(self.source)
+            .get(GRAPH_SOURCE)
             .context("buffer filter not found")?
             .source()
             .add(frame)
             .context("pushing frame into filter graph (check frame has a valid pts)")?;
 
-        let mut output = Video::empty();
-        self.graph
-            .get(self.sink)
-            .context("buffersink filter not found")?
-            .sink()
-            .frame(&mut output)
-            .context("pulling frame out of filter graph")?;
-        Ok(output)
+        let mut sink_context = self
+            .graph
+            .get(GRAPH_SINK)
+            .context("buffersink filter not found")?;
+        let mut sink = sink_context.sink();
+        let mut frames = Vec::new();
+        loop {
+            let mut output = Video::empty();
+            match sink.frame(&mut output) {
+                Ok(()) => frames.push(output),
+                // EAGAIN: the graph needs more input before it can output again.
+                Err(ffmpeg::Error::Other { errno })
+                    if std::io::Error::from_raw_os_error(errno).kind()
+                        == std::io::ErrorKind::WouldBlock =>
+                {
+                    return Ok(frames);
+                }
+                Err(ffmpeg::Error::Eof) => return Ok(frames),
+                Err(error) => {
+                    return Err(error).context("pulling frame out of filter graph");
+                }
+            }
+        }
     }
 }
 

@@ -73,6 +73,55 @@ impl SubtitleDetector {
     }
 }
 
+/// What the region selected on Prepare contains.
+#[derive(Debug, Default, Clone, Copy, Deserialize, Eq, Hash, PartialEq, Serialize)]
+pub enum ExtractionTarget {
+    /// Subtitles: every text change is a cue.
+    #[default]
+    Subtitles,
+    /// A title card: every text change starts a chapter.
+    Chapters,
+}
+
+impl ExtractionTarget {
+    pub const ALL: [Self; 2] = [Self::Subtitles, Self::Chapters];
+    pub fn labels() -> Vec<String> {
+        vec![fl!("target-subtitles"), fl!("target-chapters")]
+    }
+
+    pub const fn is_chapters(self) -> bool {
+        matches!(self, Self::Chapters)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Eq, Hash, PartialEq, Serialize)]
+pub struct ChapterParams {
+    /// Frames per second handed to the detector; title cards change rarely,
+    /// so checking every frame only costs time.
+    pub sample_fps: u32,
+    /// Chapters shorter than this are absorbed into the previous one.
+    pub min_chapter_secs: u32,
+}
+
+impl Default for ChapterParams {
+    fn default() -> Self {
+        Self {
+            sample_fps: 2,
+            min_chapter_secs: 10,
+        }
+    }
+}
+
+impl ChapterParams {
+    pub fn sample_interval(self) -> std::time::Duration {
+        std::time::Duration::from_secs(1) / self.sample_fps.max(1)
+    }
+
+    pub const fn min_chapter_length(self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.min_chapter_secs as u64)
+    }
+}
+
 #[derive(Debug, Clone, CosmicConfigEntry, PartialEq)]
 #[version = 7]
 pub struct Config {
@@ -83,6 +132,8 @@ pub struct Config {
     pub native_search_params: NativeSearchParams,
     pub post_ocr_processing: bool,
     pub processing_resolution: ProcessingResolution,
+    pub extraction_target: ExtractionTarget,
+    pub chapter_params: ChapterParams,
 }
 
 impl Default for Config {
@@ -95,6 +146,8 @@ impl Default for Config {
             native_search_params: NativeSearchParams::default(),
             post_ocr_processing: true,
             processing_resolution: ProcessingResolution::default(),
+            extraction_target: ExtractionTarget::default(),
+            chapter_params: ChapterParams::default(),
         }
     }
 }

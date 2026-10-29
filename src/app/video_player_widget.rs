@@ -92,8 +92,12 @@ impl Player {
     pub fn load(path: PathBuf) -> eyre::Result<Self> {
         let input =
             ffmpeg_the_third::format::input(&path).wrap_err("opening the video with ffmpeg")?;
-        let (controller, _) =
-            create_video_player::<false>(input, None, crate::config::ProcessingResolution::None)?;
+        let (controller, _) = create_video_player::<false>(
+            input,
+            None,
+            crate::config::ProcessingResolution::None,
+            None,
+        )?;
         Ok(Self {
             video_path: path,
             video_controller: controller,

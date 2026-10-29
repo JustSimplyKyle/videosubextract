@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: MPL-2.0
 
-pub mod chapter_finder;
 pub mod post_production;
 pub mod prepare;
 pub mod selection_canvas;
@@ -8,7 +7,7 @@ pub mod subtitle;
 pub mod toast;
 pub mod video_player_widget;
 
-use crate::config::{Config, Language};
+use crate::config::{Config, ExtractionTarget, Language};
 pub(crate) use crate::video_player::{
     self, InnerPlayer, VideoPlayerController, create_video_player,
 };
@@ -100,7 +99,6 @@ pub struct AppModel {
     config_handler: Arc<cosmic_config::Config>,
     config: Config,
     video_frame_rate: f64,
-    chapterfinder: chapter_finder::Model,
     prepare: prepare::Model,
     subtitle: subtitle::Model,
     post_production: post_production::Model,
@@ -116,7 +114,6 @@ pub enum Message {
     PushToast(String),
     CloseToast(toast::ToastId),
     SetLanguage(Language),
-    ChapterFinder(chapter_finder::Message),
     Prepare(prepare::Message),
     Subtitle(subtitle::Message),
     PostProduction(post_production::Message),
@@ -128,7 +125,6 @@ pub enum Page {
     Prepare,
     Subtitle,
     PostProduction,
-    ChapterFinder,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -139,25 +135,53 @@ pub enum DialogPage {
 }
 
 impl Page {
-    fn label(self) -> String {
-        match self {
-            Self::Prepare => fl!("page-prepare"),
-            Self::Subtitle => fl!("page-subtitle"),
-            Self::PostProduction => fl!("page-post"),
-            Self::ChapterFinder => fl!("page-chapterfinder"),
+    /// `target` is what the page is working on: the configured target for
+    /// Prepare, and the target of the last search for the pages after it.
+    fn label(self, target: ExtractionTarget) -> String {
+        match (self, target) {
+            (Self::Prepare, _) => fl!("page-prepare"),
+            (Self::Subtitle, ExtractionTarget::Subtitles) => fl!("page-subtitle"),
+            (Self::Subtitle, ExtractionTarget::Chapters) => fl!("page-chapters"),
+            (Self::PostProduction, _) => fl!("page-post"),
         }
     }
-    fn details(self) -> String {
-        match self {
-            Self::Prepare => fl!("page-prepare-details"),
-            Self::Subtitle => fl!("page-subtitle-details"),
-            Self::PostProduction => fl!("page-post-details"),
-            Self::ChapterFinder => fl!("todo"),
+    fn details(self, target: ExtractionTarget) -> String {
+        match (self, target) {
+            (Self::Prepare, ExtractionTarget::Subtitles) => fl!("page-prepare-details"),
+            (Self::Prepare, ExtractionTarget::Chapters) => fl!("page-prepare-details-chapters"),
+            (Self::Subtitle, ExtractionTarget::Subtitles) => fl!("page-subtitle-details"),
+            (Self::Subtitle, ExtractionTarget::Chapters) => fl!("page-chapters-details"),
+            (Self::PostProduction, _) => fl!("page-post-details"),
         }
     }
 }
 
 impl AppModel {
+    fn page_target(&self, page: Page) -> ExtractionTarget {
+        match page {
+            Page::Prepare => self.config.extraction_target,
+            Page::Subtitle | Page::PostProduction => self.subtitle.target(),
+        }
+    }
+
+    fn page_label(&self, page: Page) -> String {
+        page.label(self.page_target(page))
+    }
+
+    fn sync_post_production(&mut self, changed: subtitle::ResultsChanged) {
+        self.post_production.sync(
+            post_production::SyncSource {
+                video_path: self.prepare.video_path(),
+                video_duration: self.prepare.video_duration(),
+                target: self.subtitle.target(),
+                chapter_params: self.subtitle.chapter_params(),
+                results: self.subtitle.results(),
+            },
+            changed,
+            &self.config,
+        );
+    }
+
     fn settings_view(&self) -> impl Widget<Message> + '_ {
         let selected_language = Language::ALL
             .iter()
@@ -205,7 +229,7 @@ impl AppModel {
             .expect("failed to load configuration");
         let config = Config::get_entry(&config_handler).unwrap_or_else(|(_, config)| config);
         i18n::select(config.language.code()).ok();
-        let prepare = prepare::Model::new(config.processing_resolution);
+        let prepare = prepare::Model::new(&config);
         (
             Self {
                 active_page: Page::Prepare,
@@ -216,7 +240,6 @@ impl AppModel {
                 config_handler: Arc::new(config_handler),
                 config,
                 video_frame_rate: 24.0,
-                chapterfinder: chapter_finder::Model::default(),
                 prepare,
                 subtitle: subtitle::Model::default(),
                 post_production: post_production::Model::default(),
@@ -227,7 +250,11 @@ impl AppModel {
     }
 
     pub fn title(&self) -> String {
-        format!("{} — {}", fl!("app-title"), self.active_page.label())
+        format!(
+            "{} — {}",
+            fl!("app-title"),
+            self.page_label(self.active_page)
+        )
     }
 
     pub fn theme(&self) -> iced::Theme {
@@ -255,11 +282,6 @@ impl AppModel {
             Page::Subtitle => {
                 // subtitles search should always run in the background regardless of current active page
             }
-            Page::ChapterFinder => subscriptions.push(
-                self.chapterfinder
-                    .subscription()
-                    .map(Message::ChapterFinder),
-            ),
         }
         Subscription::batch(subscriptions)
     }
@@ -282,12 +304,7 @@ impl AppModel {
         match message {
             Message::SelectPage(page) => {
                 if page == Page::PostProduction {
-                    self.post_production.sync(
-                        self.prepare.video_path(),
-                        self.subtitle.results(),
-                        subtitle::ResultsChanged::Full,
-                        &self.config,
-                    );
+                    self.sync_post_production(subtitle::ResultsChanged::Full);
                 }
                 self.active_page = page;
                 Task::none()
@@ -314,13 +331,6 @@ impl AppModel {
                 let _ = self.config.set_language(&self.config_handler, value);
                 Task::none()
             }
-            Message::ChapterFinder(message) => match self.chapterfinder.update(message) {
-                chapter_finder::Event::Run(task) => task.map(Message::ChapterFinder),
-                chapter_finder::Event::Error(error) => {
-                    Task::done(Message::ErrorReported(Arc::new(error)))
-                }
-                chapter_finder::Event::None => Task::none(),
-            },
             Message::Prepare(message) => match self.prepare.update(message, &mut self.config) {
                 prepare::Event::StartSubtitleSearch(path, selection) => {
                     self.subtitle.start_search(path, selection, &self.config);
@@ -344,22 +354,12 @@ impl AppModel {
             },
             Message::Subtitle(message) => match self.subtitle.update(message, &self.config) {
                 subtitle::Event::GoToPostProduction => {
-                    self.post_production.sync(
-                        self.prepare.video_path(),
-                        self.subtitle.results(),
-                        subtitle::ResultsChanged::Full,
-                        &self.config,
-                    );
+                    self.sync_post_production(subtitle::ResultsChanged::Full);
                     self.active_page = Page::PostProduction;
                     Task::none()
                 }
                 subtitle::Event::SyncWithPostProduction(changed) => {
-                    self.post_production.sync(
-                        self.prepare.video_path(),
-                        self.subtitle.results(),
-                        changed,
-                        &self.config,
-                    );
+                    self.sync_post_production(changed);
                     Task::none()
                 }
                 subtitle::Event::None => Task::none(),
@@ -399,14 +399,7 @@ impl AppModel {
                 .boxed(),
             Page::Subtitle => self
                 .subtitle
-                .view(
-                    self.prepare
-                        .video_player
-                        .as_ref()
-                        .map_or(Duration::ZERO, |player| {
-                            player.controller().inner.info.video_time
-                        }),
-                )
+                .view(self.prepare.video_duration())
                 .map(Message::Subtitle)
                 .boxed(),
             Page::PostProduction => self
@@ -417,36 +410,16 @@ impl AppModel {
                 })
                 .map(Message::PostProduction)
                 .boxed(),
-            Page::ChapterFinder => self
-                .chapterfinder
-                .view()
-                .map(Message::ChapterFinder)
-                .boxed(),
         };
         let active = self.active_page;
         let navigation = if self.navigation_open {
-            vec![
-                shell::NavigationItem {
-                    label: Page::Prepare.label(),
-                    selected: active == Page::Prepare,
-                    on_press: Message::SelectPage(Page::Prepare),
-                },
-                shell::NavigationItem {
-                    label: Page::Subtitle.label(),
-                    selected: active == Page::Subtitle,
-                    on_press: Message::SelectPage(Page::Subtitle),
-                },
-                shell::NavigationItem {
-                    label: Page::PostProduction.label(),
-                    selected: active == Page::PostProduction,
-                    on_press: Message::SelectPage(Page::PostProduction),
-                },
-                shell::NavigationItem {
-                    label: Page::ChapterFinder.label(),
-                    selected: active == Page::ChapterFinder,
-                    on_press: Message::SelectPage(Page::ChapterFinder),
-                },
-            ]
+            [Page::Prepare, Page::Subtitle, Page::PostProduction]
+                .map(|page| shell::NavigationItem {
+                    label: self.page_label(page),
+                    selected: active == page,
+                    on_press: Message::SelectPage(page),
+                })
+                .into()
         } else {
             Vec::new()
         };
@@ -474,16 +447,18 @@ impl AppModel {
         });
 
         let header = widget::column![
-            widget::text(active.label()).size(36),
-            widget::text(active.details()).size(14),
+            widget::text(self.page_label(active)).size(36),
+            widget::text(active.details(self.page_target(active))).size(14),
         ]
         .spacing(theme::spacing().space_s);
 
         let header = widget::row![
             header,
             widget::space().width(Length::Fill),
-            (self.active_page == Page::Prepare)
-                .then(|| self.prepare.title_actions().map(Message::Prepare)),
+            (self.active_page == Page::Prepare).then(|| self
+                .prepare
+                .title_actions(&self.config)
+                .map(Message::Prepare)),
         ]
         .align_y(Vertical::Center);
 

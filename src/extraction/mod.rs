@@ -1,4 +1,5 @@
 pub mod chapter_writer;
+pub mod chapters;
 pub mod srt_parser;
 
 use crate::config::{ProcessingResolution, SubtitleDetector};
@@ -16,6 +17,8 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 const OCR_PARALLELISM: usize = 4;
+/// Identical subtitles further apart than this are separate lines that happen to repeat.
+pub const SUBTITLE_MERGE_GAP: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Subtitle {
@@ -100,6 +103,11 @@ pub struct Request {
     pub detector: SubtitleDetector,
     pub native_search_params: NativeSearchParams,
     pub post_ocr_processing: bool,
+    /// How far apart identical detections may be and still merge.
+    /// `None` merges regardless of the gap between them.
+    pub merge_gap: Option<Duration>,
+    /// Only hand the detector one frame per interval; `None` keeps every frame.
+    pub sample_interval: Option<Duration>,
     pub processing_resolution: ProcessingResolution,
     pub progress_interval: usize,
     pub include_progress_preview: bool,
@@ -135,9 +143,13 @@ async fn run(request: Request, event_tx: async_channel::Sender<Event>) {
     let task = smol::unblock(move || {
         let input = ffmpeg_the_third::format::input(&request.input)
             .wrap_err("opening the video with FFmpeg")?;
-        let (_controller, iter) =
-            create_video_player::<false>(input, request.crop, request.processing_resolution)
-                .wrap_err("initializing the video decoder")?;
+        let (_controller, iter) = create_video_player::<false>(
+            input,
+            request.crop,
+            request.processing_resolution,
+            request.sample_interval,
+        )
+        .wrap_err("initializing the video decoder")?;
 
         let frame_iter = ProgressIter {
             inner: iter.filter_map(Result::ok),
@@ -210,7 +222,12 @@ async fn run(request: Request, event_tx: async_channel::Sender<Event>) {
         }
 
         let replace_previous = previous.as_ref().is_some_and(|previous| {
-            should_replace_previous(previous, &subtitle, request.post_ocr_processing)
+            should_replace_previous(
+                previous,
+                &subtitle,
+                request.post_ocr_processing,
+                request.merge_gap,
+            )
         });
 
         if replace_previous && let Some(previous) = &previous {
@@ -246,12 +263,17 @@ async fn run(request: Request, event_tx: async_channel::Sender<Event>) {
     }
 }
 
-fn should_replace_previous(previous: &Subtitle, current: &Subtitle, enabled: bool) -> bool {
+fn should_replace_previous(
+    previous: &Subtitle,
+    current: &Subtitle,
+    enabled: bool,
+    max_gap: Option<Duration>,
+) -> bool {
+    let gap = current
+        .start_timestamp
+        .saturating_sub(previous.end_timestamp);
     enabled
-        && current
-            .start_timestamp
-            .saturating_sub(previous.end_timestamp)
-            < Duration::from_secs(5)
+        && max_gap.is_none_or(|max_gap| gap < max_gap)
         && previous.text.trim() == current.text.trim()
 }
 
@@ -318,7 +340,26 @@ mod tests {
             text: " same text ".into(),
         };
 
-        assert!(should_replace_previous(&previous, &current, true));
-        assert!(!should_replace_previous(&previous, &current, false));
+        let gap = Some(SUBTITLE_MERGE_GAP);
+        assert!(should_replace_previous(&previous, &current, true, gap));
+        assert!(!should_replace_previous(&previous, &current, false, gap));
+    }
+
+    #[test]
+    fn unbounded_merge_gap_merges_distant_duplicates() {
+        let previous = Subtitle::new(Duration::ZERO, Duration::from_secs(1), "title".into());
+        let current = Subtitle::new(
+            Duration::from_secs(60),
+            Duration::from_secs(90),
+            "title".into(),
+        );
+
+        assert!(!should_replace_previous(
+            &previous,
+            &current,
+            true,
+            Some(SUBTITLE_MERGE_GAP)
+        ));
+        assert!(should_replace_previous(&previous, &current, true, None));
     }
 }
