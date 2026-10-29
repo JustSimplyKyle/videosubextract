@@ -7,7 +7,10 @@ fn main() {
         "VideoSubFinder submodule is missing; run `git submodule update --init --recursive`"
     );
 
-    println!("cargo:rerun-if-changed={}", source.display());
+    // The headless target compiles sources and headers from sibling components.
+    for component in [&source, &source.join("../IPAlgorithms"), &source.join("../Include")] {
+        println!("cargo:rerun-if-changed={}", component.display());
+    }
 
     let profile = match env::var("PROFILE").as_deref() {
         Ok("release") => "Release",

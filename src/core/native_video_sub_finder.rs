@@ -485,4 +485,70 @@ mod tests {
         assert!(events.iter().all(|event| event.ocr_image.typ() == CV_8UC3));
         assert!(events.iter().all(|event| event.ocr_image.cols() == 640));
     }
+
+    fn synthetic_subtitle_frames() -> impl Iterator<Item = VideoFrame> + Send {
+        (0..45).map(|index| {
+            let mut mat =
+                Mat::new_rows_cols_with_default(160, 640, CV_8UC3, Scalar::all(0.0)).unwrap();
+            if (8..32).contains(&index) {
+                imgproc::put_text(
+                    &mut mat,
+                    "SUBTITLE TEST",
+                    Point::new(110, 105),
+                    imgproc::FONT_HERSHEY_SIMPLEX,
+                    1.2,
+                    Scalar::all(255.0),
+                    3,
+                    imgproc::LINE_AA,
+                    false,
+                )
+                .unwrap();
+            }
+            VideoFrame {
+                mat,
+                timestamp: Duration::from_millis(index * 40),
+            }
+        })
+    }
+
+    fn summarize(params: &NativeSearchParams) -> Vec<(Duration, Duration, i32, i32, i32)> {
+        let mut events = Vec::new();
+        find_subtitles_with(synthetic_subtitle_frames(), params, |event| {
+            events.push((
+                event.start_timestamp,
+                event.end_timestamp,
+                event.ocr_image.cols(),
+                event.ocr_image.rows(),
+                event.ocr_image.typ(),
+            ));
+            Ok(())
+        })
+        .unwrap();
+        events
+    }
+
+    #[test]
+    fn concurrent_searches_keep_their_own_params() {
+        let variants: Vec<NativeSearchParams> = (0..6)
+            .map(|index| {
+                let mut params = NativeSearchParams::default();
+                params.apply_ocr_image_cleanup = index % 2 == 0;
+                params.min_subtitle_frames = if index % 3 == 0 { 4 } else { 12 };
+                params
+            })
+            .collect();
+        let expected: Vec<_> = variants.iter().map(summarize).collect();
+        assert!(expected.iter().all(|events| !events.is_empty()));
+
+        for _ in 0..3 {
+            let actual: Vec<_> = std::thread::scope(|scope| {
+                let handles: Vec<_> = variants
+                    .iter()
+                    .map(|params| scope.spawn(move || summarize(params)))
+                    .collect();
+                handles.into_iter().map(|handle| handle.join().unwrap()).collect()
+            });
+            assert_eq!(actual, expected);
+        }
+    }
 }
