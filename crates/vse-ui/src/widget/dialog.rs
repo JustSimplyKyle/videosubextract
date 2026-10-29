@@ -52,7 +52,7 @@ pub struct Builder<'a, Message, C, Renderer> {
     open: bool,
     content: C,
     config: SpringConfig,
-    types: PhantomData<fn() -> (&'a (), Message, Renderer)>,
+    types: PhantomData<&'a (Message, Renderer)>,
 }
 
 impl<'a, Message, W, C, Renderer> Dialog<'a, Message, C, Renderer>

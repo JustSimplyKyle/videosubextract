@@ -1,12 +1,6 @@
-use super::{
-    Composition,
-    detection::{self, DetectedTextTableConfig},
-    format_duration,
-};
-use crate::config::{ChapterParams, Config, ExtractionTarget};
-use crate::extraction::chapter_writer::{ChapterLocations, EmbedWriter};
-use crate::extraction::chapters::{ChapterOptions, runs_to_chapters};
-use crate::{app::ReportLike, fl, impl_report_residual};
+use super::detection::{self, DetectedTextTableConfig};
+use crate::app::{Composition, format_duration};
+use crate::{app::ReportLike, impl_report_residual};
 use cosmic::{
     Apply,
     widget::{self, segmented_button::SingleSelectModel},
@@ -15,6 +9,10 @@ use iced::futures::SinkExt;
 use iced::{Alignment, Length, Subscription, Task, Widget};
 use rfd::AsyncFileDialog;
 use std::{fmt::Write, path::PathBuf, sync::Arc, time::Duration};
+use videosubextract::config::{ChapterParams, Config, ExtractionTarget};
+use videosubextract::extraction::chapter_writer::{ChapterLocations, EmbedWriter};
+use videosubextract::extraction::chapters::{ChapterOptions, runs_to_chapters};
+use videosubextract::fl;
 use vse_ui::{
     self as cosmic,
     widget::{AnimatedDropdown, segmented_button::SingleSelectModelBuilder},
@@ -77,7 +75,7 @@ impl ExportFormat {
 }
 
 /// Everything about the source a post-production snapshot is taken from.
-pub(super) struct SyncSource<'a> {
+pub(in crate::app) struct SyncSource<'a> {
     pub video_path: Option<&'a PathBuf>,
     pub video_duration: Duration,
     pub target: ExtractionTarget,
@@ -221,7 +219,7 @@ impl Model {
     /// advances the generation used by the conversion subscription. This method
     /// does not itself run the conversion task; the subscription processes the
     /// inputs and `update` rejects replies from older generations.
-    pub(super) fn sync(
+    pub(in crate::app) fn sync(
         &mut self,
         source: SyncSource<'_>,
         changed: detection::ResultsChanged,
@@ -808,7 +806,7 @@ impl Model {
     }
 }
 
-pub(super) struct ViewArgs<'a> {
+pub(in crate::app) struct ViewArgs<'a> {
     pub subtitles: &'a detection::Model,
     pub chapters: &'a detection::Model,
     pub video_path: Option<&'a PathBuf>,
@@ -928,10 +926,10 @@ fn embed_into_video(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::extraction::Subtitle;
     use iced::futures::StreamExt;
     use image::RgbaImage;
     use smol::block_on;
+    use videosubextract::extraction::Subtitle;
 
     fn source_with_text(text: &str) -> detection::Model {
         let mut source = detection::Model::default();

@@ -150,6 +150,18 @@ enum Direction {
 }
 
 impl VideoPlayerController {
+    pub fn info(&self) -> &DecoderInfo {
+        &self.inner.info
+    }
+
+    /// A new frame iterator sharing this controller's decoder.
+    pub fn frames<const STOP_ON_SEEK: bool>(&self) -> VideoPlayerIterator<STOP_ON_SEEK> {
+        VideoPlayerIterator {
+            inner: self.inner.clone(),
+            current_generation: 0,
+        }
+    }
+
     fn seek(&self, delta: Duration, direction: Direction) -> eyre::Result<()> {
         let mut state = self
             .inner
@@ -319,11 +331,11 @@ pub(crate) fn frame_to_mats(
 }
 
 #[derive(Clone, Copy)]
-pub(crate) struct DecoderInfo {
+pub struct DecoderInfo {
     pub(crate) format: Pixel,
     pub(crate) width: u32,
     pub(crate) height: u32,
-    pub(crate) frame_rate: f64,
+    pub frame_rate: f64,
     pub video_time: Duration,
     pub time_base: Rational,
 }

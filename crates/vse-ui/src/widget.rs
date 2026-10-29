@@ -27,7 +27,10 @@ pub use adaptive::{Breakpoint, Viewport, adaptive};
 pub mod bottom_sheet;
 
 pub mod pager;
+
+pub mod keep_alive;
 pub use bottom_sheet::{BottomSheet, bottom_sheet};
+pub use keep_alive::{KeepAlive, keep_alive};
 
 pub mod swipe_helper;
 pub use swipe_helper::{SwipeHelper, swipe_helper};

@@ -4,14 +4,8 @@
 mod app;
 pub mod apply_traits;
 mod cli;
-mod config;
-pub mod extraction;
-mod i18n;
-mod native_video_sub_finder;
-mod ocr;
-mod subfinder;
 
-pub mod video_player;
+use videosubextract::{i18n, native_video_sub_finder};
 
 fn main() -> eyre::Result<()> {
     use clap::Parser;

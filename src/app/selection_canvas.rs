@@ -72,6 +72,15 @@ pub struct SelectionProgram {
     display_dimensions: bool,
 }
 
+impl SelectionProgram {
+    pub fn new(reset_generation: u32) -> Self {
+        Self {
+            reset_generation,
+            ..Self::default()
+        }
+    }
+}
+
 pub const HANDLE_RADIUS: f32 = 7.0;
 pub const EDGE_HANDLE: f32 = 5.0;
 

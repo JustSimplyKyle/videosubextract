@@ -1,13 +1,13 @@
-use crate::config::Config;
-use crate::extraction::{self, Event, OcrHandle, Request, Subtitle};
-use crate::fl;
-use crate::video_player::CropRect;
 use clap::Parser;
 use eyre::{Context, ContextCompat};
 use futures::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::path::PathBuf;
 use std::str::FromStr;
+use videosubextract::config::Config;
+use videosubextract::extraction::{self, Event, OcrHandle, Request, Subtitle};
+use videosubextract::fl;
+use videosubextract::video_player::CropRect;
 
 #[derive(Debug, Parser)]
 #[command(version, about)]

@@ -95,7 +95,7 @@ impl Player {
         let (controller, _) = create_video_player::<false>(
             input,
             None,
-            crate::config::ProcessingResolution::None,
+            videosubextract::config::ProcessingResolution::None,
             None,
         )?;
         Ok(Self {
@@ -249,7 +249,7 @@ impl Player {
     }
 
     pub fn video_duration(&self) -> Duration {
-        self.video_controller.inner.info.video_time
+        self.video_controller.info().video_time
     }
 
     fn subscription(&self) -> Subscription<PlayerMessage> {
@@ -360,8 +360,7 @@ fn video_frame_stream(
         paused: playback_paused,
     }: VideoFrameStreamData,
 ) -> impl futures::Stream<Item = PlayerMessage> + Send {
-    let inner = controller.inner;
-    let frame_rate = inner.info.frame_rate;
+    let frame_rate = controller.info().frame_rate;
     let frame_duration = Duration::from_secs_f64(1.0 / frame_rate.max(1.0));
 
     iced::stream::channel(
@@ -369,10 +368,7 @@ fn video_frame_stream(
         async move |mut output: futures::channel::mpsc::Sender<PlayerMessage>| {
             let (sender, receiver) = async_channel::bounded::<PlayerMessage>(2);
             smol::spawn(smol::unblock(move || {
-                let mut frames = video_player::VideoPlayerIterator::<false> {
-                    inner,
-                    current_generation: 0,
-                };
+                let mut frames = controller.frames::<false>();
                 loop {
                     if playback_paused.load(Ordering::Relaxed) {
                         std::thread::sleep(Duration::from_millis(10));

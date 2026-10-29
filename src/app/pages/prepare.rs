@@ -1,18 +1,18 @@
-use crate::config::{
-    ChapterParams, Config, ExtractionTarget, ProcessingResolution, SubtitleDetector,
-};
 use crate::impl_report_residual;
-use crate::native_video_sub_finder::NativeSearchParams;
-use crate::ocr::OcrModel;
 use crate::{app::ReportLike, apply_traits::ApplyConditional};
 use iced::Color;
 use iced::font::Weight;
 use std::sync::LazyLock;
+use videosubextract::config::{
+    ChapterParams, Config, ExtractionTarget, ProcessingResolution, SubtitleDetector,
+};
+use videosubextract::native_video_sub_finder::NativeSearchParams;
+use videosubextract::ocr::OcrModel;
 use vse_ui::icon_button;
 use vse_ui::theme::WithRadius;
 use vse_ui::widget::{AnimatedDropdown, Breakpoint};
 
-use super::*;
+use crate::app::*;
 use iced::{Font, alignment::Vertical};
 use vse_ui::{
     Apply,
@@ -214,7 +214,7 @@ impl Model {
     /// Zero until a video is loaded.
     pub fn video_duration(&self) -> Duration {
         self.video_player.as_ref().map_or(Duration::ZERO, |player| {
-            player.controller().inner.info.video_time
+            player.controller().info().video_time
         })
     }
 
@@ -405,10 +405,12 @@ impl Model {
             .image(COSMIC.corner_radii.radius_l[0])
             .map(playback_map);
 
-        let selection_canvas = widget::canvas(selection_canvas::SelectionProgram::default())
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .map(Message::Canvas);
+        let selection_canvas = widget::canvas(selection_canvas::SelectionProgram::new(
+            self.canvas_generation,
+        ))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .map(Message::Canvas);
 
         let canvas_size = self.canvas_dimensions.size();
         let s = self

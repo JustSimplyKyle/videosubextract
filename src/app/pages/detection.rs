@@ -48,23 +48,25 @@
 //! notification protocol.
 
 use crate::app::ReportLike;
-use crate::config::{ChapterParams, ExtractionTarget, ProcessingResolution, SubtitleDetector};
-use crate::extraction::{self, OcrHandle, Request as ExtractionRequest, Subtitle};
 use crate::impl_report_residual;
-use crate::native_video_sub_finder::NativeSearchParams;
-use crate::ocr::OcrModel;
-use crate::video_player::CropRect;
 use cosmic::widget::text_editor;
 use cosmic::{Apply, Element};
 use iced::futures::StreamExt;
 use iced::widget::operation::Animation;
 use image::RgbaImage;
 use indexmap::IndexMap;
+use videosubextract::config::{
+    ChapterParams, ExtractionTarget, ProcessingResolution, SubtitleDetector,
+};
+use videosubextract::extraction::{self, OcrHandle, Request as ExtractionRequest, Subtitle};
+use videosubextract::native_video_sub_finder::NativeSearchParams;
+use videosubextract::ocr::OcrModel;
+use videosubextract::video_player::CropRect;
 use vse_ui::widget::Viewport;
 use vse_ui::widget::{AutoWidget, IntoWidget};
 use vse_ui::{self as cosmic, icon_button};
 
-use super::*;
+use crate::app::*;
 use std::time::Duration;
 
 const JUMP_TO_END_DELAY: Duration = Duration::from_secs(3);

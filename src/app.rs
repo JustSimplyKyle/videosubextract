@@ -1,17 +1,12 @@
 // SPDX-License-Identifier: MPL-2.0
 
-pub mod detection;
-pub mod post_production;
-pub mod prepare;
+pub mod pages;
 pub mod selection_canvas;
 pub mod toast;
 pub mod video_player_widget;
 
-use crate::config::{Config, ExtractionTarget, Language};
-pub(crate) use crate::video_player::{
-    self, InnerPlayer, VideoPlayerController, create_video_player,
-};
-use crate::{fl, i18n};
+use pages::{detection, post_production, prepare};
+
 use async_channel::{Receiver, Sender};
 use cosmic_config::{self, CosmicConfigEntry};
 use futures::{SinkExt, StreamExt};
@@ -20,6 +15,9 @@ use iced::window::{self, Action};
 pub(crate) use iced::{Alignment, Length, Subscription, Task, Widget};
 use std::sync::LazyLock;
 use std::{sync::Arc, time::Duration};
+use videosubextract::config::{Config, ExtractionTarget, Language};
+pub(crate) use videosubextract::video_player::{self, VideoPlayerController, create_video_player};
+use videosubextract::{fl, i18n};
 pub(crate) use vse_ui::widget;
 use vse_ui::widget::AnimatedDropdown;
 pub(crate) use vse_ui::widget::icon;
@@ -122,7 +120,7 @@ pub enum Message {
     ErrorReported(Arc<eyre::Report>),
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Page {
     Prepare,
     Subtitle,
@@ -531,7 +529,7 @@ impl AppModel {
 
         let page = widget::column! {
             header,
-            content,
+            widget::keep_alive(active, content),
         }
         .spacing(theme::spacing().space_m);
 

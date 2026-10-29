@@ -12,7 +12,7 @@ pub struct Subtitles(Vec<Subtitle>);
 struct SrtDuration(Duration);
 
 #[derive(Parser)]
-#[grammar = "extraction/srt.pest"]
+#[grammar = "core/extraction/srt.pest"]
 struct SrtParser;
 
 impl FromStr for SrtDuration {
