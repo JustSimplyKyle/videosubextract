@@ -12,6 +12,7 @@
 debug/
 target/
 debian/*
+assets/generated
 !debian/changelog
 !debian/control
 !debian/copyright

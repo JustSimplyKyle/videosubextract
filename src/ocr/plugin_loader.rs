@@ -1,6 +1,6 @@
-use eyre::bail;
 use eyre::Context;
 use eyre::Result;
+use eyre::bail;
 use image::DynamicImage;
 use libloading::Library;
 use serde::Deserialize;

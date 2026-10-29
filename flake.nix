@@ -47,6 +47,7 @@
         dioxusCli = dioxus.packages.${system}.dioxus-cli.overrideAttrs (old: {
           patches = (old.patches or [ ]) ++ [
             ./patches/dioxus-cli-cranelift-asm-objects.patch
+            ./patches/dioxus-cli-cargo-build-layout.patch
           ];
         });
         videosubfinderHelixLanguages = pkgs.writeText "videosubfinder-languages.toml" ''

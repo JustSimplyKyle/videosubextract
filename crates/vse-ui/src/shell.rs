@@ -1,7 +1,10 @@
 //! Application shell built solely from upstream Iced primitives.
 
-use iced::widget::{button, column, container, row, text};
-use iced::{Alignment, Element, Fill, Length};
+use iced::advanced::Widget;
+use iced::widget::{Column, Stack, Widget as _, column, container, row, text};
+use iced::{Alignment, Element, Fill, Length, Renderer, Theme};
+
+use crate::widget::{AutoWidget, IntoWidget, button};
 
 pub struct NavigationItem<Message> {
     pub label: String,
@@ -9,9 +12,9 @@ pub struct NavigationItem<Message> {
     pub on_press: Message,
 }
 
-pub struct Shell<'a, Message> {
-    title: String,
-    description: String,
+pub type Shell<'a, Message> = AutoWidget<Builder<'a, Message>>;
+
+pub struct Builder<'a, Message> {
     navigation: Vec<NavigationItem<Message>>,
     content: Element<'a, Message>,
     controls: Option<(Message, Message)>,
@@ -19,90 +22,92 @@ pub struct Shell<'a, Message> {
     dialog: Option<Element<'a, Message>>,
 }
 
-impl<'a, Message: 'a> Shell<'a, Message> {
-    pub fn new(
-        title: impl Into<String>,
-        description: impl Into<String>,
-        content: impl Into<Element<'a, Message>>,
-    ) -> Self {
-        Self {
-            title: title.into(),
-            description: description.into(),
+impl<'a, Message: Clone + 'a> Shell<'a, Message> {
+    pub fn new(content: impl Widget<Message, Theme, Renderer> + 'a) -> Self {
+        AutoWidget::from_builder(Builder {
             navigation: Vec::new(),
-            content: content.into(),
+            content: content.boxed(),
             controls: None,
             toasts: Vec::new(),
             dialog: None,
-        }
+        })
     }
 
     #[must_use]
-    pub fn navigation(mut self, items: Vec<NavigationItem<Message>>) -> Self {
-        self.navigation = items;
-        self
+    pub fn navigation(self, items: Vec<NavigationItem<Message>>) -> Self {
+        self.map_builder(|mut shell| {
+            shell.navigation = items;
+            shell
+        })
     }
 
     #[must_use]
-    pub fn header_controls(mut self, toggle_navigation: Message, open_settings: Message) -> Self {
-        self.controls = Some((toggle_navigation, open_settings));
-        self
+    pub fn header_controls(self, toggle_navigation: Message, open_settings: Message) -> Self {
+        self.map_builder(|mut shell| {
+            shell.controls = Some((toggle_navigation, open_settings));
+            shell
+        })
     }
 
     #[must_use]
-    pub fn toasts(mut self, toasts: Vec<(String, Message)>) -> Self {
-        self.toasts = toasts;
-        self
+    pub fn toasts(self, toasts: Vec<(String, Message)>) -> Self {
+        self.map_builder(|mut shell| {
+            shell.toasts = toasts;
+            shell
+        })
     }
 
     #[must_use]
-    pub fn dialog(mut self, dialog: Option<impl Into<Element<'a, Message>>>) -> Self {
-        self.dialog = dialog.map(Into::into);
-        self
+    pub fn dialog(self, dialog: impl Widget<Message, Theme, Renderer> + 'a) -> Self {
+        self.map_builder(|mut shell| {
+            shell.dialog = Some(dialog.boxed());
+            shell
+        })
     }
 }
 
-impl<'a, Message: Clone + 'a> From<Shell<'a, Message>> for Element<'a, Message> {
-    fn from(shell: Shell<'a, Message>) -> Self {
+impl<'a, Message: Clone + 'a> IntoWidget for Builder<'a, Message> {
+    type Message = Message;
+    type Theme = Theme;
+    type Renderer = Renderer;
+    type Widget = Stack<Element<'a, Message>>;
+
+    fn into_widget(self) -> Self::Widget {
+        let shell = self;
         let navigation_open = !shell.navigation.is_empty();
-        let nav =
-            shell
-                .navigation
-                .into_iter()
-                .fold(column![].spacing(8).padding(12), |nav, item| {
-                    let button = button(text(item.label)).on_press(item.on_press).width(Fill);
-                    nav.push(if item.selected {
-                        button.style(crate::theme::button::navigation_active)
-                    } else {
-                        button.style(crate::theme::button::navigation_inactive)
-                    })
-                });
+        let nav = shell
+            .navigation
+            .into_iter()
+            .map(|item| {
+                let button = button(text(item.label)).on_press(item.on_press).width(Fill);
+                if item.selected {
+                    button.style(crate::theme::button::navigation_active)
+                } else {
+                    button.style(crate::theme::button::navigation_inactive)
+                }
+            })
+            .collect::<Column<_>>()
+            .spacing(8)
+            .padding(12);
 
         let header = shell.controls.map(|(toggle_navigation, open_settings)| {
             row![
-                button(crate::widget::icon::from_name("open-menu-symbolic"))
+                button(crate::widget::icon!("open-menu-symbolic"))
                     .padding(8)
                     .style(crate::theme::button::icon)
                     .on_press(toggle_navigation),
                 iced::widget::Space::new().width(Fill),
-                button(crate::widget::icon::from_name(
-                    "preferences-system-symbolic"
-                ))
-                .padding(8)
-                .style(crate::theme::button::icon)
-                .on_press(open_settings),
+                button(crate::widget::icon!("preferences-system-symbolic"))
+                    .padding(8)
+                    .style(crate::theme::button::icon)
+                    .on_press(open_settings),
             ]
             .align_y(Alignment::Center)
             .width(Fill)
         });
-        let page = column![
-            header,
-            text(shell.title).size(36),
-            text(shell.description).size(14),
-            shell.content,
-        ]
-        .spacing(16);
+        let page = column![header, shell.content,].spacing(16);
 
-        let content: Element<'a, Message> = row![
+        let content = row![
             container(nav)
                 .width(if navigation_open { 200 } else { 0 })
                 .height(Length::Fill)
@@ -111,14 +116,13 @@ impl<'a, Message: Clone + 'a> From<Shell<'a, Message>> for Element<'a, Message> 
         ]
         .align_y(Alignment::Start)
         .width(Length::Fill)
-        .height(Length::Fill)
-        .into();
+        .height(Length::Fill);
 
         let toasts = column(shell.toasts.into_iter().map(|(message, close)| {
             container(
                 row![
                     text(message),
-                    button(crate::widget::icon::from_name("window-close-symbolic"))
+                    button(crate::widget::icon!("window-close-symbolic"))
                         .padding(4)
                         .style(crate::theme::button::icon)
                         .on_press(close),
@@ -128,29 +132,14 @@ impl<'a, Message: Clone + 'a> From<Shell<'a, Message>> for Element<'a, Message> 
             )
             .padding(12)
             .style(crate::theme::container::card)
-            .into()
         }))
         .spacing(8)
         .padding(20);
 
-        let dialog = shell.dialog;
-        let shell: Element<'a, Message> =
-            iced::widget::stack![content, iced::widget::bottom_right(toasts)].into();
+        let shell_layer = iced::widget::stack![content, iced::widget::bottom_center(toasts)];
 
-        if let Some(dialog) = dialog {
-            iced::widget::stack![
-                shell,
-                container(dialog)
-                    .center(Length::Fill)
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .style(|_| container::background(iced::Color::from_rgba(0.0, 0.0, 0.0, 0.55))),
-            ]
+        iced::widget::stack![shell_layer, shell.dialog]
             .width(Length::Fill)
             .height(Length::Fill)
-            .into()
-        } else {
-            shell
-        }
     }
 }

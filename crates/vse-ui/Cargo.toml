@@ -7,8 +7,28 @@ publish = false
 
 [dependencies]
 iced = { workspace = true }
+freedesktop-icon-assets = { path = "../../../pagecut/crates/freedesktop-icon-assets" }
 cosmic-theme = { path = "../../../libcosmic/cosmic-theme", default-features = false }
 indexmap = "2.14.2"
+springs = "0.1.2"
 
-[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
-freedesktop-icons = { package = "cosmic-freedesktop-icons", git = "https://github.com/pop-os/freedesktop-icons" }
+# Keep desktop configuration out of browser and Android builds.
+[target.'cfg(not(any(target_arch = "wasm32", target_os = "android")))'.dependencies]
+cosmic-theme = { path = "../../../libcosmic/cosmic-theme", default-features = false, features = ["config"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+manganis = "=0.7.10"
+dioxus-cli-config = { version = "=0.7.10", features = ["web"] }
+
+# `icon!` reads the SVGs dx bundles into the APK.
+[target.'cfg(target_os = "android")'.dependencies]
+manganis = "=0.7.10"
+dioxus-asset-resolver = { version = "=0.7.10", features = ["native"] }
+
+[dev-dependencies]
+# Headless widget tests; tiny-skia lets them run without a GPU adapter.
+iced = { workspace = true, features = ["tiny-skia"] }
+iced_test = { path = "../../../iced-dioxus/test" }
+
+[features]
+hot-patch = ["iced/hot"]

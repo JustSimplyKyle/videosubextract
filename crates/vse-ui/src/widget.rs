@@ -3,71 +3,75 @@
 pub use iced::widget::*;
 pub use iced::widget::{canvas, image, text_editor};
 
-/// Creates a button using the default COSMIC button appearance.
-///
-/// This intentionally shadows Iced's unstyled `button` helper while keeping
-/// the rest of `iced::widget` re-exported from this module. Call `.style(...)`
-/// on the returned button to select a different semantic variant.
-pub fn button<'a, Message>(
-    content: impl Into<crate::Element<'a, Message>>,
-) -> iced::widget::Button<'a, Message, crate::Theme> {
-    iced::widget::button(content).style(crate::theme::button::standard)
+pub mod auto_widget;
+pub use auto_widget::{AutoWidget, IntoWidget};
+
+pub mod switch;
+pub use switch::{Switch, switch};
+
+pub mod dialog;
+pub use dialog::{Dialog, dialog};
+
+pub mod button;
+pub use button::{Button, button};
+
+pub mod animate;
+pub use animate::{Animatable, Animate, Animated, animate};
+
+pub mod dropdown;
+pub use dropdown::AnimatedDropdown;
+
+pub mod adaptive;
+pub use adaptive::{Breakpoint, Viewport, adaptive};
+
+pub mod bottom_sheet;
+
+pub mod pager;
+pub use bottom_sheet::{BottomSheet, bottom_sheet};
+
+pub mod swipe_helper;
+pub use swipe_helper::{SwipeHelper, swipe_helper};
+
+pub use freedesktop_icon_assets::icon;
+pub use tooltip::{Tooltip, tooltip};
+
+pub fn icon_button<'a, Message, W>(content: W) -> Button<'a, Message, W>
+where
+    Message: Clone + 'a,
+    W: iced::advanced::Widget<Message, crate::Theme, iced::Renderer>,
+{
+    button(content).style(crate::theme::button::icon)
 }
 
-pub mod icon {
-    use std::{cell::RefCell, collections::HashMap};
+#[macro_export]
+macro_rules! icon_button {
+    ($x: expr) => {
+        $crate::widget::button(icon!($x)).style($crate::theme::button::icon)
+    };
+}
 
-    use iced::{Element, Length, widget::svg};
+/// Creates a text input using the COSMIC settings-control appearance.
+pub fn text_input<'a, Message: Clone>(
+    placeholder: impl iced::widget::text::IntoFragment<'a>,
+    value: impl iced::widget::text::IntoFragment<'a>,
+) -> iced::widget::TextInput<'a, Message, crate::Theme> {
+    iced::widget::text_input(placeholder, value).style(crate::theme::text_input::standard)
+}
 
-    thread_local! {
-        static ICON_CACHE: RefCell<HashMap<&'static str, Option<svg::Handle>>> = RefCell::new(HashMap::new());
-    }
-    fn icon_lookup(name: &'static str, symbolic: bool) -> Option<svg::Handle> {
-        let extra_paths = std::env::var_os("COSMIC_ICONS")
-            .map(std::path::PathBuf::from)
-            .into_iter()
-            .collect::<Vec<_>>();
-        let lookup = |candidate: &str| {
-            // the `with_cache()` doesn't work with extra paths sent in by COSMIC_ICONS
-            let lookup = freedesktop_icons::lookup(candidate)
-                .with_theme("Cosmic")
-                .with_extra_paths(&extra_paths)
-                .with_size(16)
-                .with_cache();
-            if symbolic {
-                lookup.force_svg().find()
-            } else {
-                lookup.find()
-            }
-        };
+/// COSMIC tooltip defaults, adapted from libcosmic's widget helper.
+pub mod tooltip {
+    use iced::widget::Container;
 
-        let path = lookup(name).or_else(|| {
-            name.rmatch_indices('-')
-                .find_map(|(position, _)| lookup(&name[..position]))
-        });
+    pub use iced::widget::tooltip::Position;
+    pub type Tooltip<'a, W, V> =
+        iced::widget::Tooltip<'a, W, Container<'a, V, crate::Theme>, crate::Theme>;
 
-        path.map(iced::widget::svg::Handle::from_path)
-    }
-    pub fn from_name<'a, Message: 'a>(name: &'static str) -> Element<'a, Message> {
-        let symbolic = name.ends_with("-symbolic");
-        let handle = ICON_CACHE.with(move |x| {
-            x.borrow_mut()
-                .entry(name)
-                .or_insert_with(move || icon_lookup(name, symbolic))
-                .clone()
-        });
-        handle.map_or_else(
-            || iced::widget::space().width(16).height(16).into(),
-            |x| {
-                iced::widget::svg(x)
-                    .style(move |_, _| iced::widget::svg::Style {
-                        color: symbolic.then(crate::theme::icon_color),
-                    })
-                    .width(Length::Fixed(16.0))
-                    .height(Length::Fixed(16.0))
-                    .into()
-            },
-        )
+    /// Fit tooltip contents automatically and keep the popup inside the viewport.
+    pub fn tooltip<'a, W, V>(content: W, tooltip: V, position: Position) -> Tooltip<'a, W, V> {
+        let tooltip = crate::widget::container(tooltip).padding(crate::theme::spacing().space_xxs);
+        Tooltip::new(content, tooltip, position)
+            .style(crate::theme::container::tooltip)
+            .gap(1)
     }
 }
 
@@ -79,14 +83,17 @@ pub fn dropdown<'a, Message: Clone + 'a>(
     let options = options.into_iter().map(Into::into).collect::<Vec<_>>();
     let selected = selected.and_then(|index| options.get(index).cloned());
     let indexes = options.clone();
-    iced::widget::pick_list(selected, options, String::clone).on_select(move |value| {
-        on_select(
-            indexes
-                .iter()
-                .position(|candidate| candidate == &value)
-                .unwrap_or_default(),
-        )
-    })
+    iced::widget::pick_list(selected, options, String::clone)
+        .on_select(move |value| {
+            on_select(
+                indexes
+                    .iter()
+                    .position(|candidate| candidate == &value)
+                    .unwrap_or_default(),
+            )
+        })
+        .width(iced::Length::Fill)
+        .style(crate::theme::pick_list::standard)
 }
 
 /// A compact value control with decrement and increment buttons.
@@ -98,7 +105,7 @@ pub fn spin_button<'a, T, Message>(
     min: T,
     max: T,
     on_press: impl Fn(T) -> Message + 'a,
-) -> iced::Element<'a, Message>
+) -> impl iced::widget::Widget<Message> + 'a
 where
     T: Copy + std::ops::Add<Output = T> + std::ops::Sub<Output = T> + PartialOrd + 'a,
     Message: Clone + 'a,
@@ -121,7 +128,7 @@ where
         value + step
     };
 
-    let decrement_button = button(icon::from_name("list-remove-symbolic"))
+    let decrement_button = button(icon!("list-remove-symbolic"))
         .padding(6)
         .style(crate::theme::button::icon);
     let decrement_button = if value > min {
@@ -130,7 +137,7 @@ where
         decrement_button
     };
 
-    let increment_button = button(icon::from_name("list-add-symbolic"))
+    let increment_button = button(icon!("list-add-symbolic"))
         .padding(6)
         .style(crate::theme::button::icon);
     let increment_button = if value < max {
@@ -147,7 +154,6 @@ where
         increment_button,
     ]
     .align_y(iced::Alignment::Center)
-    .into()
 }
 
 pub mod segmented_button {
@@ -401,57 +407,93 @@ pub mod segmented_button {
         pub const fn entries(&self) -> &IndexMap<Entity, Entry<T>> {
             &self.entries
         }
+
+        /// The entry after the active one, or `None` when the last is active.
+        pub fn next_entity(&self) -> Option<Entity> {
+            let index = self.entries.get_index_of(&self.active)?;
+            self.entries.get_index(index + 1).map(|(id, _)| *id)
+        }
+
+        /// The entry before the active one, or `None` when the first is active.
+        pub fn previous_entity(&self) -> Option<Entity> {
+            let index = self.entries.get_index_of(&self.active)?;
+            self.entries
+                .get_index(index.checked_sub(1)?)
+                .map(|(id, _)| *id)
+        }
+
+        /// Activates the next entry, stopping at the last one. Returns whether
+        /// the selection changed.
+        ///
+        /// ```
+        /// use vse_ui::widget::segmented_button::SingleSelectModelBuilder;
+        ///
+        /// let mut model = SingleSelectModelBuilder::from_array([("A", 0), ("B", 1)])
+        ///     .with_first_as_active()
+        ///     .build();
+        /// assert!(model.activate_next());
+        /// assert!(!model.activate_next());
+        /// assert_eq!(*model.active_data(), 1);
+        /// assert!(model.activate_previous());
+        /// assert!(model.is_first());
+        /// ```
+        pub fn activate_next(&mut self) -> bool {
+            self.next_entity().map(|id| self.active = id).is_some()
+        }
+
+        /// Activates the previous entry, stopping at the first one. Returns
+        /// whether the selection changed.
+        pub fn activate_previous(&mut self) -> bool {
+            self.previous_entity().map(|id| self.active = id).is_some()
+        }
+
+        pub fn is_first(&self) -> bool {
+            self.previous_entity().is_none()
+        }
+
+        pub fn is_last(&self) -> bool {
+            self.next_entity().is_none()
+        }
     }
 }
 
 pub mod segmented_control {
     use crate::Apply;
 
+    use super::button;
     use super::segmented_button::{Entity, SingleSelectModel};
-    use iced::widget::{Component, button, component, row, text};
-    use iced::{Element, Renderer};
+    use iced::widget::{Widget, row, text};
 
-    pub fn horizontal<T>(model: &SingleSelectModel<T>) -> SegmentedControlBuilder<'_, T> {
-        SegmentedControlBuilder { model }
+    pub const fn horizontal<T>(model: &SingleSelectModel<T>) -> SegmentedControlBuilder<'_, T> {
+        SegmentedControlBuilder { model, fill: false }
     }
 
     pub struct SegmentedControlBuilder<'a, T> {
         model: &'a SingleSelectModel<T>,
-    }
-    pub struct SegmentedControl<'a, Message, T> {
-        model: &'a SingleSelectModel<T>,
-        on_activate: crate::components::MessageEmitter<'a, Entity, Message>,
+        fill: bool,
     }
 
     impl<'a, T> SegmentedControlBuilder<'a, T> {
-        pub fn on_activate<Message>(
+        /// Makes every segment share the available horizontal space equally.
+        #[must_use]
+        pub const fn fill(mut self) -> Self {
+            self.fill = true;
+            self
+        }
+
+        pub fn on_activate<Message: 'static>(
             self,
             f: impl Fn(Entity) -> Message + 'a,
-        ) -> SegmentedControl<'a, Message, T> {
-            SegmentedControl {
-                model: self.model,
-                on_activate: Box::new(f),
-            }
-        }
-    }
-
-    impl<'a, Message: 'a, T> Component<'a, Message> for SegmentedControl<'a, Message, T> {
-        type State = ();
-        type Event = Entity;
-
-        fn update(&self, _: &mut Self::State, event: Entity, _: &Renderer) -> Option<Message> {
-            Some((self.on_activate)(event))
-        }
-
-        fn view(&self, _: &Self::State) -> Element<'a, Self::Event> {
+        ) -> impl Widget<Message> + 'a {
             let labels = self.model.entries();
             let active = self.model.active();
             let last = labels.len().saturating_sub(1);
+            let fill = self.fill;
             labels
                 .into_iter()
                 .enumerate()
-                .map(|(index, (id, entry))| {
-                    button(text(entry.text()))
+                .map(move |(index, (id, entry))| {
+                    let button = button(text(entry.text()))
                         .on_press(*id)
                         .padding([6, 14])
                         .style(move |theme, status| {
@@ -462,18 +504,21 @@ pub mod segmented_control {
                                 index == 0,
                                 index == last,
                             )
-                        })
-                        .into()
+                        });
+                    if fill {
+                        button.width(iced::Fill)
+                    } else {
+                        button
+                    }
                 })
                 .apply(row)
                 .spacing(1)
-                .into()
-        }
-    }
-
-    impl<'a, Message: 'a, T> From<SegmentedControl<'a, Message, T>> for Element<'a, Message> {
-        fn from(control: SegmentedControl<'a, Message, T>) -> Self {
-            component(control)
+                .width(if fill {
+                    iced::Length::Fill
+                } else {
+                    iced::Length::Shrink
+                })
+                .map(f)
         }
     }
 }
@@ -487,8 +532,12 @@ pub mod text {
         text(content).size(28)
     }
 
-    pub fn title3<'a>(content: impl text::IntoFragment<'a>) -> Text<'a> {
+    pub fn title2<'a>(content: impl text::IntoFragment<'a>) -> Text<'a> {
         text(content).size(20)
+    }
+
+    pub fn title3<'a>(content: impl text::IntoFragment<'a>) -> Text<'a> {
+        text(content).size(18)
     }
 
     pub fn body<'a>(content: impl text::IntoFragment<'a>) -> Text<'a> {

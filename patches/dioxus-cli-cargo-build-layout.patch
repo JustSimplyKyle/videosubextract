@@ -1,0 +1,33 @@
+diff --git a/packages/cli/src/build/request.rs b/packages/cli/src/build/request.rs
+--- a/packages/cli/src/build/request.rs
++++ b/packages/cli/src/build/request.rs
+@@ -1276,6 +1276,29 @@ impl BuildRequest {
+             }
+         }
+ 
++        // Cargo 1.100 moved fingerprints to build/<package>/<unit>/fingerprint.
++        // Invalidate only the fingerprints, preserving incremental artifacts.
++        let build_dir = self.cargo_fingerprint_dir().with_file_name("build");
++        for package in std::fs::read_dir(build_dir).into_iter().flatten().flatten() {
++            let name = package.file_name();
++            let Some(name) = name.to_str() else {
++                continue;
++            };
++            if !bust.contains(name) && !bust.contains(&name.replace('-', "_")) {
++                continue;
++            }
++            for unit in std::fs::read_dir(package.path())
++                .into_iter()
++                .flatten()
++                .flatten()
++            {
++                let fingerprint = unit.path().join("fingerprint");
++                if fingerprint.is_dir() {
++                    std::fs::remove_dir_all(fingerprint)?;
++                }
++            }
++        }
++
+         let fingerprint_dir = self.cargo_fingerprint_dir();
+         for entry in std::fs::read_dir(&fingerprint_dir)
+             .into_iter()

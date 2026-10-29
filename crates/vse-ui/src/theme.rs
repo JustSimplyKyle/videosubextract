@@ -4,7 +4,69 @@ use cosmic_theme::{Component, Theme as CosmicTheme, palette::Srgba};
 use std::sync::LazyLock;
 
 pub type Theme = ::iced::Theme;
-static COSMIC: LazyLock<CosmicTheme> = LazyLock::new(CosmicTheme::dark_default);
+pub static COSMIC: LazyLock<CosmicTheme> = LazyLock::new(CosmicTheme::dark_default);
+
+/// A widget style with a border that can be customized.
+pub trait WithRadius: Sized {
+    /// Access the border to customize.
+    fn border_mut(&mut self) -> &mut Border;
+
+    /// Override the corner radius while preserving the rest of the style.
+    fn with_radius(mut self, radius: impl Into<::iced::border::Radius>) -> Self {
+        self.border_mut().radius = radius.into();
+        self
+    }
+}
+
+macro_rules! impl_with_radius {
+    ($($widget:ident),+ $(,)?) => {
+        $(impl WithRadius for ::iced::widget::$widget::Style {
+            fn border_mut(&mut self) -> &mut Border {
+                &mut self.border
+            }
+        })+
+    };
+}
+
+impl_with_radius!(
+    button,
+    checkbox,
+    container,
+    pick_list,
+    progress_bar,
+    text_editor,
+    text_input
+);
+
+/// Wrap a status-based style function with a corner-radius override.
+///
+/// The base style is evaluated for every status, preserving its colors and
+/// other properties. Accepts a uniform radius or an [`::iced::border::Radius`]
+/// with different values for each corner.
+///
+/// ```
+/// use vse_ui::{theme, widget};
+///
+/// let button = widget::button(widget::text("Find subtitles"))
+///     .on_press(())
+///     .style(theme::with_radius(theme::button::suggested, 4.0));
+/// ```
+///
+/// For styles without a status, such as containers, use [`WithRadius`] directly:
+///
+/// ```
+/// use vse_ui::{theme::{self, WithRadius}, widget};
+///
+/// let container: widget::Container<'_, widget::Text<'_>> = widget::container(widget::text("Content"))
+///     .style(|theme| theme::container::card(theme).with_radius(4.0));
+/// ```
+pub fn with_radius<T, Status, Style: WithRadius>(
+    style: impl Fn(&T, Status) -> Style,
+    radius: impl Into<::iced::border::Radius>,
+) -> impl Fn(&T, Status) -> Style {
+    let radius = radius.into();
+    move |theme, status| style(theme, status).with_radius(radius)
+}
 
 pub fn iced_theme() -> Theme {
     ::iced::Theme::custom(
@@ -19,10 +81,11 @@ pub fn iced_theme() -> Theme {
         },
     )
 }
-fn color(value: Srgba) -> Color {
+pub fn color(value: Srgba) -> Color {
     Color::from_rgba(value.red, value.green, value.blue, value.alpha)
 }
-pub(crate) fn icon_color() -> Color {
+/// The semantic foreground color for symbolic icons.
+pub fn icon_color() -> Color {
     color(COSMIC.icon_button.on)
 }
 fn radius(value: [f32; 4]) -> ::iced::border::Radius {
@@ -145,7 +208,7 @@ pub fn segmented_button(
     style
 }
 
-fn container_style(
+pub fn container_style(
     container: &cosmic_theme::Container,
     radii: [f32; 4],
 ) -> ::iced::widget::container::Style {
@@ -161,6 +224,18 @@ fn container_style(
 }
 pub mod container {
     use super::*;
+    /// libcosmic's tooltip surface and corner radius.
+    pub fn tooltip(_: &Theme) -> ::iced::widget::container::Style {
+        ::iced::widget::container::Style {
+            background: Some(Background::Color(color(COSMIC.palette.neutral_2))),
+            border: Border {
+                radius: radius(COSMIC.corner_radii.radius_l),
+                ..Border::default()
+            },
+            ..Default::default()
+        }
+    }
+
     pub fn navigation(_: &Theme) -> ::iced::widget::container::Style {
         let surface = COSMIC.primary(false);
         container_style(surface, COSMIC.corner_radii.radius_s)
@@ -182,6 +257,10 @@ pub mod container {
 
     pub fn secondary(_: &Theme) -> ::iced::widget::container::Style {
         container_style(COSMIC.secondary(false), COSMIC.corner_radii.radius_s)
+    }
+
+    pub fn settings_sidebar(_: &Theme) -> ::iced::widget::container::Style {
+        container_style(COSMIC.primary(false), COSMIC.corner_radii.radius_l)
     }
 
     pub fn list(_: &Theme) -> ::iced::widget::container::Style {
@@ -223,6 +302,162 @@ pub mod text {
     pub fn accent(_: &Theme) -> ::iced::widget::text::Style {
         ::iced::widget::text::Style {
             color: Some(color(COSMIC.accent_text_color())),
+            selection: None,
+        }
+    }
+
+    pub fn settings_label(_: &Theme) -> ::iced::widget::text::Style {
+        ::iced::widget::text::Style {
+            color: Some(color(COSMIC.palette.neutral_8)),
+            selection: None,
+        }
+    }
+}
+
+pub mod rule {
+    use super::*;
+
+    pub fn settings(_: &Theme) -> ::iced::widget::rule::Style {
+        ::iced::widget::rule::Style {
+            color: color(COSMIC.primary_container_divider()),
+            radius: 0.0.into(),
+            fill_mode: ::iced::widget::rule::FillMode::Full,
+            snap: true,
+        }
+    }
+}
+
+pub mod text_input {
+    use super::*;
+
+    pub fn standard(
+        _: &Theme,
+        status: ::iced::widget::text_input::Status,
+    ) -> ::iced::widget::text_input::Style {
+        use ::iced::widget::text_input::{Status, Style};
+
+        let field = &COSMIC.background(false).component;
+        let border_color = match status {
+            Status::Active => field.divider,
+            Status::Hovered => field.on,
+            Status::Focused { .. } => COSMIC.accent.base,
+            Status::Disabled => field.disabled_border,
+        };
+
+        Style {
+            background: Background::Color(color(match status {
+                Status::Disabled => field.disabled,
+                _ => COSMIC.bg_component_color(),
+            })),
+            border: Border {
+                radius: radius(COSMIC.corner_radii.radius_s),
+                width: 1.0,
+                color: color(border_color),
+            },
+            placeholder: color(COSMIC.palette.neutral_7),
+            value: color(match status {
+                Status::Disabled => field.on_disabled,
+                _ => field.on,
+            }),
+            selection: color(COSMIC.accent.base),
+        }
+    }
+}
+
+pub mod pick_list {
+    use super::*;
+
+    pub fn standard(
+        _: &Theme,
+        status: ::iced::widget::pick_list::Status,
+    ) -> ::iced::widget::pick_list::Style {
+        use ::iced::widget::pick_list::{Status, Style};
+
+        let field = &COSMIC.background(false).component;
+        let active = Style {
+            text_color: color(field.on),
+            placeholder_color: color(COSMIC.palette.neutral_7),
+            handle_color: color(field.on),
+            background: Background::Color(color(COSMIC.bg_component_color())),
+            border: Border {
+                radius: radius(COSMIC.corner_radii.radius_s),
+                width: 1.0,
+                color: color(field.divider),
+            },
+        };
+
+        match status {
+            Status::Active => active,
+            Status::Hovered | Status::Opened { .. } => Style {
+                border: Border {
+                    color: color(COSMIC.accent.base),
+                    ..active.border
+                },
+                ..active
+            },
+            Status::Disabled => Style {
+                text_color: color(field.on_disabled),
+                background: Background::Color(color(field.disabled)),
+                border: Border {
+                    color: color(field.disabled_border),
+                    ..active.border
+                },
+                ..active
+            },
+        }
+    }
+}
+
+pub mod toggler {
+    use super::*;
+
+    pub fn standard(
+        _: &Theme,
+        status: ::iced::widget::toggler::Status,
+    ) -> ::iced::widget::toggler::Style {
+        use ::iced::widget::toggler::{Status, Style};
+
+        let (is_toggled, hovered, disabled) = match status {
+            Status::Active { is_toggled } => (is_toggled, false, false),
+            Status::Hovered { is_toggled } => (is_toggled, true, false),
+            Status::Disabled { is_toggled } => (is_toggled, false, true),
+        };
+        let surface = COSMIC.primary(false);
+        let component = if disabled {
+            &surface.component
+        } else if is_toggled {
+            &COSMIC.accent
+        } else {
+            &surface.component
+        };
+        let background = if disabled {
+            surface.component.disabled
+        } else if hovered {
+            component.hover
+        } else if !is_toggled {
+            surface.small_widget
+        } else {
+            component.base
+        };
+
+        Style {
+            background: Background::Color(color(background)),
+            background_border_width: 1.0,
+            background_border_color: color(if disabled {
+                surface.component.disabled_border
+            } else {
+                component.border
+            }),
+            foreground: Background::Color(color(if disabled {
+                component.on_disabled
+            } else {
+                component.on
+            })),
+            foreground_border_width: 0.0,
+            foreground_border_color: Color::TRANSPARENT,
+            text_color: None,
+            border_radius: None,
+            padding_ratio: 0.15,
         }
     }
 }

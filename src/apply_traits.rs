@@ -1,5 +1,10 @@
 pub trait ApplyConditional: Sized {
     #[must_use]
+    fn apply_if(self, flag: bool, f: impl FnOnce(Self) -> Self) -> Self {
+        if flag { f(self) } else { self }
+    }
+
+    #[must_use]
     fn apply_if_some<T>(self, value: Option<T>, f: impl FnOnce(Self, T) -> Self) -> Self {
         match value {
             Some(value) => f(self, value),

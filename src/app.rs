@@ -4,11 +4,10 @@ pub mod post_production;
 pub mod prepare;
 pub mod selection_canvas;
 pub mod subtitle;
+pub mod toast;
 pub mod video_player_widget;
 
-use crate::config::{Config, Language, ProcessingResolution, SubtitleDetector};
-use crate::native_video_sub_finder::NativeSearchParams;
-use crate::ocr::OcrModel;
+use crate::config::{Config, Language};
 pub(crate) use crate::video_player::{
     self, InnerPlayer, VideoPlayerController, create_video_player,
 };
@@ -16,13 +15,15 @@ use crate::{fl, i18n};
 use async_channel::{Receiver, Sender};
 use cosmic_config::{self, CosmicConfigEntry};
 use futures::{SinkExt, StreamExt};
+use iced::alignment::Vertical;
 use iced::window::{self, Action};
-pub(crate) use iced::{Alignment, Element, Length, Subscription, Task};
+pub(crate) use iced::{Alignment, Length, Subscription, Task, Widget};
 use std::sync::LazyLock;
 use std::{sync::Arc, time::Duration};
-use vse_ui::shell;
 pub(crate) use vse_ui::widget;
+use vse_ui::widget::AnimatedDropdown;
 pub(crate) use vse_ui::widget::icon;
+use vse_ui::{Apply, icon_button, shell, theme};
 
 trait Composition {
     type Message: 'static;
@@ -37,7 +38,7 @@ trait Composition {
     where
         Self: 'a;
 
-    fn view<'a>(&'a self, context: Self::ViewContext<'a>) -> Element<'a, Self::Message>;
+    fn view<'a>(&'a self, context: Self::ViewContext<'a>) -> impl Widget<Self::Message> + 'a;
 
     fn update(&mut self, message: Self::Message, context: Self::UpdateContext<'_>) -> Self::Event;
 
@@ -92,10 +93,10 @@ pub static WARNING_CHANNEL: LazyLock<(Sender<String>, Receiver<String>)> =
 pub struct AppModel {
     active_page: Page,
     navigation_open: bool,
-    dialog_page: Option<DialogPage>,
-    next_toast_id: u64,
-    toasts: Vec<(u64, String)>,
-    config_handler: cosmic_config::Config,
+    dialog_page: DialogPage,
+    dialog_open: bool,
+    toasts: toast::Toasts,
+    config_handler: Arc<cosmic_config::Config>,
     config: Config,
     video_frame_rate: f64,
     prepare: prepare::Model,
@@ -104,20 +105,14 @@ pub struct AppModel {
     errors: Vec<Arc<eyre::Report>>,
 }
 
-struct ToastManager {}
-
 #[derive(Debug, Clone)]
 pub enum Message {
     SelectPage(Page),
-    SelectDialogPage(Option<DialogPage>),
+    ShowDialog(DialogPage),
+    CloseDialog,
     ToggleNavigation,
     PushToast(String),
-    CloseToast(u64),
-    SetOcrModel(OcrModel),
-    SetSubtitleDetector(SubtitleDetector),
-    SetNativeSearchParams(NativeSearchParams),
-    SetPostOcrProcessing(bool),
-    SetProcessingResolution(ProcessingResolution),
+    CloseToast(toast::ToastId),
     SetLanguage(Language),
     Prepare(prepare::Message),
     Subtitle(subtitle::Message),
@@ -135,6 +130,7 @@ pub enum Page {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DialogPage {
     Settings,
+    PrepareSettings,
     Error,
 }
 
@@ -156,254 +152,27 @@ impl Page {
 }
 
 impl AppModel {
-    fn settings_view(&self) -> Element<'_, Message> {
-        let ocr_models = OcrModel::all(&self.config);
-        let selected_ocr = ocr_models
-            .iter()
-            .position(|model| model == &self.config.ocr_model);
+    fn settings_view(&self) -> impl Widget<Message> + '_ {
         let selected_language = Language::ALL
             .iter()
             .position(|value| value == &self.config.language);
-        let selected_detector = SubtitleDetector::ALL
-            .iter()
-            .position(|value| value == &self.config.subtitle_detector);
-        let selected_resolution = ProcessingResolution::ALL
-            .iter()
-            .position(|value| value == &self.config.processing_resolution);
-        let mut sections = vec![
+
+        widget::scrollable(widget::settings::view_column(vec![
             widget::settings::section()
                 .title(fl!("internationalization"))
                 .add(widget::settings::item(
                     fl!("language"),
                     widget::dropdown(Language::labels(), selected_language, |index| {
                         Message::SetLanguage(Language::ALL[index])
-                    }),
+                    })
+                    .apply(AnimatedDropdown::from),
                 ))
-                .into(),
-            widget::settings::section()
-                .title(fl!("text-recognition"))
-                .add(widget::settings::item(
-                    fl!("ocr-model"),
-                    widget::dropdown(OcrModel::labels(&self.config), selected_ocr, move |index| {
-                        Message::SetOcrModel(ocr_models[index].clone())
-                    }),
-                ))
-                .add(
-                    widget::settings::togglable(fl!("post-ocr-result-processing"))
-                        .description(fl!("merge-adjacent-detections"))
-                        .toggler(
-                            self.config.post_ocr_processing,
-                            Message::SetPostOcrProcessing,
-                        ),
-                )
-                .into(),
-            widget::settings::section()
-                .title(fl!("subtitle-detection"))
-                .add(widget::settings::item(
-                    fl!("processing-resolution"),
-                    widget::dropdown(
-                        ProcessingResolution::labels(),
-                        selected_resolution,
-                        |index| Message::SetProcessingResolution(ProcessingResolution::ALL[index]),
-                    ),
-                ))
-                .add(widget::settings::item(
-                    fl!("implementation"),
-                    widget::dropdown(SubtitleDetector::labels(), selected_detector, |index| {
-                        Message::SetSubtitleDetector(SubtitleDetector::ALL[index])
-                    }),
-                ))
-                .into(),
-        ];
-
-        if self.config.subtitle_detector == SubtitleDetector::OriginalCpp {
-            sections.push(self.original_cpp_settings());
-        }
-
-        widget::scrollable(widget::settings::view_column(sections)).into()
+                .boxed(),
+        ]))
+        .height(Length::Fill)
     }
 
-    fn original_cpp_settings(&self) -> Element<'_, Message> {
-        let native = self.config.native_search_params;
-
-        widget::settings::section()
-            .title(fl!("original-cpp-parameters"))
-            .add(
-                widget::settings::togglable(fl!("ocr-image-cleanup"))
-                    .description(fl!("run-find-text-lines"))
-                    .toggler(native.apply_ocr_image_cleanup, move |enabled| {
-                        Message::SetNativeSearchParams(NativeSearchParams {
-                            apply_ocr_image_cleanup: enabled,
-                            ..native
-                        })
-                    }),
-            )
-            .add(widget::settings::item(
-                fl!("worker-threads"),
-                widget::spin_button(
-                    native.threads.to_string(),
-                    fl!("worker-threads"),
-                    native.threads,
-                    1,
-                    1,
-                    256,
-                    move |threads| {
-                        Message::SetNativeSearchParams(NativeSearchParams { threads, ..native })
-                    },
-                ),
-            ))
-            .add(widget::settings::item(
-                fl!("minimum-subtitle-frames"),
-                widget::spin_button(
-                    native.min_subtitle_frames.to_string(),
-                    fl!("minimum-subtitle-frames"),
-                    native.min_subtitle_frames,
-                    1,
-                    1,
-                    1000,
-                    move |min_subtitle_frames| {
-                        Message::SetNativeSearchParams(NativeSearchParams {
-                            min_subtitle_frames,
-                            ..native
-                        })
-                    },
-                ),
-            ))
-            .add(widget::settings::item(
-                fl!("text-percentage"),
-                widget::spin_button(
-                    format!("{:.3}", native.text_percent),
-                    fl!("text-percentage"),
-                    native.text_percent,
-                    0.01,
-                    0.0,
-                    1.0,
-                    move |text_percent| {
-                        Message::SetNativeSearchParams(NativeSearchParams {
-                            text_percent,
-                            ..native
-                        })
-                    },
-                ),
-            ))
-            .add(widget::settings::item(
-                fl!("minimum-text-length"),
-                widget::spin_button(
-                    format!("{:.3}", native.min_text_length),
-                    fl!("minimum-text-length"),
-                    native.min_text_length,
-                    0.001,
-                    0.0,
-                    1.0,
-                    move |min_text_length| {
-                        Message::SetNativeSearchParams(NativeSearchParams {
-                            min_text_length,
-                            ..native
-                        })
-                    },
-                ),
-            ))
-            .add(widget::settings::item(
-                fl!("vertical-edge-line-error"),
-                widget::spin_button(
-                    format!("{:.2}", native.vertical_edges_line_error),
-                    fl!("vertical-edge-line-error"),
-                    native.vertical_edges_line_error,
-                    0.05,
-                    0.0,
-                    1.0,
-                    move |vertical_edges_line_error| {
-                        Message::SetNativeSearchParams(NativeSearchParams {
-                            vertical_edges_line_error,
-                            ..native
-                        })
-                    },
-                ),
-            ))
-            .add(widget::settings::item(
-                fl!("ila-points-line-error"),
-                widget::spin_button(
-                    format!("{:.2}", native.ila_points_line_error),
-                    fl!("ila-points-line-error"),
-                    native.ila_points_line_error,
-                    0.05,
-                    0.0,
-                    1.0,
-                    move |ila_points_line_error| {
-                        Message::SetNativeSearchParams(NativeSearchParams {
-                            ila_points_line_error,
-                            ..native
-                        })
-                    },
-                ),
-            ))
-            .add(widget::settings::item(
-                fl!("maximum-frame-gap-down"),
-                widget::spin_button(
-                    native.max_frame_gap_down.to_string(),
-                    fl!("maximum-frame-gap-down"),
-                    native.max_frame_gap_down,
-                    1,
-                    0,
-                    1000,
-                    move |max_frame_gap_down| {
-                        Message::SetNativeSearchParams(NativeSearchParams {
-                            max_frame_gap_down,
-                            ..native
-                        })
-                    },
-                ),
-            ))
-            .add(widget::settings::item(
-                fl!("maximum-frame-gap-up"),
-                widget::spin_button(
-                    native.max_frame_gap_up.to_string(),
-                    fl!("maximum-frame-gap-up"),
-                    native.max_frame_gap_up,
-                    1,
-                    0,
-                    1000,
-                    move |max_frame_gap_up| {
-                        Message::SetNativeSearchParams(NativeSearchParams {
-                            max_frame_gap_up,
-                            ..native
-                        })
-                    },
-                ),
-            ))
-            .add(widget::settings::togglable(fl!("use-isa-images")).toggler(
-                native.use_isa_images,
-                move |use_isa_images| {
-                    Message::SetNativeSearchParams(NativeSearchParams {
-                        use_isa_images,
-                        ..native
-                    })
-                },
-            ))
-            .add(widget::settings::togglable(fl!("use-ila-images")).toggler(
-                native.use_ila_images,
-                move |use_ila_images| {
-                    Message::SetNativeSearchParams(NativeSearchParams {
-                        use_ila_images,
-                        ..native
-                    })
-                },
-            ))
-            .add(
-                widget::settings::togglable(fl!("replace-isa-with-filtered-image")).toggler(
-                    native.replace_isa_with_filtered,
-                    move |enabled| {
-                        Message::SetNativeSearchParams(NativeSearchParams {
-                            replace_isa_with_filtered: enabled,
-                            ..native
-                        })
-                    },
-                ),
-            )
-            .into()
-    }
-
-    fn error_view(&self) -> Element<'_, Message> {
+    fn error_view(&self) -> impl Widget<Message> + '_ {
         use std::fmt::Write;
 
         let errors = self
@@ -423,7 +192,6 @@ impl AppModel {
                 .style(vse_ui::theme::container::card),
         )
         .height(Length::Fill)
-        .into()
     }
 
     pub fn boot() -> (Self, Task<Message>) {
@@ -431,17 +199,18 @@ impl AppModel {
             .expect("failed to load configuration");
         let config = Config::get_entry(&config_handler).unwrap_or_else(|(_, config)| config);
         i18n::select(config.language.code()).ok();
+        let prepare = prepare::Model::new(config.processing_resolution);
         (
             Self {
                 active_page: Page::Prepare,
                 navigation_open: true,
-                dialog_page: None,
-                next_toast_id: 0,
-                toasts: Vec::new(),
-                config_handler,
+                dialog_page: DialogPage::Settings,
+                dialog_open: false,
+                toasts: toast::Toasts::default(),
+                config_handler: Arc::new(config_handler),
                 config,
                 video_frame_rate: 24.0,
-                prepare: prepare::Model::default(),
+                prepare,
                 subtitle: subtitle::Model::default(),
                 post_production: post_production::Model::default(),
                 errors: Vec::new(),
@@ -459,6 +228,9 @@ impl AppModel {
     }
     pub fn subscription(&self) -> Subscription<Message> {
         let mut subscriptions = vec![
+            self.prepare
+                .settings_subscription(&self.config_handler)
+                .map(Message::Prepare),
             self.subtitle
                 .subscription(self.video_frame_rate)
                 .map(Message::Subtitle),
@@ -486,7 +258,7 @@ impl AppModel {
                 2,
                 async move |mut output: futures::channel::mpsc::Sender<Message>| {
                     while let Ok(x) = WARNING_CHANNEL.1.recv().await {
-                        output.send(Message::PushToast(x));
+                        output.send(Message::PushToast(x)).await.ok();
                     }
                 },
             )
@@ -495,13 +267,11 @@ impl AppModel {
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
-        // let s = iced::runtime::window::screenshot(id);
-        // window::latest().::screenshotceenshot
         match message {
             Message::SelectPage(page) => {
                 if page == Page::PostProduction {
                     self.post_production.sync(
-                        self.prepare.video_player.path(),
+                        self.prepare.video_path(),
                         self.subtitle.results(),
                         subtitle::ResultsChanged::Full,
                         &self.config,
@@ -514,54 +284,25 @@ impl AppModel {
                 self.navigation_open = !self.navigation_open;
                 Task::none()
             }
-            Message::SelectDialogPage(page) => {
+            Message::ShowDialog(page) => {
                 self.dialog_page = page;
+                self.dialog_open = true;
                 Task::none()
             }
-            Message::CloseToast(remove_id) => {
-                self.toasts.retain(|(toast_id, _)| *toast_id != remove_id);
+            Message::CloseDialog => {
+                self.dialog_open = false;
+                Task::none()
+            }
+            Message::CloseToast(id) => {
+                self.toasts.close(id);
                 Task::none()
             }
             Message::SetLanguage(value) => {
                 let _ = i18n::select(value.code());
                 let _ = self.config.set_language(&self.config_handler, value);
-                // self.post_production.refresh_language();
                 Task::none()
             }
-            Message::SetOcrModel(value) => {
-                let _ = self.config.set_ocr_model(&self.config_handler, value);
-                Task::none()
-            }
-            Message::SetSubtitleDetector(value) => {
-                let _ = self
-                    .config
-                    .set_subtitle_detector(&self.config_handler, value);
-                Task::none()
-            }
-            Message::SetNativeSearchParams(value) => {
-                match self
-                    .config
-                    .set_native_search_params(&self.config_handler, value)
-                {
-                    Ok(_) => Task::none(),
-                    Err(error) => Task::done(Message::ErrorReported(Arc::new(eyre::eyre!(
-                        "failed to save original C++ parameters: {error}"
-                    )))),
-                }
-            }
-            Message::SetPostOcrProcessing(value) => {
-                let _ = self
-                    .config
-                    .set_post_ocr_processing(&self.config_handler, value);
-                Task::none()
-            }
-            Message::SetProcessingResolution(value) => {
-                let _ = self
-                    .config
-                    .set_processing_resolution(&self.config_handler, value);
-                Task::none()
-            }
-            Message::Prepare(message) => match self.prepare.update(message, ()) {
+            Message::Prepare(message) => match self.prepare.update(message, &mut self.config) {
                 prepare::Event::StartSubtitleSearch(path, selection) => {
                     self.subtitle.start_search(path, selection, &self.config);
                     self.active_page = Page::Subtitle;
@@ -569,7 +310,15 @@ impl AppModel {
                 }
                 prepare::Event::Run(task) => task.map(Message::Prepare),
                 prepare::Event::CopySelectionDimensions(value) => {
-                    iced::clipboard::write(value).discard()
+                    let copy = iced::clipboard::write(value.clone());
+                    let update =
+                        self.update(Message::PushToast(format!("{value} copied to clipboard")));
+                    Task::batch([copy.discard(), update])
+                }
+                prepare::Event::OpenSettings => {
+                    self.dialog_page = DialogPage::PrepareSettings;
+                    self.dialog_open = true;
+                    Task::none()
                 }
                 prepare::Event::Error(error) => Task::done(Message::ErrorReported(Arc::new(error))),
                 prepare::Event::None => Task::none(),
@@ -577,7 +326,7 @@ impl AppModel {
             Message::Subtitle(message) => match self.subtitle.update(message, &self.config) {
                 subtitle::Event::GoToPostProduction => {
                     self.post_production.sync(
-                        self.prepare.video_player.path(),
+                        self.prepare.video_path(),
                         self.subtitle.results(),
                         subtitle::ResultsChanged::Full,
                         &self.config,
@@ -587,7 +336,7 @@ impl AppModel {
                 }
                 subtitle::Event::SyncWithPostProduction(changed) => {
                     self.post_production.sync(
-                        self.prepare.video_player.path(),
+                        self.prepare.video_path(),
                         self.subtitle.results(),
                         changed,
                         &self.config,
@@ -604,10 +353,7 @@ impl AppModel {
                 match self.post_production.update(message, &self.config) {
                     post_production::Event::Run(task) => task.map(Message::PostProduction),
                     post_production::Event::Toast(message) => {
-                        let id = self.next_toast_id;
-                        self.next_toast_id = self.next_toast_id.wrapping_add(1);
-                        self.toasts.push((id, message));
-                        Task::none()
+                        self.toasts.push(message, Message::CloseToast)
                     }
                     post_production::Event::Error(error) => {
                         Task::done(Message::ErrorReported(Arc::new(error)))
@@ -617,38 +363,41 @@ impl AppModel {
             }
             Message::ErrorReported(error) => {
                 self.errors.push(error);
-                self.dialog_page = Some(DialogPage::Error);
+                self.dialog_page = DialogPage::Error;
+                self.dialog_open = true;
                 Task::none()
             }
-            Message::PushToast(msg) => {
-                let id = self.next_toast_id;
-                self.next_toast_id = self.next_toast_id.wrapping_add(1);
-                self.toasts.push((id, msg));
-                Task::none()
-            }
+            Message::PushToast(msg) => self.toasts.push(msg, Message::CloseToast),
         }
     }
 
-    pub fn view(&self) -> Element<'_, Message> {
+    pub fn view(&self) -> impl Widget<Message> + '_ {
         let content = match self.active_page {
-            Page::Prepare => self.prepare.view(()).map(Message::Prepare),
+            Page::Prepare => self
+                .prepare
+                .view(&self.config)
+                .map(Message::Prepare)
+                .boxed(),
             Page::Subtitle => self
                 .subtitle
                 .view(
                     self.prepare
                         .video_player
-                        .controller()
-                        .map(|controller| controller.inner.info.video_time)
-                        .unwrap_or_default(),
+                        .as_ref()
+                        .map_or(Duration::ZERO, |player| {
+                            player.controller().inner.info.video_time
+                        }),
                 )
-                .map(Message::Subtitle),
+                .map(Message::Subtitle)
+                .boxed(),
             Page::PostProduction => self
                 .post_production
                 .view(post_production::ViewArgs {
                     subtitles: &self.subtitle,
-                    video_path: self.prepare.video_player.path(),
+                    video_path: self.prepare.video_path(),
                 })
-                .map(Message::PostProduction),
+                .map(Message::PostProduction)
+                .boxed(),
         };
         let active = self.active_page;
         let navigation = if self.navigation_open {
@@ -672,27 +421,54 @@ impl AppModel {
         } else {
             Vec::new()
         };
-        let dialog = self.dialog_page.map(|page| {
-            let (title, content) = match page {
-                DialogPage::Settings => (fl!("settings"), self.settings_view()),
-                DialogPage::Error => (fl!("errors"), self.error_view()),
+        let dialog = widget::dialog(self.dialog_open, || {
+            let (title, content) = match self.dialog_page {
+                DialogPage::Settings => (fl!("settings"), self.settings_view().boxed()),
+                DialogPage::PrepareSettings => (
+                    fl!("settings"),
+                    self.prepare
+                        .settings_view(&self.config)
+                        .map(Message::Prepare)
+                        .boxed(),
+                ),
+                DialogPage::Error => (fl!("errors"), self.error_view().boxed()),
             };
 
             vse_ui::components::dialog(
                 title,
                 content,
-                widget::button(icon::from_name("window-close-symbolic"))
-                    .padding(4)
+                icon_button!("window-close-symbolic")
+                    .padding(theme::spacing().space_xxs)
                     .style(vse_ui::theme::button::icon)
-                    .on_press(Message::SelectDialogPage(None)),
+                    .on_press(Message::CloseDialog),
             )
         });
 
-        shell::Shell::new(active.label(), active.details(), content)
+        let header = widget::column![
+            widget::text(active.label()).size(36),
+            widget::text(active.details()).size(14),
+        ]
+        .spacing(theme::spacing().space_s);
+
+        let header = widget::row![
+            header,
+            widget::space().width(Length::Fill),
+            (self.active_page == Page::Prepare)
+                .then(|| self.prepare.title_actions().map(Message::Prepare)),
+        ]
+        .align_y(Vertical::Center);
+
+        let page = widget::column! {
+            header,
+            content,
+        }
+        .spacing(theme::spacing().space_m);
+
+        shell::Shell::new(page)
             .navigation(navigation)
             .header_controls(
                 Message::ToggleNavigation,
-                Message::SelectDialogPage(Some(DialogPage::Settings)),
+                Message::ShowDialog(DialogPage::Settings),
             )
             .toasts(
                 self.toasts
@@ -701,6 +477,5 @@ impl AppModel {
                     .collect(),
             )
             .dialog(dialog)
-            .into()
     }
 }
