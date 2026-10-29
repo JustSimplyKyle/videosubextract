@@ -1,19 +1,21 @@
 use eyre::Context;
 use iced::alignment::Vertical;
 use rfd::AsyncFileDialog;
-use std::{convert::Infallible, ops::FromResidual, path::PathBuf, time::Duration};
+use std::{path::PathBuf, time::Duration};
 
 use crate::{
-    app::{Composition, ReportLike, format_duration, selection_canvas, video_player_widget},
+    app::{
+        Composition, ReportLike, format_duration, selection_canvas, video_player_widget,
+        video_player_widget::{LoadingMessage, Player, PlayerMessage},
+    },
     extraction::srt_parser::Subtitles,
     fl, impl_report_residual,
 };
 
-use cosmic::iced::widget::Stack;
-use iced::{Element, Length, Subscription, Task, alignment::Horizontal};
+use iced::{Length, Subscription, Task, Widget, alignment::Horizontal};
 use vse_ui::{
-    self as cosmic, Apply,
-    widget::{self, icon},
+    self as cosmic, Apply, icon_button,
+    widget::{self, AutoWidget, IntoWidget, icon},
 };
 
 // Several different modes can be used to find chapters in a video
@@ -29,7 +31,6 @@ use vse_ui::{
 #[derive(Default)]
 pub struct Model {
     video_player: video_player_widget::Model,
-    canvas_generation: u32,
     current_subtitles: Option<Subtitles>,
 }
 
@@ -51,15 +52,12 @@ impl ReportLike for Event {
     fn err(e: eyre::Report) -> Self {
         Self::Error(e)
     }
+    fn none() -> Self {
+        Self::None
+    }
 }
 
 impl_report_residual!(Event);
-
-impl FromResidual<Option<Infallible>> for Event {
-    fn from_residual(residual: Option<Infallible>) -> Self {
-        residual.map_or_else(|| Self::None, |never| match never {})
-    }
-}
 impl Model {
     pub fn update(&mut self, message: Message) -> Event {
         match message {
@@ -69,8 +67,8 @@ impl Model {
                 video_player_widget::Event::None => Event::None,
             },
             Message::Canvas(message) => match message {
-                selection_canvas::Message::CanvasSize(rectangle) => Event::None,
-                selection_canvas::Message::ScreenshotRegion(rectangle) => Event::None,
+                selection_canvas::Message::CanvasSize(_rectangle) => Event::None,
+                selection_canvas::Message::ScreenshotRegion(_rectangle) => Event::None,
             },
             Message::PickSrt => Task::perform(
                 async move {
@@ -96,73 +94,91 @@ impl Model {
         self.video_player.subscription(()).map(Message::VideoPlayer)
     }
 
-    fn canvas(&self) -> Element<'_, Message> {
-        widget::canvas(selection_canvas::SelectionProgram {
-            reset_generation: self.canvas_generation,
-        })
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .apply(Element::from)
-        .map(Message::Canvas)
+    pub fn view(&self) -> ChapterFinderView<'_> {
+        AutoWidget::from_builder(ChapterFinderViewBuilder { model: self })
+    }
+}
+
+const fn playback_map(message: PlayerMessage) -> Message {
+    Message::VideoPlayer(video_player_widget::Message::Playback(message))
+}
+
+pub type ChapterFinderView<'a> = AutoWidget<ChapterFinderViewBuilder<'a>>;
+
+#[derive(Clone, Copy)]
+pub struct ChapterFinderViewBuilder<'a> {
+    model: &'a Model,
+}
+
+impl<'a> ChapterFinderViewBuilder<'a> {
+    fn canvas() -> impl Widget<Message> + 'a {
+        widget::canvas(selection_canvas::SelectionProgram::default())
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .map(Message::Canvas)
     }
 
-    fn video_preview(&self) -> Element<'_, Message> {
-        use video_player_widget::Message as VideoMessage;
-
-        let video = &self.video_player;
-
-        let image = widget::image(video.frame_handle())
-            .content_fit(iced::ContentFit::Contain)
-            .width(Length::Fill)
-            .height(Length::Shrink);
-
-        let image = Stack::new().push(image).push(self.canvas());
-
-        let load_video = widget::button(widget::text(if video.path().is_none() {
-            fl!("load-video")
-        } else {
+    fn load_video(self) -> impl Widget<Message> + 'a {
+        let has_video = self.model.video_player.is_some();
+        widget::button(widget::text(if has_video {
             fl!("change-video")
-        }))
-        .on_press(VideoMessage::PickVideo.apply(Message::VideoPlayer));
-        let load_video = if video.path().is_none() {
-            load_video.style(cosmic::theme::button::suggested)
         } else {
-            load_video
-        };
-        let backward = widget::button(icon::from_name("media-seek-backward-symbolic"))
-            .on_press(
-                VideoMessage::SeekBackward(Duration::from_secs(5)).apply(Message::VideoPlayer),
-            )
+            fl!("load-video")
+        }))
+        .on_press(Message::VideoPlayer(video_player_widget::Message::Loading(
+            LoadingMessage::PickVideo,
+        )))
+        .apply(|button| {
+            if has_video {
+                button
+            } else {
+                button.style(cosmic::theme::button::suggested)
+            }
+        })
+    }
+
+    fn video_preview(player: &'a Player) -> impl Widget<Message> + 'a {
+        let image = player.image(0.).map(playback_map);
+        widget::stack![image, Self::canvas()]
+    }
+
+    fn video_controls(player: &'a Player) -> impl Widget<Message> + 'a {
+        let seek_duration = Duration::from_secs(5);
+        let backward = icon_button!("media-seek-backward-symbolic")
+            .on_press(playback_map(PlayerMessage::SeekBackward(seek_duration)))
             .style(cosmic::theme::button::nav_toggle);
-        let forward = widget::button(icon::from_name("media-seek-forward-symbolic"))
-            .on_press(VideoMessage::SeekForward(Duration::from_secs(5)).apply(Message::VideoPlayer))
+        let forward = icon_button!("media-seek-forward-symbolic")
+            .on_press(playback_map(PlayerMessage::SeekForward(seek_duration)))
             .style(cosmic::theme::button::nav_toggle);
-        let slider = video.controller().as_ref().map(|controller| {
-            widget::slider(
-                0.0..=controller.inner.info.video_time.as_secs_f64(),
-                video.current_time().as_secs_f64(),
-                |seconds| {
-                    VideoMessage::SeekAbsolute(Duration::from_secs_f64(seconds))
-                        .apply(Message::VideoPlayer)
-                },
-            )
-        });
-        let current_time = widget::text(format_duration(video.current_time()))
+        let current_time = widget::text(format_duration(player.current_time()))
             .width(Length::Fill)
             .align_x(Horizontal::Right);
 
+        widget::row![backward, forward, current_time]
+            .spacing(cosmic::theme::spacing().space_s)
+            .align_y(Vertical::Center)
+    }
+}
+
+impl<'a> IntoWidget for ChapterFinderViewBuilder<'a> {
+    type Message = Message;
+    type Theme = iced::Theme;
+    type Renderer = iced::Renderer;
+    type Widget = impl Widget<Message> + 'a;
+
+    fn into_widget(self) -> Self::Widget {
+        let player = self.model.video_player.as_ref();
+        let preview = player.map(Self::video_preview);
+        let slider = player.map(|player| player.slider().map(playback_map));
+        let controls = player.map(Self::video_controls);
+
         widget::column![
-            image,
+            preview,
             slider,
-            widget::row![load_video, backward, forward, current_time]
+            widget::row![self.load_video(), controls]
                 .spacing(cosmic::theme::spacing().space_s)
                 .align_y(Vertical::Center),
         ]
         .spacing(cosmic::theme::spacing().space_s)
-        .into()
-    }
-
-    pub fn view(&self) -> Element<'_, Message> {
-        self.video_preview()
     }
 }

@@ -48,13 +48,13 @@ impl ChapterWriter {
         })?;
 
         command
-            .input(input.as_ref().to_string_lossy())
-            .input(f.to_string_lossy())
+            .input(input.as_ref())
+            .input(&f)
             .codec_video("copy")
             .codec_audio("copy")
             .codec_subtitle("copy")
             .args(["-map_metadata", "0"]) // copy the existing metadata information
-            .output(output.as_ref().to_string_lossy());
+            .output(output.as_ref());
 
         Ok(command)
     }
