@@ -53,6 +53,15 @@ macro_rules! icon_button {
     };
 }
 
+pub fn scrollable<'a, Message, W, Theme>(
+    content: W,
+) -> iced::widget::Scrollable<'a, Message, W, Theme>
+where
+    Theme: scrollable::Catalog + 'a,
+{
+    iced::widget::scrollable(content).spacing(crate::theme::spacing().space_xs)
+}
+
 /// Creates a text input using the COSMIC settings-control appearance.
 pub fn text_input<'a, Message: Clone>(
     placeholder: impl iced::widget::text::IntoFragment<'a>,

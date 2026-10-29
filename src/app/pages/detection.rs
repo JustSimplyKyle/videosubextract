@@ -914,7 +914,6 @@ impl Model {
             config,
         )
         .apply(widget::container)
-        .padding(iced::Padding::ZERO.right(20))
         .height(Length::Fill)
         .apply(widget::scrollable)
         .on_scroll(DetectionViewBuilder::scrolled)
